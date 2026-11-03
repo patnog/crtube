@@ -60,7 +60,7 @@ static const int SignedOutOrder[] = {
 };
 static const int SignedInOrder[]  = {
    HOME_ACCOUNT + ACCOUNT_FEED_HOME, HOME_ACCOUNT + ACCOUNT_FEED_SUBSCRIPTIONS, HOME_ACCOUNT + ACCOUNT_FEED_HISTORY,
-   HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER, HOME_SUBS, HOME_WATCHLATER, HOME_LOCAL_HISTORY,
+   HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER, HOME_SUBS, HOME_LOCAL_HISTORY, HOME_WATCHLATER,
    TREND_GAMING, TREND_SPORTS, TREND_PODCASTS,
 };
 
@@ -277,7 +277,7 @@ static void setHeading(void)
    // signed in, the account has its own Subscriptions and Watch Later, so name the PS3's copies apart
    const char *local = isSignedIn() ? " \xe2\x80\xa2 this PS3" : "";
    char heading[128];
-   if      (home.category == HOME_LOCAL_HISTORY) snprintf(heading, sizeof heading, "History this PS3");
+   if      (home.category == HOME_LOCAL_HISTORY) snprintf(heading, sizeof heading, "History%s", local);
    else if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY)
       snprintf(heading, sizeof heading, "%s", AccountNames[home.category - HOME_ACCOUNT]);
    else if (home.category == HOME_SUBS)       snprintf(heading, sizeof heading, "Subscriptions%s", local);
