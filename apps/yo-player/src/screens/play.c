@@ -767,7 +767,7 @@ static void initPlay(void)
    uiFont = openSystemFont(FONT_POP);
    initLabel(&statusLabel, &uiFont, 0, 0, state.screenW - 80, AUTO, playbackFontSize(28), activeTheme->textPrimary, TEXT_WRAP, "");
    for (int i = 0; i < STAT_LINES; i++)
-      initLabel(&statLabels[i], &uiFont, 0, 0, state.screenW - 100, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
+      initLabel(&statLabels[i], &uiFont, 0, 0, state.screenW - 100, AUTO, playbackSubtitleFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");
    initLabel(&timeLeftLabel,  &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabel(&timeRightLabel, &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabelRaw(&toastLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");   // raw: shows track names
@@ -1548,10 +1548,10 @@ static void updateStatLabels(void)
    setLabelText(&statLabels[1], line);
    if (state.audItag) {
       if (audioName && audioName[0])
-         snprintf(line, sizeof line, "Audio  itag %d   %s   AAC %d Hz   %d ch",
+         snprintf(line, sizeof line, "Audio  itag %d   %s\nAAC %d Hz   %d ch",
                   state.audItag, audioName, rate, channels);
       else
-         snprintf(line, sizeof line, "Audio  itag %d   AAC %d Hz   %d ch",
+         snprintf(line, sizeof line, "Audio  itag %d\nAAC %d Hz   %d ch",
                   state.audItag, rate, channels);
    } else {
       strCopy(line, sizeof line, "Audio  none");
@@ -1563,9 +1563,20 @@ static void updateStatLabels(void)
 
 static void drawStatsOverlay(void)
 {
-   int x = 40, y = 44, lineHeight = playbackFontSize(30);
-   fillGfxRectangle(x - 14, y - 12, state.screenW - 80, STAT_LINES * lineHeight + 14, activeTheme->badgeFill);
-   for (int i = 0; i < STAT_LINES; i++) drawLabelAt(&statLabels[i], x, y + i * lineHeight);
+   int x = 40, y = 44;
+   int lineHeight = playbackSubtitleFontSize(30);
+   int totalHeight = 0;
+   for (int i = 0; i < STAT_LINES; i++) {
+      int height = statLabels[i].tt.tex.h;
+      totalHeight += height > lineHeight ? height : lineHeight;
+      if (i + 1 < STAT_LINES) totalHeight += 4;
+   }
+   fillGfxRectangle(x - 14, y - 12, state.screenW - 80, totalHeight + 24, activeTheme->badgeFill);
+   for (int i = 0; i < STAT_LINES; i++) {
+      int height = statLabels[i].tt.tex.h;
+      drawLabelAt(&statLabels[i], x, y);
+      y += (height > lineHeight ? height : lineHeight) + 4;
+   }
 }
 
 // seek bar + time show while scrubbing / paused / ended, else auto-hide after the last activity
@@ -1832,8 +1843,14 @@ static void drawPlay(void)
 
    // until the first frame is presented (open, then the async resume seek's reload) keep the loading
    // status up instead of a black screen; with no player this shows the failure message.
-   if (!state.firstFrameSeen || state.audioSwitchThreadActive || state.resolutionSwitchThreadActive)
-      drawLabelAt(&statusLabel, state.screenW / 2 - statusLabel.tt.tex.w / 2, state.screenH / 2 - 14);
+   if (!state.firstFrameSeen || state.audioSwitchThreadActive || state.resolutionSwitchThreadActive) {
+      int statusX = state.screenW / 2 - statusLabel.tt.tex.w / 2;
+      int statusY = state.screenH / 2 - statusLabel.tt.tex.h / 2;
+      if (state.audioSwitchThreadActive)
+         drawBadge(&statusLabel, statusX - BADGE_PAD_X, statusY - 4);
+      else
+         drawLabelAt(&statusLabel, statusX, statusY);
+   }
 
    // Restore the selected library scale before the next screen is drawn.
    setGfxSdUiScale(selectedUiScale);
