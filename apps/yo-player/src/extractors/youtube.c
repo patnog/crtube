@@ -195,6 +195,33 @@ static const char *jsonObjectForKey(const char *from, const char *end, const cha
    return p;
 }
 
+// Emit a complete JSON object in bounded log lines. Keep chunks short enough
+// for the PS3 log bridge and include offsets so the object can be reconstructed.
+static void logJsonObject(const char *label, const char *start, const char *end)
+{
+   if (!start || !end || end <= start) {
+      logError("[yt] %s: unavailable\n", label);
+      return;
+   }
+
+   int total = (int)(end - start);
+   const int chunkSize = 180;
+   int chunks = (total + chunkSize - 1) / chunkSize;
+   logError("[yt] %s begin bytes=%d chunks=%d\n", label, total, chunks);
+
+   for (int offset = 0, part = 0; offset < total; offset += chunkSize, part++) {
+      int count = total - offset;
+      if (count > chunkSize) count = chunkSize;
+      char chunk[181];
+      memcpy(chunk, start + offset, count);
+      chunk[count] = 0;
+      logError("[yt] %s[%d/%d] offset=%d: %s\n",
+               label, part + 1, chunks, offset, chunk);
+   }
+
+   logError("[yt] %s end\n", label);
+}
+
 // Copy the first few string entries from a JSON string array (e.g. messages).
 static int jsonArrayStrings(const char *from, const char *end, const char *key,
                             char values[][192], int maxValues)
@@ -556,6 +583,99 @@ static void parseLiveManifest(const char *resp, const char *end, StreamInfo *out
 }
 
 // POST the player endpoint with one client identity, into resp. 0 on a 200 with a body, else negative.
+// Fetch using a client object supplied without its surrounding braces.
+static int fetchPlayerClient(const char *clientFields, const char *userAgent,
+                             const char *clientName, const char *clientVersion,
+                             const char *videoId, char *resp, int *respLen)
+{
+   char body[2048];
+   int bodyLen = snprintf(body, sizeof body,
+      "{\"context\":{\"client\":{%s,\"visitorData\":\"%s\"}},\"videoId\":\"%s\",\"contentCheckOk\":true,\"racyCheckOk\":true}",
+      clientFields, visitorData, videoId);
+   if (bodyLen < 0 || bodyLen >= (int)sizeof body) return -1;
+   HttpHeader headers[] = {
+      { "Content-Type", "application/json" },
+      { "User-Agent", userAgent },
+      { "X-YouTube-Client-Name", clientName },
+      { "X-YouTube-Client-Version", clientVersion },
+      { "X-Goog-Visitor-Id", visitorData },
+      { "Origin", "https://www.youtube.com" },
+      { "Accept-Encoding", "identity" },
+   };
+   int status = 0;
+   int rc = fetchHttp("POST", PLAYER_URL, headers, 7, body, bodyLen,
+                      resp, RESP_CAP, respLen, &status);
+   if (rc < 0) return rc;
+   if (status != 200) return -status;
+   return 0;
+}
+
+static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
+                                           int *respLen, StreamInfo *out)
+{
+   const struct {
+      const char *name;
+      const char *version;
+      const char *ua;
+      const char *fields;
+   } clients[] = {
+      { "WEB", WEB_VERSION, WEB_UA,
+        "\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"" },
+      { "ANDROID", "20.10.38", WEB_UA,
+        "\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\",\"androidSdkVersion\":34,\"hl\":\"en\",\"gl\":\"US\"" },
+      { "IOS", "20.10.4", WEB_UA,
+        "\"clientName\":\"IOS\",\"clientVersion\":\"20.10.4\",\"deviceMake\":\"Apple\",\"deviceModel\":\"iPhone16,2\",\"osName\":\"iPhone\",\"osVersion\":\"18.3.0.22D63\",\"hl\":\"en\",\"gl\":\"US\"" },
+      { "MWEB", WEB_VERSION, WEB_UA,
+        "\"clientName\":\"MWEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"" },
+      { "TVHTML5", WEB_VERSION, WEB_UA,
+        "\"clientName\":\"TVHTML5\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"" },
+      { "ANDROID_VR", LIVE_VERSION, LIVE_UA,
+        "\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"" LIVE_VERSION "\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"hl\":\"en\",\"gl\":\"US\"" },
+   };
+   const int count = (int)(sizeof clients / sizeof clients[0]);
+   for (int i = 0; i < count; i++) {
+      logInfo("[yt] UNPLAYABLE; retrying video=%s with client=%s\n", videoId, clients[i].name);
+      int rc = fetchPlayerClient(clients[i].fields, clients[i].ua,
+                                 (i == 0 ? "1" : i == 1 ? "3" : i == 2 ? "5" :
+                                  i == 3 ? "2" : i == 4 ? "7" : "28"),
+                                 clients[i].version, videoId, resp, respLen);
+      if (rc != 0) {
+         logError("[yt] retry client=%s request failed rc=%d\n", clients[i].name, rc);
+         continue;
+      }
+      const char *end = resp + *respLen;
+      const char *playEnd = NULL;
+      const char *play = jsonObjectForKey(resp, end, "playabilityStatus", &playEnd);
+      char status[48] = "";
+      if (play) jsonString(play, playEnd, "status", status, sizeof status);
+      logInfo("[yt] retry client=%s playability=%s respLen=%d\n",
+              clients[i].name, status[0] ? status : "(missing)", *respLen);
+      if (strcmp(status, "UNPLAYABLE") == 0) continue;
+
+      out->formatCount = 0;
+      parseFormats(resp, end, out);
+      if (out->formatCount > 0) {
+         const char *details = strstr(resp, "\"videoDetails\"");
+         if (details) {
+            if (!out->title[0]) jsonString(details, end, "title", out->title, sizeof out->title);
+            if (!out->description[0]) jsonString(details, end, "shortDescription", out->description, sizeof out->description);
+            if (out->durationSeconds <= 0) {
+               char lengthText[16];
+               if (jsonString(details, end, "lengthSeconds", lengthText, sizeof lengthText))
+                  out->durationSeconds = atoi(lengthText);
+            }
+         }
+         if (out->captionCount == 0) parseCaptionTracks(resp, end, out);
+         logInfo("[yt] retry succeeded client=%s formats=%d\n",
+                 clients[i].name, out->formatCount);
+         return 1;
+      }
+      logInfo("[yt] retry client=%s returned no supported formats\n", clients[i].name);
+   }
+   logError("[yt] all alternative clients failed for video=%s\n", videoId);
+   return 0;
+}
+
 static int fetchPlayer(const char *bodyFmt, const char *userAgent, const char *clientName,
                        const char *clientVersion, const char *videoId, char *resp, int *respLen)
 {
@@ -572,8 +692,15 @@ static int fetchPlayer(const char *bodyFmt, const char *userAgent, const char *c
    };
    int status = 0;
    int rc = fetchHttp("POST", PLAYER_URL, headers, 7, body, bodyLen, resp, RESP_CAP, respLen, &status);
-   if (rc < 0)        { logError("[yt] player POST failed rc=%d\n", rc); return rc; }
-   if (status != 200) { logError("[yt] player POST status=%d respLen=%d\n", status, *respLen); return -status; }
+   if (rc < 0) {
+      logError("[yt] player POST failed videoId=%s headerClientName=%s clientVersion=%s rc=%d bodyLen=%d\n",
+               videoId, clientName, clientVersion, rc, bodyLen);
+      return rc;
+   }
+   logInfo("[yt] player HTTP videoId=%s headerClientName=%s clientVersion=%s status=%d respLen=%d bodyLen=%d visitorData=%s\n",
+           videoId, clientName, clientVersion, status, *respLen, bodyLen,
+           visitorData[0] ? "present" : "absent");
+   if (status != 200) return -status;
    return 0;
 }
 
@@ -703,9 +830,18 @@ static int extract(const char *input, StreamInfo *out)
    if (!resp) return -1;
 
    int respLen = 0;
+   logInfo("[yt] resolve begin videoId=%s clientName=VISIONOS clientNameHeader=101 clientVersion=%s visitorData=%s\n",
+           videoId, PLAYER_VERSION, visitorData[0] ? "present" : "absent");
    int rc = fetchPlayer(PLAYER_BODY_FMT, PLAYER_UA, "101", PLAYER_VERSION, videoId, resp, &respLen);
-   if (rc != 0) { free(resp); return rc; }
+   if (rc != 0) {
+      logError("[yt] resolve request failed videoId=%s clientName=VISIONOS clientVersion=%s rc=%d\n",
+               videoId, PLAYER_VERSION, rc);
+      free(resp);
+      return rc;
+   }
    const char *end = resp + respLen;
+   logInfo("[yt] resolve response videoId=%s clientName=VISIONOS clientVersion=%s respLen=%d\n",
+           videoId, PLAYER_VERSION, respLen);
 
    // metadata, copied into out so it survives a live re-fetch overwriting resp below
    const char *details = strstr(resp, "\"videoDetails\"");
@@ -747,7 +883,29 @@ static int extract(const char *input, StreamInfo *out)
       parseLiveManifest(resp, end, out);
    }
 
+   // Retry alternate player clients only for VOD responses explicitly rejected as
+   // UNPLAYABLE by VISIONOS. Keep the normal VISIONOS path unchanged.
+   if (!liveNow && out->formatCount == 0) {
+      const char *playEnd = NULL;
+      const char *play = jsonObjectForKey(resp, end, "playabilityStatus", &playEnd);
+      char retryStatus[48] = "";
+      if (play) jsonString(play, playEnd, "status", retryStatus, sizeof retryStatus);
+      if (strcmp(retryStatus, "UNPLAYABLE") == 0 &&
+          retryUnplayableWithOtherClients(videoId, resp, &respLen, out)) {
+         end = resp + respLen;
+         logInfo("[yt] alternate client resolved videoId=%s formats=%d\\n",
+                 videoId, out->formatCount);
+      }
+   }
+
    if (out->formatCount == 0) {
+      const char *streamingData = strstr(resp, "\"streamingData\"");
+      const char *formats = streamingData ? strstr(streamingData, "\"formats\":[") : NULL;
+      const char *adaptive = streamingData ? strstr(streamingData, "\"adaptiveFormats\":[") : NULL;
+      logError("[yt] resolve parse videoId=%s streamingData=%d formats=%d adaptiveFormats=%d parsedFormatCount=%d\n",
+               videoId, streamingData && streamingData < end,
+               formats && formats < end, adaptive && adaptive < end, out->formatCount);
+
       char statusText[48] = "", reason[256] = "", errorReason[256] = "";
       char subreason[384] = "";
       char messages[3][192] = {{0}};
@@ -757,13 +915,14 @@ static int extract(const char *input, StreamInfo *out)
       if (play) {
          jsonString(play, playEnd, "reason", reason, sizeof reason);
          int messageCount = jsonArrayStrings(play, playEnd, "messages", messages, 3);
-         logError("[yt] no formats, respLen=%d playability=%s reason='%s'\n",
-                  respLen, statusText, reason);
+         logError("[yt] no formats videoId=%s clientName=VISIONOS clientVersion=%s respLen=%d playability=%s reason='%s'\n",
+                  videoId, PLAYER_VERSION, respLen, statusText, reason);
+         logJsonObject("playabilityStatus", play, playEnd);
          for (int i = 0; i < messageCount; i++)
             logError("[yt] playability message[%d]='%s'\n", i, messages[i]);
       } else {
-         logError("[yt] no formats, respLen=%d playability=%s (playabilityStatus missing)\n",
-                  respLen, statusText);
+         logError("[yt] no formats videoId=%s clientName=VISIONOS clientVersion=%s respLen=%d playabilityStatus=missing\n",
+                  videoId, PLAYER_VERSION, respLen);
       }
 
       const char *screenEnd = NULL;
@@ -772,6 +931,7 @@ static int extract(const char *input, StreamInfo *out)
       const char *renderer = screen ? jsonObjectForKey(screen, screenEnd,
                                       "playerErrorMessageRenderer", &rendererEnd) : NULL;
       if (renderer) {
+         logJsonObject("errorScreen.playerErrorMessageRenderer", renderer, rendererEnd);
          const char *subEnd = NULL;
          const char *sub = jsonObjectForKey(renderer, rendererEnd, "subreason", &subEnd);
          jsonString(renderer, rendererEnd, "reason", errorReason, sizeof errorReason);
@@ -786,8 +946,23 @@ static int extract(const char *input, StreamInfo *out)
          logError("[yt] errorScreen present; playerErrorMessageRenderer missing\n");
       }
       if (visitorFromDisk && strcmp(statusText, "LOGIN_REQUIRED") == 0) dropVisitorData();   // stale session
+
+      // Only retry VOD requests explicitly rejected by VISIONOS. Keep the normal
+      // VISIONOS path unchanged for every other response, and never route live
+      // requests through the VOD client fallback.
+      if (!liveNow && !strstr(input, "/live/") &&
+          !strstr(resp, "\"isLiveContent\":true") &&
+          strcmp(statusText, "UNPLAYABLE") == 0) {
+         logInfo("[yt] VISIONOS returned UNPLAYABLE; trying alternate VOD clients\n");
+         if (retryUnplayableWithOtherClients(videoId, resp, &respLen, out) > 0) {
+            logInfo("[yt] resolved videoId=%s with alternate client formats=%d\n",
+                    videoId, out->formatCount);
+            if (!visitorFromDisk) { saveVisitorData(); visitorFromDisk = 1; }
+         }
+      }
    } else {
-      logInfo("[yt] resolved %d formats\n", out->formatCount);
+      logInfo("[yt] resolved videoId=%s clientName=VISIONOS clientVersion=%s formats=%d\n",
+              videoId, PLAYER_VERSION, out->formatCount);
       if (!visitorFromDisk) { saveVisitorData(); visitorFromDisk = 1; }   // persist a session that works
    }
 
