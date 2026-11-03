@@ -818,6 +818,27 @@ int getNextVideoId(const char *videoId, char *nextVideoId, int nextVideoIdCap, c
    return 0;
 }
 
+static int isMembersOnlyResponse(const char *text)
+{
+   static const char *phrases[] = { "members-only", "members only", "membros" };
+   if (!text) return 0;
+   for (int k = 0; k < 3; k++) {
+      size_t n = strlen(phrases[k]);
+      for (const char *p = text; *p; p++) {
+         size_t i = 0;
+         while (i < n && p[i]) {
+            char a = p[i], b = phrases[k][i];
+            if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+            if (b >= 'A' && b <= 'Z') b = (char)(b + ('a' - 'A'));
+            if (a != b) break;
+            i++;
+         }
+         if (i == n) return 1;
+      }
+   }
+   return 0;
+}
+
 static int extract(const char *input, StreamInfo *out)
 {
    memset(out, 0, sizeof *out);
@@ -883,6 +904,8 @@ static int extract(const char *input, StreamInfo *out)
       parseLiveManifest(resp, end, out);
    }
 
+   int membersOnly = isMembersOnlyResponse(resp);
+
    // Retry alternate player clients only for VOD responses explicitly rejected as
    // UNPLAYABLE by VISIONOS. Keep the normal VISIONOS path unchanged.
    if (!liveNow && out->formatCount == 0) {
@@ -899,6 +922,7 @@ static int extract(const char *input, StreamInfo *out)
    }
 
    if (out->formatCount == 0) {
+      if (isMembersOnlyResponse(resp)) membersOnly = 1;
       const char *streamingData = strstr(resp, "\"streamingData\"");
       const char *formats = streamingData ? strstr(streamingData, "\"formats\":[") : NULL;
       const char *adaptive = streamingData ? strstr(streamingData, "\"adaptiveFormats\":[") : NULL;
@@ -966,8 +990,9 @@ static int extract(const char *input, StreamInfo *out)
       if (!visitorFromDisk) { saveVisitorData(); visitorFromDisk = 1; }   // persist a session that works
    }
 
+   if (out->formatCount == 0 && isMembersOnlyResponse(resp)) membersOnly = 1;
    free(resp);
-   return 0;
+   return membersOnly && out->formatCount == 0 ? -2 : 0;
 }
 
 // copy src into out as a json string body value, escaping " and \ (and dropping

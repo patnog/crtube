@@ -471,7 +471,11 @@ static void worker(uint64_t arg)
    if (!info || !extractor) { fail("unrecognised link or id"); goto done; }
 
    // resolve (stage stays STAGE_LOADING, set by initPlay's memset, until we adopt or fail)
-   if (extractor->extract(requestedInput, info) != 0 || info->formatCount == 0) { fail("resolve failed"); goto done; }
+   int extractResult = extractor->extract(requestedInput, info);
+   if (extractResult != 0 || info->formatCount == 0) {
+      fail(extractResult == -2 ? "This video is available to channel members only." : "resolve failed");
+      goto done;
+   }
    strCopy(state.title, sizeof state.title, info->title);
    strCopy(state.description, sizeof state.description, info->description);
    parseChapters(state.description, &state.chapters);
