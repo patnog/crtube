@@ -50,13 +50,18 @@ static const char *AccountNames[ACCOUNT_FEED_COUNT] = { "Recommended", "Subscrip
 #define HOME_WATCHLATER  (TREND_COUNT + 1)
 #define HOME_ACCOUNT     (TREND_COUNT + 2)                      // first account feed; + AccountFeed
 #define HOME_CAT_COUNT   (HOME_ACCOUNT + ACCOUNT_FEED_COUNT)
+#define HOME_LOCAL_HISTORY (HOME_ACCOUNT + ACCOUNT_FEED_COUNT)  // in-memory history for this app session
+#define LOCAL_HISTORY_CAP 32
 #define SUBS_PER_CHANNEL 8      // latest videos pulled from each subscribed channel
 
 // the L1/R1 cycle. signed out it is the original app's; signed in, the account feeds lead.
-static const int SignedOutOrder[] = { HOME_SUBS, HOME_WATCHLATER, TREND_GAMING, TREND_SPORTS, TREND_PODCASTS };
+static const int SignedOutOrder[] = {
+   HOME_SUBS, HOME_WATCHLATER, HOME_LOCAL_HISTORY, TREND_GAMING, TREND_SPORTS, TREND_PODCASTS
+};
 static const int SignedInOrder[]  = {
    HOME_ACCOUNT + ACCOUNT_FEED_HOME, HOME_ACCOUNT + ACCOUNT_FEED_SUBSCRIPTIONS, HOME_ACCOUNT + ACCOUNT_FEED_HISTORY,
-   HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER, HOME_SUBS, HOME_WATCHLATER, TREND_GAMING, TREND_SPORTS, TREND_PODCASTS,
+   HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER, HOME_SUBS, HOME_WATCHLATER, HOME_LOCAL_HISTORY,
+   TREND_GAMING, TREND_SPORTS, TREND_PODCASTS,
 };
 
 // each category's fully-loaded results, so returning to a tab skips the feed fetch (thumbnails still refetch).
@@ -66,6 +71,10 @@ static int           subsRevisionSeen;         // subscriptions revision the cac
 static int           watchLaterRevisionSeen;   // watch-later revision the cached HOME_WATCHLATER feed was built at
 static int           accountRevisionSeen;      // sign-in state the category order + account caches belong to
 static uint64_t      accountFeedRefreshUs[ACCOUNT_FEED_COUNT];
+
+// Videos that reached their first decoded frame in this application run. Kept in RAM only.
+static SearchResult  localHistory[LOCAL_HISTORY_CAP];
+static int           localHistoryCount;
 
 // Account feeds refresh periodically while visible. History is deliberately excluded here: it is
 // fetched fresh every time its tab is entered, regardless of its previous cache age.
@@ -214,10 +223,50 @@ static int fetchSubscriptions(SearchResults *out)
    return out->count > 0 ? 0 : -1;
 }
 
+static int fetchLocalHistory(SearchResults *out)
+{
+   memset(out, 0, sizeof *out);
+   out->count = localHistoryCount;
+   if (out->count > 0)
+      memcpy(out->items, localHistory, (size_t)out->count * sizeof out->items[0]);
+   return out->count > 0 ? 0 : -1;
+}
+
+void recordLocalHistory(const char *videoId, const char *title, const char *author)
+{
+   if (!videoId || !videoId[0]) return;
+
+   // Re-watching a video moves it to the top instead of creating a duplicate.
+   for (int i = 0; i < localHistoryCount; i++) {
+      if (strcmp(localHistory[i].videoId, videoId) == 0) {
+         if (i + 1 < localHistoryCount)
+            memmove(&localHistory[i], &localHistory[i + 1],
+                    (size_t)(localHistoryCount - i - 1) * sizeof localHistory[0]);
+         localHistoryCount--;
+         break;
+      }
+   }
+
+   if (localHistoryCount == LOCAL_HISTORY_CAP) localHistoryCount--;
+   if (localHistoryCount > 0)
+      memmove(localHistory + 1, localHistory,
+              (size_t)localHistoryCount * sizeof localHistory[0]);
+
+   memset(&localHistory[0], 0, sizeof localHistory[0]);
+   strCopy(localHistory[0].videoId, sizeof localHistory[0].videoId, videoId);
+   strCopy(localHistory[0].title, sizeof localHistory[0].title,
+           title && title[0] ? title : "Untitled video");
+   strCopy(localHistory[0].author, sizeof localHistory[0].author, author ? author : "");
+   strCopy(localHistory[0].published, sizeof localHistory[0].published, "This session");
+   localHistoryCount++;
+}
+
 static int homeFetch(const char *token, SearchResults *out, void *user)
 {
    (void)user;
-   if (home.category >= HOME_ACCOUNT)    return getAccountFeed((AccountFeed)(home.category - HOME_ACCOUNT), token, out);
+   if (home.category == HOME_LOCAL_HISTORY) return fetchLocalHistory(out);
+   if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY)
+      return getAccountFeed((AccountFeed)(home.category - HOME_ACCOUNT), token, out);
    if (home.category == HOME_SUBS)       return fetchSubscriptions(out);
    if (home.category == HOME_WATCHLATER) return getWatchLater(out) > 0 ? 0 : -1;
    return getTrending(home.category, token, out);
@@ -228,7 +277,9 @@ static void setHeading(void)
    // signed in, the account has its own Subscriptions and Watch Later, so name the PS3's copies apart
    const char *local = isSignedIn() ? " \xe2\x80\xa2 this PS3" : "";
    char heading[128];
-   if      (home.category >= HOME_ACCOUNT)    snprintf(heading, sizeof heading, "%s", AccountNames[home.category - HOME_ACCOUNT]);
+   if      (home.category == HOME_LOCAL_HISTORY) snprintf(heading, sizeof heading, "History this PS3");
+   else if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY)
+      snprintf(heading, sizeof heading, "%s", AccountNames[home.category - HOME_ACCOUNT]);
    else if (home.category == HOME_SUBS)       snprintf(heading, sizeof heading, "Subscriptions%s", local);
    else if (home.category == HOME_WATCHLATER) snprintf(heading, sizeof heading, "Watch Later%s", local);
    else                                       snprintf(heading, sizeof heading, "Trending \xe2\x80\xa2 %s", TrendingNames[home.category]);
@@ -237,8 +288,8 @@ static void setHeading(void)
 
 static void refreshCurrentCategory(void)
 {
-   categoryCached[home.category] = 0;
-   if (home.category >= HOME_ACCOUNT) {
+   if (home.category < HOME_CAT_COUNT) categoryCached[home.category] = 0;
+   if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY) {
       int feed = home.category - HOME_ACCOUNT;
       accountFeedRefreshUs[feed] = getTimeUs();
    }
@@ -249,7 +300,11 @@ static void refreshCurrentCategory(void)
 static void loadCategory(void)
 {
    setHeading();
-   if (home.category >= HOME_ACCOUNT) {
+   if (home.category == HOME_LOCAL_HISTORY) {
+      setGridSource(&home.grid, homeFetch, NULL);
+      return;
+   }
+   if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY) {
       int feed = home.category - HOME_ACCOUNT;
       uint64_t now = getTimeUs();
       uint64_t last = accountFeedRefreshUs[feed];
@@ -271,6 +326,7 @@ static void loadCategory(void)
 // cache the current category (only when it's fully loaded) so returning to it is instant.
 static void cacheCurrent(void)
 {
+   if (home.category == HOME_LOCAL_HISTORY) return;
    if (gridStage(&home.grid) != GRID_READY || gridBusy(&home.grid)) return;   // don't copy mid-append
    categoryCache[home.category] = *gridResults(&home.grid);
    categoryCached[home.category] = 1;
@@ -505,7 +561,8 @@ static void updateHome(void)
    else if (isPadButtonPressed(PAD_BTN_L1)) { switchCategory(-1); return; }
 
    updateVideoGrid(&home.grid);
-   if (home.category >= HOME_ACCOUNT && gridStage(&home.grid) == GRID_READY && !home.grid.threadActive) {
+   if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY &&
+       gridStage(&home.grid) == GRID_READY && !home.grid.threadActive) {
       int feed = home.category - HOME_ACCOUNT;
       uint64_t now = getTimeUs();
       if (feed != ACCOUNT_FEED_HISTORY && accountFeedRefreshUs[feed] &&
@@ -581,6 +638,10 @@ static void suspendHome(void) { stopVideoGrid(&home.grid); }   // free the http 
 // already-loaded grid is kept as-is (instant, thumbnails intact).
 static void resumeHome(void)
 {
+   if (home.category == HOME_LOCAL_HISTORY) {
+      loadCategory();
+      return;
+   }
    if (home.category == HOME_ACCOUNT + ACCOUNT_FEED_HISTORY) {
       loadCategory();
       return;

@@ -10,6 +10,7 @@
 // the UI thread adopts the built player and pulls frames each render frame.
 
 #include "screens/play.h"
+#include "screens/home.h"
 #include "extractor.h"
 #include "stream-select.h"   // pickBestVideo / pickBestAudio (shared with download)
 
@@ -211,6 +212,7 @@ static struct {
    VideoPlayer     *player;
    int              screenW, screenH;
    int              firstFrameSeen;   // a real frame has been presented (loading status ends, save is safe)
+   int              historyRecorded;  // prevents duplicates after resolution switches
    int              showStats;        // R3 toggles a debug overlay
    char             title[256];        // resolved video title (worker sets, UI reads after adoption)
    char             author[128];       // resolved channel name
@@ -1861,7 +1863,15 @@ static void drawPlay(void)
       int w, h;
       frame = getVideoFrame(state.player, &w, &h);
       if (frame) {
-         if (!state.firstFrameSeen) showControls();   // bring up the HUD as playback starts; it auto-hides as usual
+         if (!state.firstFrameSeen) {
+            showControls();   // bring up the HUD as playback starts; it auto-hides as usual
+            if (!state.historyRecorded) {
+               char videoId[12];
+               if (extractPlaybackId(requestedInput, videoId))
+                  recordLocalHistory(videoId, state.title, state.author);
+               state.historyRecorded = 1;
+            }
+         }
          state.firstFrameSeen = 1;
          int dx, dy, dw, dh;
          if (cropToFillEnabled) getCropToFillRect(w, h, &dx, &dy, &dw, &dh);
