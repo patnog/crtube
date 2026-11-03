@@ -49,6 +49,7 @@
 #define SEEK_STEP_SECONDS   5.0f
 #define SEEK_APPLY_IDLE_US  400000ULL
 #define CONTROLS_VISIBLE_US 2000000ULL
+#define HUD_VISIBLE_US      3000000ULL
 #define TOAST_VISIBLE_US    2000000ULL   // how long a toast ("Skipped ...", "Subtitles: ...") stays up
 #define AUTOPLAY_NOTICE_US  3000000ULL
 #define AUTOPLAY_THUMB_CAP  (128 * 1024)
@@ -274,7 +275,8 @@ static struct {
    int              seeking;
    float            seekTarget;
    uint64_t         lastSeekInputUs;
-   uint64_t         controlsShownUs;   // last activity, for the bar/time auto-hide
+   uint64_t         controlsShownUs;   // last seek-bar activity
+   uint64_t         hudShownUs;        // last L2 full-HUD request
 
    // sponsorblock: fetched on a side thread (in parallel with resolve/open), then auto-skipped during
    // playback and drawn on the seek bar. sbReady goes up once the thread is reaped and segments are safe.
@@ -322,6 +324,8 @@ static int volumeLevel = VOLUME_DEFAULT;
 // Playback display preference: deliberately outside `state` so it survives between videos.
 // It starts OFF on application launch and is toggled with R2 during playback.
 static int cropToFillEnabled;
+// In-memory subtitle preference: survives video changes, resets when the app exits.
+static char preferredSubtitleName[64];
 
 static const StreamFormat *pickAudioForTrack(const StreamInfo *info, const char *trackId)
 {
@@ -485,6 +489,19 @@ static void worker(uint64_t arg)
    for (int i = 0; i < info->captionCount; i++)   // keep only tracks the system font can render
       if (isRenderableSubtitleLanguage(info->captions[i].languageCode))
          state.captionTracks[state.captionCount++] = info->captions[i];
+
+   // Re-enable the same subtitle track on the next video, matching its displayed language name.
+   if (preferredSubtitleName[0]) {
+      int found = 0;
+      for (int i = 0; i < state.captionCount; i++) {
+         if (strcmp(state.captionTracks[i].name, preferredSubtitleName) == 0) {
+            state.subtitlePick = i;
+            found = 1;
+            break;
+         }
+      }
+      if (!found) preferredSubtitleName[0] = 0;
+   }
 
    const StreamFormat *video = pickBestVideo(info);
    if (!video) { fail("no playable mp4 video"); goto done; }
@@ -724,6 +741,14 @@ static int playbackFontSize(int baseSize)
    return size > 0 ? size : 1;
 }
 
+static int playbackSubtitleFontSize(int baseSize)
+{
+   // At UI scale 1.5x, subtitles should be only 1.25x the default size,
+   // not 1.25x on top of the general 1.5x playback font scaling.
+   int size = playbackFontScale >= 1.5f ? (baseSize * 5 + 2) / 4 : baseSize;
+   return size > 0 ? size : 1;
+}
+
 static int playbackChapterRowHeight(void)
 {
    int scaled = playbackFontSize(CHAPTER_TEXT_SIZE) * 3 / 2;
@@ -750,7 +775,7 @@ static void initPlay(void)
    initLabelRaw(&authorLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(20), activeTheme->textSecondary, TEXT_WRAP, "");
    initLabelRaw(&nextNoticeHeadingLabel, &uiFont, 0, 0, 500, AUTO, playbackFontSize(22), activeTheme->accent, TEXT_NOWRAP, "NEXT VIDEO");
    initLabelRaw(&nextNoticeTitleLabel, &uiFont, 0, 0, 1040, AUTO, playbackFontSize(30), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
-   initLabelRaw(&subtitleLabel, &uiFont, 0, 0, state.screenW - 160, AUTO, playbackFontSize(SUBTITLE_TEXT_SIZE), activeTheme->textPrimary, TEXT_WRAP, "");
+   initLabelRaw(&subtitleLabel, &uiFont, 0, 0, state.screenW - 160, AUTO, playbackSubtitleFontSize(SUBTITLE_TEXT_SIZE), activeTheme->textPrimary, TEXT_WRAP, "");
    initLabelRaw(&playbackInfoLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");
    for (int i = 0; i < MAX_CHAPTERS; i++) {
       initLabelRaw(&chapterLabels[i], &uiFont, 0, 0, 990, AUTO, playbackFontSize(CHAPTER_TEXT_SIZE), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
@@ -772,6 +797,13 @@ static void initPlay(void)
 }
 
 static void showControls(void) { state.controlsShownUs = sys_time_get_system_time(); }
+
+static void showFullPlaybackHud(void)
+{
+   uint64_t now = sys_time_get_system_time();
+   state.controlsShownUs = now;
+   state.hudShownUs = now;
+}
 
 // Rebuild the right-side playback HUD only on input/state changes, never in the render loop.
 static void refreshPlaybackInfoHud(void)
@@ -809,7 +841,6 @@ static void showToast(const char *text)
 {
    setLabelText(&toastLabel, text);
    state.toastShownUs = sys_time_get_system_time();
-   showControls();
 }
 
 // fetches the picked caption track in the background; updatePlay reaps it and respawns on a new pick.
@@ -829,11 +860,18 @@ static void cycleSubtitles(void)
    // live captions use a rolling delivery our fetcher can't parse, so live streams count as none
    if (state.captionCount == 0 || state.isLive) { showToast("No subtitles"); return; }
    state.subtitlePick = state.subtitlePick + 1 < state.captionCount ? state.subtitlePick + 1 : -1;
+   if (state.subtitlePick >= 0)
+      strCopy(preferredSubtitleName, sizeof preferredSubtitleName, state.captionTracks[state.subtitlePick].name);
+   else
+      preferredSubtitleName[0] = 0;
 
    setLabelText(&subtitleLabel, "");   // clear the old track's cue; the new one repopulates once fetched
 
    refreshPlaybackInfoHud();
-   showControls();
+   char notice[96];
+   if (state.subtitlePick >= 0) snprintf(notice, sizeof notice, "Subtitles: %s", state.captionTracks[state.subtitlePick].name);
+   else strCopy(notice, sizeof notice, "Subtitles: OFF");
+   showToast(notice);
 }
 
 static void audioSwitchWorker(uint64_t arg)
@@ -1059,7 +1097,7 @@ static void handlePlaybackInput(void)
 
    if (isPadButtonPressed(PAD_BTN_L2)) {
       refreshPlaybackInfoHud();
-      showControls();
+      showFullPlaybackHud();
    }
 
    if (isPadButtonPressed(PAD_BTN_R2)) {
@@ -1436,6 +1474,7 @@ static void updatePlay(void)
       else if (state.subtitleTrack->count == 0) {   // fetch failed or empty track: drop to Off, visibly
          state.subtitlePick = state.subtitleFetched = -1;
          state.subtitlesReady = 0;
+         preferredSubtitleName[0] = 0;
          refreshPlaybackInfoHud();
          showToast("Subtitles unavailable");
       }
@@ -1532,8 +1571,15 @@ static void drawStatsOverlay(void)
 // seek bar + time show while scrubbing / paused / ended, else auto-hide after the last activity
 static int controlsVisible(void)
 {
+   uint64_t now = sys_time_get_system_time();
    if (isVideoPaused(state.player) || isVideoEnded(state.player) || state.seeking) return 1;
-   return state.controlsShownUs != 0 && sys_time_get_system_time() - state.controlsShownUs < CONTROLS_VISIBLE_US;
+   if (state.hudShownUs != 0 && now - state.hudShownUs < HUD_VISIBLE_US) return 1;
+   return state.controlsShownUs != 0 && now - state.controlsShownUs < CONTROLS_VISIBLE_US;
+}
+
+static int fullPlaybackHudVisible(void)
+{
+   return state.hudShownUs != 0 && sys_time_get_system_time() - state.hudShownUs < HUD_VISIBLE_US;
 }
 
 // paint each sponsor segment onto the bar in its category colour, over the progress fill so it stays
@@ -1676,7 +1722,11 @@ static void drawChapters(void)
 static void drawToast(void)
 {
    if (state.toastShownUs == 0 || sys_time_get_system_time() - state.toastShownUs >= TOAST_VISIBLE_US) return;
-   drawBadge(&toastLabel, state.screenW - 40 - (toastLabel.tt.tex.w + 2 * BADGE_PAD_X), 80);
+   int y = fullPlaybackHudVisible() && playbackInfoLabel.tt.tex.h > 0
+         ? 32 + playbackInfoLabel.tt.tex.h + 20 : 80;
+   int maxY = state.screenH - toastLabel.tt.tex.h - 2 * BADGE_PAD_X - 8;
+   if (y > maxY) y = maxY;
+   drawBadge(&toastLabel, state.screenW - 40 - (toastLabel.tt.tex.w + 2 * BADGE_PAD_X), y);
 }
 
 // Fill the display while preserving the source aspect ratio. Any excess image area is
@@ -1769,6 +1819,8 @@ static void drawPlay(void)
       int overlayUp = state.chaptersVisible || state.descriptionVisible;   // a full-screen overlay hides the HUD noise
       if (state.stage == STAGE_PLAYING && controlsVisible() && !overlayUp) {
          if (!state.isLive) drawSeekBar();   // live has no timeline
+      }
+      if (state.stage == STAGE_PLAYING && fullPlaybackHudVisible() && !overlayUp) {
          drawTitle();
          drawPlaybackInfoHud();
       }
