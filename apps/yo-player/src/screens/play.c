@@ -324,6 +324,10 @@ static int volumeLevel = VOLUME_DEFAULT;
 // Playback display preference: deliberately outside `state` so it survives between videos.
 // It starts OFF on application launch and is toggled with R2 during playback.
 static int cropToFillEnabled;
+// Normalized pan position for the excess crop area; zero keeps the image centred.
+static float cropPanX;
+static float cropPanY;
+static uint64_t cropPanLastUpdateUs;
 // In-memory subtitle preference: survives video changes, resets when the app exits.
 static char preferredSubtitleName[64];
 
@@ -762,6 +766,8 @@ static void initPlay(void)
    state.screenW = getGfxScreenWidth();
    state.screenH = getGfxScreenHeight();
    playbackFontScale = getGfxUiScaleFactor();
+   cropPanX = cropPanY = 0.0f;
+   cropPanLastUpdateUs = sys_time_get_system_time();
    if (playbackFontScale < 1.0f) playbackFontScale = 1.0f;
 
    uiFont = openSystemFont(FONT_POP);
@@ -1089,6 +1095,8 @@ static void nudgeSeek(float deltaSeconds, uint64_t nowUs)
 }
 
 // left/right scrub, cross toggles pause (restarts if the video ended). only once playing.
+static void updateCropPan(void);
+
 static void handlePlaybackInput(void)
 {
    if (state.audioSwitchThreadActive || state.resolutionSwitchThreadActive)
@@ -1100,8 +1108,11 @@ static void handlePlaybackInput(void)
       showFullPlaybackHud();
    }
 
+   updateCropPan();
+
    if (isPadButtonPressed(PAD_BTN_R2)) {
       cropToFillEnabled = !cropToFillEnabled;
+      cropPanX = cropPanY = 0.0f;
       showToast(cropToFillEnabled ? "Crop to fill: ON" : "Crop to fill: OFF");
    }
 
@@ -1742,6 +1753,36 @@ static void drawToast(void)
 
 // Fill the display while preserving the source aspect ratio. Any excess image area is
 // positioned outside the screen and clipped by the RSX viewport (a centred crop).
+static float clampCropPan(float value)
+{
+   if (value < -1.0f) return -1.0f;
+   if (value >  1.0f) return  1.0f;
+   return value;
+}
+
+// The right stick moves the oversized image within the crop window. The normalized
+// offset is retained while playing and only affects the axis that actually overflows.
+static void updateCropPan(void)
+{
+   uint64_t now = sys_time_get_system_time();
+   float elapsed = cropPanLastUpdateUs ? (float)(now - cropPanLastUpdateUs) / 1000000.0f : 0.0f;
+   cropPanLastUpdateUs = now;
+   if (elapsed > 0.05f) elapsed = 0.05f;
+   if (!cropToFillEnabled || elapsed <= 0.0f) return;
+
+   Stick stick = getPadRightStick();
+   const int deadZone = 20;
+   float x = 0.0f, y = 0.0f;
+   if (stick.x > deadZone) x = (float)(stick.x - deadZone) / (127 - deadZone);
+   else if (stick.x < -deadZone) x = (float)(stick.x + deadZone) / (127 - deadZone);
+   if (stick.y > deadZone) y = (float)(stick.y - deadZone) / (127 - deadZone);
+   else if (stick.y < -deadZone) y = (float)(stick.y + deadZone) / (127 - deadZone);
+
+   // Full travel takes roughly 1.6 seconds at maximum stick deflection.
+   cropPanX = clampCropPan(cropPanX - x * 1.25f * elapsed);
+   cropPanY = clampCropPan(cropPanY - y * 1.25f * elapsed);
+}
+
 static void getCropToFillRect(int frameW, int frameH, int *dx, int *dy, int *dw, int *dh)
 {
    float frameAspect = (float)frameW / (float)frameH;
@@ -1750,13 +1791,15 @@ static void getCropToFillRect(int frameW, int frameH, int *dx, int *dy, int *dw,
    if (frameAspect > screenAspect) {
       *dh = state.screenH;
       *dw = (int)(state.screenH * frameAspect + 0.5f);
-      *dx = (state.screenW - *dw) / 2;
+      int excess = *dw - state.screenW;
+      *dx = (state.screenW - *dw) / 2 + (int)(cropPanX * excess / 2.0f);
       *dy = 0;
    } else {
       *dw = state.screenW;
       *dh = (int)(state.screenW / frameAspect + 0.5f);
+      int excess = *dh - state.screenH;
       *dx = 0;
-      *dy = (state.screenH - *dh) / 2;
+      *dy = (state.screenH - *dh) / 2 + (int)(cropPanY * excess / 2.0f);
    }
 }
 
@@ -1858,6 +1901,8 @@ static void drawPlay(void)
 
 static void termPlay(void)
 {
+   cropPanX = cropPanY = 0.0f;
+   cropPanLastUpdateUs = 0;
    // Wake worker threads blocked in TLS connect/read before joining them. Without this, leaving during
    // a slow YouTube resolve can make the screen manager wait through several 10-second socket timeouts.
    setHttpRequestsCancelled(1);
