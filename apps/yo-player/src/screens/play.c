@@ -345,6 +345,112 @@ static void fail(const char *reason)
    state.stage = STAGE_FAILED;
 }
 
+// Wait for the decoder/audio pipeline to produce a usable pre-roll. This runs on the
+// playback worker, never on the UI thread. A timeout is treated as a failed rendition
+// and allows the diagnostic fallback to try another format.
+static int waitForInitialPlayerReady(VideoPlayer *player, unsigned timeoutMs)
+{
+   uint64_t started = sys_time_get_system_time();
+   while (player && !isVideoPlayerReady(player) &&
+          sys_time_get_system_time() - started < (uint64_t)timeoutMs * 1000ull)
+      sleepMs(50);
+   return player && isVideoPlayerReady(player);
+}
+
+static int fallbackFormatUsable(const StreamFormat *f)
+{
+   if (!f || !f->hasVideo || f->needsCipher || !f->url[0]) return 0;
+   if (strcmp(f->container, "mp4") != 0) return 0;
+   if (f->height <= 0 || f->height > 1080 || f->fps <= 0 || f->fps > 60) return 0;
+   if (f->height > 720 && f->fps > 30) return 0;
+   return 1;
+}
+
+static const StreamFormat *findFallbackItag(const StreamInfo *info, int itag)
+{
+   for (int i = 0; i < info->formatCount; i++)
+      if (info->formats[i].itag == itag && fallbackFormatUsable(&info->formats[i]))
+         return &info->formats[i];
+   return NULL;
+}
+
+// Try the normal resolver pick first. If it cannot produce a decoded pre-roll,
+// test muxed MP4 and progressively higher adaptive AVC candidates. The successful
+// candidate becomes the actual initial stream; the regular selector remains unchanged.
+static VideoPlayer *openInitialWithFallback(const StreamInfo *info,
+                                             const StreamFormat **selectedVideo,
+                                             const StreamFormat **selectedAudio,
+                                             int allowFallback)
+{
+   const StreamFormat *video = *selectedVideo;
+   const StreamFormat *audio = *selectedAudio;
+   const char *audioUrl = (video->hasAudio || !audio) ? NULL : audio->url;
+   VideoPlayer *player;
+
+   logInfo("[yt-fallback] primary attempt itag=%d audio=%d urlLen=%d audioUrlLen=%d\n",
+           video->itag, video->hasAudio ? video->itag : (audio ? audio->itag : 0),
+           (int)strlen(video->url), audioUrl ? (int)strlen(audioUrl) : 0);
+   player = createVideoPlayerSplit(video->url, audioUrl, allocGfxVideoBuffer, freeGfxVideoBuffer);
+   if (player && (!allowFallback || waitForInitialPlayerReady(player, 10000))) {
+      if (allowFallback) logInfo("[yt-fallback] primary ready itag=%d\n", video->itag);
+      return player;
+   }
+   if (player) {
+      logWarn("[yt-fallback] primary not ready after 10000ms itag=%d\n", video->itag);
+      destroyVideoPlayer(player);
+   } else {
+      logWarn("[yt-fallback] primary open failed itag=%d\n", video->itag);
+   }
+   if (!allowFallback) return NULL;
+
+   // Test the known muxed and AVC renditions first, then any other compatible MP4
+   // video formats. Keep the list bounded so one bad video cannot stall playback forever.
+   static const int preferredItags[] = { 18, 134, 135, 136, 137 };
+   const StreamFormat *attempts[12];
+   int count = 0;
+   for (int i = 0; i < (int)(sizeof preferredItags / sizeof preferredItags[0]); i++) {
+      const StreamFormat *f = findFallbackItag(info, preferredItags[i]);
+      if (!f || f == video || strcmp(f->url, video->url) == 0) continue;
+      int duplicate = 0;
+      for (int j = 0; j < count; j++) if (strcmp(attempts[j]->url, f->url) == 0) duplicate = 1;
+      if (!duplicate && count < (int)(sizeof attempts / sizeof attempts[0])) attempts[count++] = f;
+   }
+   for (int i = 0; i < info->formatCount && count < (int)(sizeof attempts / sizeof attempts[0]); i++) {
+      const StreamFormat *f = &info->formats[i];
+      if (!fallbackFormatUsable(f) || f == video || strcmp(f->url, video->url) == 0) continue;
+      int duplicate = 0;
+      for (int j = 0; j < count; j++) if (strcmp(attempts[j]->url, f->url) == 0) duplicate = 1;
+      if (!duplicate) attempts[count++] = f;
+   }
+
+   for (int i = 0; i < count; i++) {
+      const StreamFormat *candidate = attempts[i];
+      const char *candidateAudio = (candidate->hasAudio || !audio) ? NULL : audio->url;
+      logInfo("[yt-fallback] attempt=%d/%d videoItag=%d %dx%d fps=%d muxed=%d audioItag=%d\n",
+              i + 1, count, candidate->itag, candidate->width, candidate->height,
+              candidate->fps, candidate->hasAudio,
+              candidate->hasAudio ? candidate->itag : (audio ? audio->itag : 0));
+      player = createVideoPlayerSplit(candidate->url, candidateAudio,
+                                      allocGfxVideoBuffer, freeGfxVideoBuffer);
+      if (!player) {
+         logWarn("[yt-fallback] open failed itag=%d\n", candidate->itag);
+         continue;
+      }
+      if (!waitForInitialPlayerReady(player, 8000)) {
+         logWarn("[yt-fallback] pre-roll timeout itag=%d after 8000ms\n", candidate->itag);
+         destroyVideoPlayer(player);
+         continue;
+      }
+      *selectedVideo = candidate;
+      *selectedAudio = candidate->hasAudio ? NULL : audio;
+      logInfo("[yt-fallback] SUCCESS videoItag=%d audioItag=%d\n",
+              candidate->itag, candidate->hasAudio ? candidate->itag : (audio ? audio->itag : 0));
+      return player;
+   }
+   logError("[yt-fallback] exhausted: no candidate reached decoded pre-roll\n");
+   return NULL;
+}
+
 // only languages FONT_POP renders reliably (hardware-checked: western/central europe + japanese fine,
 // vietnamese diacritics broken). prefix match, so "en-GB" passes as "en". extend after testing a new
 // language on the console.
@@ -506,9 +612,12 @@ static void worker(uint64_t arg)
    if (state.audioPick >= 0 && state.audioPick < state.audioCount) snprintf(state.message, sizeof state.message, "Loading audio: %s", state.audioNames[state.audioPick]);
    state.isLive = video->isLiveSegmented;
 
-   // Open both streams. A failed separate audio open still permits silent video playback.
-   state.pendingPlayer = createVideoPlayerSplit(video->url, audio ? audio->url : NULL, allocGfxVideoBuffer, freeGfxVideoBuffer);
-   if (!state.pendingPlayer) { fail("couldn't open stream"); goto done; }
+   // Open the resolver's normal pick first. For VOD only, wait for a decoded pre-roll;
+   // if that rendition cannot become ready, automatically test muxed/AVC alternatives.
+   // Live playback keeps the existing non-blocking startup path because segmented live
+   // streams have different readiness and retry behaviour.
+   state.pendingPlayer = openInitialWithFallback(info, &video, &audio, !info->isLive && !video->isLiveSegmented);
+   if (!state.pendingPlayer) { fail("primary and fallback streams failed"); goto done; }
 
    // resume where we left off. seekVideoPlayer only posts the target; the decode thread does the
    // reconnect + fragment reload. drawPlay keeps the "Loading..." status up until the first frame is
