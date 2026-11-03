@@ -46,6 +46,7 @@ typedef struct {
    int  isLive;            // currently broadcasting: streams need live segment-sequence fetching, not a static moov
    int  formatCount;
    StreamFormat formats[MAX_STREAM_FORMATS];
+   char author[128];       // owning channel name (appended to preserve existing field offsets)
 } StreamInfo;
 
 // accumulated across pages (infinite scroll); one page is ~20. only the ~30 on-screen tiles hold a

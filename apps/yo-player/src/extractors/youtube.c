@@ -658,6 +658,7 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
          const char *details = strstr(resp, "\"videoDetails\"");
          if (details) {
             if (!out->title[0]) jsonString(details, end, "title", out->title, sizeof out->title);
+            if (!out->author[0]) jsonString(details, end, "author", out->author, sizeof out->author);
             if (!out->description[0]) jsonString(details, end, "shortDescription", out->description, sizeof out->description);
             if (out->durationSeconds <= 0) {
                char lengthText[16];
@@ -867,6 +868,7 @@ static int extract(const char *input, StreamInfo *out)
    // metadata, copied into out so it survives a live re-fetch overwriting resp below
    const char *details = strstr(resp, "\"videoDetails\"");
    jsonString(details ? details : resp, end, "title", out->title, sizeof out->title);
+   jsonString(details ? details : resp, end, "author", out->author, sizeof out->author);
    jsonString(details ? details : resp, end, "shortDescription", out->description, sizeof out->description);
    char lenText[16];
    if (jsonString(details ? details : resp, end, "lengthSeconds", lenText, sizeof lenText))

@@ -212,6 +212,7 @@ static struct {
    int              firstFrameSeen;   // a real frame has been presented (loading status ends, save is safe)
    int              showStats;        // R3 toggles a debug overlay
    char             title[256];        // resolved video title (worker sets, UI reads after adoption)
+   char             author[128];       // resolved channel name
    char             description[2048]; // resolved video description (worker sets, UI reads after adoption)
 
    // description overlay: the text is rasterised once, on first open, into one tall texture that
@@ -305,11 +306,12 @@ static Label statusLabel;
 static Label statLabels[STAT_LINES];
 static Label timeLeftLabel, timeRightLabel;   // seek bar: current time (left) / total (right)
 static Label toastLabel;                      // brief centred toast ("Skipped ...", "Subtitles: ...")
-static Label titleLabel;                      // video title, top-left while the seek bar is up
+static Label titleLabel;                      // video title, top-left while the HUD is visible
+static Label authorLabel;                     // channel name below the title
 static Label nextNoticeHeadingLabel;           // "next video" notice heading
 static Label nextNoticeTitleLabel;             // selected autoplay video title
 static Label subtitleLabel;                   // active subtitle cue, above the seek bar
-static Label subsHudLabel;                    // chosen subtitle language, top-right while the HUD is up
+static Label playbackInfoLabel;               // resolution, current audio and active subtitles, top-right
 static Label chapterLabels[MAX_CHAPTERS];     // chapter titles (picker overlay rows)
 static Label chapterTimeLabels[MAX_CHAPTERS]; // chapter start times, right-aligned in their own column
 static TextTexture descriptionTexture;        // whole description as one tall texture (scrolled by draw)
@@ -477,6 +479,7 @@ static void worker(uint64_t arg)
       goto done;
    }
    strCopy(state.title, sizeof state.title, info->title);
+   strCopy(state.author, sizeof state.author, info->author);
    strCopy(state.description, sizeof state.description, info->description);
    parseChapters(state.description, &state.chapters);
    for (int i = 0; i < info->captionCount; i++)   // keep only tracks the system font can render
@@ -724,11 +727,12 @@ static void initPlay(void)
    initLabel(&timeLeftLabel,  &uiFont, 0, 0, 200, AUTO, 22, activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabel(&timeRightLabel, &uiFont, 0, 0, 200, AUTO, 22, activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabelRaw(&toastLabel, &uiFont, 0, 0, 400, AUTO, 22, activeTheme->textPrimary, TEXT_NOWRAP, "");   // raw: shows track names
-   initLabelRaw(&titleLabel, &uiFont, 0, 0, 1100, AUTO, 22, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
+   initLabelRaw(&titleLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, 22, activeTheme->textPrimary, TEXT_WRAP, "");
+   initLabelRaw(&authorLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, 20, activeTheme->textSecondary, TEXT_WRAP, "");
    initLabelRaw(&nextNoticeHeadingLabel, &uiFont, 0, 0, 500, AUTO, 22, activeTheme->accent, TEXT_NOWRAP, "NEXT VIDEO");
    initLabelRaw(&nextNoticeTitleLabel, &uiFont, 0, 0, 1040, AUTO, 30, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabelRaw(&subtitleLabel, &uiFont, 0, 0, state.screenW - 160, AUTO, SUBTITLE_TEXT_SIZE, activeTheme->textPrimary, TEXT_WRAP, "");
-   initLabelRaw(&subsHudLabel, &uiFont, 0, 0, 500, AUTO, 22, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
+   initLabelRaw(&playbackInfoLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, 22, activeTheme->textPrimary, TEXT_WRAP, "");
    for (int i = 0; i < MAX_CHAPTERS; i++) {
       initLabelRaw(&chapterLabels[i], &uiFont, 0, 0, 990, AUTO, CHAPTER_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
       initLabel(&chapterTimeLabels[i], &uiFont, 0, 0, 150, AUTO, CHAPTER_TEXT_SIZE, activeTheme->textSecondary, TEXT_NOWRAP, "");
@@ -748,6 +752,31 @@ static void initPlay(void)
 }
 
 static void showControls(void) { state.controlsShownUs = sys_time_get_system_time(); }
+
+// Rebuild the right-side playback HUD only on input/state changes, never in the render loop.
+static void refreshPlaybackInfoHud(void)
+{
+   char info[256];
+   int used = 0;
+   if (state.vidW > 0 && state.vidH > 0)
+      used = snprintf(info, sizeof info, "%dx%d", state.vidW, state.vidH);
+   else
+      used = snprintf(info, sizeof info, "Resolution unavailable");
+
+   if (state.audioPick >= 0 && state.audioPick < state.audioCount)
+      used += snprintf(info + used, sizeof info - used, "\nAudio: %s", state.audioNames[state.audioPick]);
+   else if (state.audItag && state.audItag == state.vidItag)
+      used += snprintf(info + used, sizeof info - used, "\nAudio: Embedded");
+   else if (state.audItag)
+      used += snprintf(info + used, sizeof info - used, "\nAudio: AAC");
+   else
+      used += snprintf(info + used, sizeof info - used, "\nAudio: unavailable");
+
+   if (state.subtitlePick >= 0 && state.subtitlePick < state.captionCount)
+      snprintf(info + used, sizeof info - used, "\nSubtitles: %s", state.captionTracks[state.subtitlePick].name);
+
+   setLabelText(&playbackInfoLabel, info);
+}
 
 static void formatTime(char *buffer, int cap, int seconds)
 {
@@ -783,10 +812,7 @@ static void cycleSubtitles(void)
 
    setLabelText(&subtitleLabel, "");   // clear the old track's cue; the new one repopulates once fetched
 
-   char hud[64];
-   if (state.subtitlePick < 0) strCopy(hud, sizeof hud, "Subtitles: Off");
-   else snprintf(hud, sizeof hud, "Subtitles: %s", state.captionTracks[state.subtitlePick].name);
-   setLabelText(&subsHudLabel, hud);
+   refreshPlaybackInfoHud();
    showControls();
 }
 
@@ -1010,6 +1036,11 @@ static void handlePlaybackInput(void)
       return; // keep the source stable until the staged handoff commits
    uint64_t nowUs = sys_time_get_system_time();
 
+   if (isPadButtonPressed(PAD_BTN_L2)) {
+      refreshPlaybackInfoHud();
+      showControls();
+   }
+
    if (isPadButtonPressed(PAD_BTN_R2)) {
       cropToFillEnabled = !cropToFillEnabled;
       showToast(cropToFillEnabled ? "Crop to fill: ON" : "Crop to fill: OFF");
@@ -1227,6 +1258,8 @@ static void updatePlay(void)
          setVideoPlayerAudioVolume(state.player, getVolumeMeterFraction(&volumeMeter));
          if (state.pauseWhenReady) setVideoPaused(state.player, 1);
          setLabelText(&titleLabel, state.title);   // rasterise once, off the draw path
+         setLabelText(&authorLabel, state.author);
+         refreshPlaybackInfoHud();
          state.stage = STAGE_PLAYING;
          rememberAutoplayVideo(requestedInput);
          if (state.audioPick >= 0 && state.audioPick < state.audioCount) { char notice[96]; snprintf(notice, sizeof notice, "Audio: %s", state.audioNames[state.audioPick]); showToast(notice); }
@@ -1242,6 +1275,7 @@ static void updatePlay(void)
       if (state.audioSwitchFallback) {
          state.audioPick = state.audioSwitchTarget;
          state.audItag = state.audioItags[state.audioPick];
+         refreshPlaybackInfoHud();
          setVideoPlayerAudioVolume(state.player, getVolumeMeterFraction(&volumeMeter));
          { char notice[96]; snprintf(notice, sizeof notice, "Audio: %s", state.audioNames[state.audioPick]); showToast(notice); }
       } else {
@@ -1275,6 +1309,7 @@ static void updatePlay(void)
                state.audItag = state.audioItags[state.audioPick];
             else if (state.fallbackAudioItag)
                state.audItag = state.fallbackAudioItag;
+            refreshPlaybackInfoHud();
          }
          setVideoPlayerAudioVolume(state.player, getVolumeMeterFraction(&volumeMeter));
          if (!state.resolutionSwitchWasPaused) setVideoPaused(state.player, 0);
@@ -1381,7 +1416,7 @@ static void updatePlay(void)
       else if (state.subtitleTrack->count == 0) {   // fetch failed or empty track: drop to Off, visibly
          state.subtitlePick = state.subtitleFetched = -1;
          state.subtitlesReady = 0;
-         setLabelText(&subsHudLabel, "Subtitles: Off");
+         refreshPlaybackInfoHud();
          showToast("Subtitles unavailable");
       }
    }
@@ -1544,12 +1579,19 @@ static void drawBadge(Label *label, int x, int y)
 // title top-left + chosen subtitle language top-right, shown whenever the seek bar is up.
 static void drawTitle(void)
 {
-   if (titleLabel.tt.tex.w > 0) drawBadge(&titleLabel, 40, 32);
+   int y = 32;
+   if (titleLabel.tt.tex.w > 0) {
+      drawBadge(&titleLabel, 40, y);
+      y += titleLabel.tt.tex.h + 20;
+   }
+   if (authorLabel.tt.tex.w > 0) drawBadge(&authorLabel, 40, y);
 }
 
-static void drawSubsHud(void)
+static void drawPlaybackInfoHud(void)
 {
-   if (subsHudLabel.tt.tex.w > 0) drawBadge(&subsHudLabel, state.screenW - 40 - (subsHudLabel.tt.tex.w + 2 * BADGE_PAD_X), 32);
+   if (playbackInfoLabel.tt.tex.w > 0)
+      drawBadge(&playbackInfoLabel,
+                state.screenW - 40 - (playbackInfoLabel.tt.tex.w + 2 * BADGE_PAD_X), 32);
 }
 
 // the active subtitle cue, centred above the seek bar on a dim backdrop.
@@ -1704,8 +1746,11 @@ static void drawPlay(void)
       measureFps(frame);
       if (state.showStats && frame) { updateStatLabels(); drawStatsOverlay(); }
       int overlayUp = state.chaptersVisible || state.descriptionVisible;   // a full-screen overlay hides the HUD noise
-      if (state.stage == STAGE_PLAYING && !state.isLive && controlsVisible() && !overlayUp)   // live has no timeline
-         { drawSeekBar(); drawTitle(); drawSubsHud(); }
+      if (state.stage == STAGE_PLAYING && controlsVisible() && !overlayUp) {
+         if (!state.isLive) drawSeekBar();   // live has no timeline
+         drawTitle();
+         drawPlaybackInfoHud();
+      }
       if (state.stage == STAGE_PLAYING && !overlayUp) { drawSubtitle(); drawToast(); drawVolumeMeter(&volumeMeter); }
       if (state.chaptersVisible) drawChapters();
       if (state.descriptionVisible) drawDescription();
@@ -1753,10 +1798,11 @@ static void termPlay(void)
    freeLabel(&timeRightLabel);
    freeLabel(&toastLabel);
    freeLabel(&titleLabel);
+   freeLabel(&authorLabel);
    freeLabel(&nextNoticeHeadingLabel);
    freeLabel(&nextNoticeTitleLabel);
    freeLabel(&subtitleLabel);
-   freeLabel(&subsHudLabel);
+   freeLabel(&playbackInfoLabel);
    for (int i = 0; i < MAX_CHAPTERS; i++) { freeLabel(&chapterLabels[i]); freeLabel(&chapterTimeLabels[i]); }
    freeVolumeMeter(&volumeMeter);
    freeTextTexture(&descriptionTexture);
