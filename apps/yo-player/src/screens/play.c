@@ -42,13 +42,13 @@
 #include <math.h>                // autoplay countdown ring
 
 // volume: up/down step the shared pill meter (ui/volume-meter.h), pills in the theme accent.
-#define VOLUME_DEFAULT    12
+#define VOLUME_DEFAULT    VOLUME_METER_PILLS
 
 // seek controls (bar + time) show on activity / pause, then auto-hide. left/right scrub the target
 // instantly; the engine seek (a decoder flush + fragment reload each time) fires once input goes quiet.
 #define SEEK_STEP_SECONDS   5.0f
 #define SEEK_APPLY_IDLE_US  400000ULL
-#define CONTROLS_VISIBLE_US 3000000ULL
+#define CONTROLS_VISIBLE_US 2000000ULL
 #define TOAST_VISIBLE_US    2000000ULL   // how long a toast ("Skipped ...", "Subtitles: ...") stays up
 #define AUTOPLAY_NOTICE_US  3000000ULL
 #define AUTOPLAY_THUMB_CAP  (128 * 1024)
@@ -713,33 +713,53 @@ void playVideo(const char *input)
    launchVideo(input, 1);
 }
 
+// Playback uses the scale selected in the main menu for text rasterisation only.
+// drawPlay() disables the global SD transform so video geometry and HUD placement
+// remain unchanged.
+static float playbackFontScale = 1.0f;
+
+static int playbackFontSize(int baseSize)
+{
+   int size = (int)(baseSize * playbackFontScale + 0.5f);
+   return size > 0 ? size : 1;
+}
+
+static int playbackChapterRowHeight(void)
+{
+   int scaled = playbackFontSize(CHAPTER_TEXT_SIZE) * 3 / 2;
+   return scaled > CHAPTER_ROW_HEIGHT ? scaled : CHAPTER_ROW_HEIGHT;
+}
+
 static void initPlay(void)
 {
    setHttpRequestsCancelled(0);
    memset(&state, 0, sizeof state);
    state.screenW = getGfxScreenWidth();
    state.screenH = getGfxScreenHeight();
+   playbackFontScale = getGfxUiScaleFactor();
+   if (playbackFontScale < 1.0f) playbackFontScale = 1.0f;
 
    uiFont = openSystemFont(FONT_POP);
-   initLabel(&statusLabel, &uiFont, 0, 0, 1400, AUTO, 28, activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabel(&statusLabel, &uiFont, 0, 0, state.screenW - 80, AUTO, playbackFontSize(28), activeTheme->textPrimary, TEXT_WRAP, "");
    for (int i = 0; i < STAT_LINES; i++)
-      initLabel(&statLabels[i], &uiFont, 0, 0, 600, AUTO, 22, activeTheme->textPrimary, TEXT_NOWRAP, "");
-   initLabel(&timeLeftLabel,  &uiFont, 0, 0, 200, AUTO, 22, activeTheme->textPrimary, TEXT_NOWRAP, "");
-   initLabel(&timeRightLabel, &uiFont, 0, 0, 200, AUTO, 22, activeTheme->textPrimary, TEXT_NOWRAP, "");
-   initLabelRaw(&toastLabel, &uiFont, 0, 0, 400, AUTO, 22, activeTheme->textPrimary, TEXT_NOWRAP, "");   // raw: shows track names
-   initLabelRaw(&titleLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, 22, activeTheme->textPrimary, TEXT_WRAP, "");
-   initLabelRaw(&authorLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, 20, activeTheme->textSecondary, TEXT_WRAP, "");
-   initLabelRaw(&nextNoticeHeadingLabel, &uiFont, 0, 0, 500, AUTO, 22, activeTheme->accent, TEXT_NOWRAP, "NEXT VIDEO");
-   initLabelRaw(&nextNoticeTitleLabel, &uiFont, 0, 0, 1040, AUTO, 30, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
-   initLabelRaw(&subtitleLabel, &uiFont, 0, 0, state.screenW - 160, AUTO, SUBTITLE_TEXT_SIZE, activeTheme->textPrimary, TEXT_WRAP, "");
-   initLabelRaw(&playbackInfoLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, 22, activeTheme->textPrimary, TEXT_WRAP, "");
+      initLabel(&statLabels[i], &uiFont, 0, 0, state.screenW - 100, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabel(&timeLeftLabel,  &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabel(&timeRightLabel, &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabelRaw(&toastLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");   // raw: shows track names
+   initLabelRaw(&titleLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");
+   initLabelRaw(&authorLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(20), activeTheme->textSecondary, TEXT_WRAP, "");
+   initLabelRaw(&nextNoticeHeadingLabel, &uiFont, 0, 0, 500, AUTO, playbackFontSize(22), activeTheme->accent, TEXT_NOWRAP, "NEXT VIDEO");
+   initLabelRaw(&nextNoticeTitleLabel, &uiFont, 0, 0, 1040, AUTO, playbackFontSize(30), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
+   initLabelRaw(&subtitleLabel, &uiFont, 0, 0, state.screenW - 160, AUTO, playbackFontSize(SUBTITLE_TEXT_SIZE), activeTheme->textPrimary, TEXT_WRAP, "");
+   initLabelRaw(&playbackInfoLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");
    for (int i = 0; i < MAX_CHAPTERS; i++) {
-      initLabelRaw(&chapterLabels[i], &uiFont, 0, 0, 990, AUTO, CHAPTER_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
-      initLabel(&chapterTimeLabels[i], &uiFont, 0, 0, 150, AUTO, CHAPTER_TEXT_SIZE, activeTheme->textSecondary, TEXT_NOWRAP, "");
+      initLabelRaw(&chapterLabels[i], &uiFont, 0, 0, 990, AUTO, playbackFontSize(CHAPTER_TEXT_SIZE), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
+      initLabel(&chapterTimeLabels[i], &uiFont, 0, 0, 150, AUTO, playbackFontSize(CHAPTER_TEXT_SIZE), activeTheme->textSecondary, TEXT_NOWRAP, "");
    }
    state.subtitlePick = state.subtitleFetched = -1;   // default off (memset left them 0)
 
    initVolumeMeter(&volumeMeter, &uiFont, activeTheme->accent, volumeLevel);
+   setLabelFixedRenderScale(&volumeMeter.numberLabel, playbackFontScale, 0);
    layoutVolumeMeter(&volumeMeter, state.screenW, state.screenH);
 
    state.threadActive = (spawnJoinableThread(&state.workerTid, worker, 0,
@@ -1006,7 +1026,8 @@ static void cycleAudioTrack(void)
    state.audioSwitchFallback = 0;
    setVideoPaused(state.player, 1);
    snprintf(state.message, sizeof state.message, "Loading audio: %s", state.audioNames[state.audioSwitchTarget]);
-   { char notice[96]; snprintf(notice, sizeof notice, "Loading audio: %s", state.audioNames[state.audioSwitchTarget]); showToast(notice); }
+   refreshPlaybackInfoHud();
+   showControls();
    state.audioSwitchDone = 0;
    state.audioSwitchThreadActive = (spawnJoinableThread(&state.audioSwitchTid, audioSwitchWorker, 0,
                                     THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-audio") == 0);
@@ -1140,7 +1161,7 @@ static void autoSkipSponsor(void)
 static void openDescription(void)
 {
    if (!state.descriptionRendered) {
-      renderFontRaw(&descriptionTexture, &uiFont, DESCRIPTION_TEXT_SIZE, state.description[0] ? state.description : "No description.",
+      renderFontRaw(&descriptionTexture, &uiFont, playbackFontSize(DESCRIPTION_TEXT_SIZE), state.description[0] ? state.description : "No description.",
                     activeTheme->textPrimary, state.screenW - 2 * DESCRIPTION_MARGIN_X, TEXT_WRAP);
       state.descriptionRendered = 1;
    }
@@ -1262,8 +1283,7 @@ static void updatePlay(void)
          refreshPlaybackInfoHud();
          state.stage = STAGE_PLAYING;
          rememberAutoplayVideo(requestedInput);
-         if (state.audioPick >= 0 && state.audioPick < state.audioCount) { char notice[96]; snprintf(notice, sizeof notice, "Audio: %s", state.audioNames[state.audioPick]); showToast(notice); }
-         else if (state.audioCount > 0) showToast("Default audio track unavailable; use L3 to choose a track");
+         showControls();
       }
    }
 
@@ -1276,8 +1296,8 @@ static void updatePlay(void)
          state.audioPick = state.audioSwitchTarget;
          state.audItag = state.audioItags[state.audioPick];
          refreshPlaybackInfoHud();
+         showControls();
          setVideoPlayerAudioVolume(state.player, getVolumeMeterFraction(&volumeMeter));
-         { char notice[96]; snprintf(notice, sizeof notice, "Audio: %s", state.audioNames[state.audioPick]); showToast(notice); }
       } else {
          showToast("Audio switch failed; video continues");
       }
@@ -1504,8 +1524,8 @@ static void updateStatLabels(void)
 
 static void drawStatsOverlay(void)
 {
-   int x = 40, y = 44, lineHeight = 30;
-   fillGfxRectangle(x - 14, y - 12, 500, STAT_LINES * lineHeight + 14, activeTheme->badgeFill);
+   int x = 40, y = 44, lineHeight = playbackFontSize(30);
+   fillGfxRectangle(x - 14, y - 12, state.screenW - 80, STAT_LINES * lineHeight + 14, activeTheme->badgeFill);
    for (int i = 0; i < STAT_LINES; i++) drawLabelAt(&statLabels[i], x, y + i * lineHeight);
 }
 
@@ -1636,18 +1656,19 @@ static void drawChapters(void)
 
    int panelX = state.screenW / 2 - state.chapterPanelWidth / 2;
    int titleX = panelX + state.chapterTimeWidth + CHAPTER_TIME_GAP;
-   int topY   = state.screenH / 2 - rows * CHAPTER_ROW_HEIGHT / 2;
+   int rowHeight = playbackChapterRowHeight();
+   int topY   = state.screenH / 2 - rows * rowHeight / 2;
 
    for (int row = 0; row < rows; row++) {
       int index = firstRow + row;
-      int rowY  = topY + row * CHAPTER_ROW_HEIGHT;
+      int rowY  = topY + row * rowHeight;
       if (index == state.chapterSelected) {
-         fillGfxRectangle(panelX - 19, rowY, state.chapterPanelWidth + 43, CHAPTER_ROW_HEIGHT, activeTheme->rowHighlight);
-         fillGfxRectangle(panelX - 24, rowY, 5, CHAPTER_ROW_HEIGHT, activeTheme->accent);   // red accent, flush with the highlight
+         fillGfxRectangle(panelX - 19, rowY, state.chapterPanelWidth + 43, rowHeight, activeTheme->rowHighlight);
+         fillGfxRectangle(panelX - 24, rowY, 5, rowHeight, activeTheme->accent);   // red accent, flush with the highlight
       }
       drawLabelAt(&chapterTimeLabels[index], panelX + state.chapterTimeWidth - chapterTimeLabels[index].tt.tex.w,
-                  getCenteredLabelY(&chapterTimeLabels[index], rowY, CHAPTER_ROW_HEIGHT));
-      drawLabelAt(&chapterLabels[index], titleX, getCenteredLabelY(&chapterLabels[index], rowY, CHAPTER_ROW_HEIGHT));
+                  getCenteredLabelY(&chapterTimeLabels[index], rowY, rowHeight));
+      drawLabelAt(&chapterLabels[index], titleX, getCenteredLabelY(&chapterLabels[index], rowY, rowHeight));
    }
 }
 

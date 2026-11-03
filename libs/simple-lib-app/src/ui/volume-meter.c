@@ -68,7 +68,7 @@ void drawVolumeMeter(VolumeMeter *meter)
 
    int columnCenterX = meter->pillX + PILL_W / 2;
    int topPillY      = meter->bottomY - (VOLUME_METER_PILLS - 1) * PILL_PITCH;
-   drawLabelAt(&meter->numberLabel, columnCenterX - meter->numberLabel.tt.tex.w / 2, topPillY - NUMBER_SIZE - 14);
+   drawLabelAt(&meter->numberLabel, columnCenterX - meter->numberLabel.tt.tex.w / 2, topPillY - meter->numberLabel.tt.tex.h - 14);
 
    // muted at 0, low glyph for the bottom half, high glyph above it
    Icon *speaker = meter->level <= 0 ? &meter->speakerOff
