@@ -848,6 +848,68 @@ static int youtubeGetVideoMetadata(const char *videoId,
    return 0;
 }
 
+static int isMembersOnlyResponse(const char *text);
+
+// Check only the playability message, not the full response: a public video's
+// description could mention "members-only" without restricting the video.
+static int youtubeIsVideoMembersOnly(const char *videoId)
+{
+   if (!videoId || strlen(videoId) != 11) return -1;
+   if (ensureVisitorData() != 0) return -1;
+
+   char *resp = malloc(RESP_CAP);
+   if (!resp) return -1;
+
+   int respLen = 0;
+   int rc = fetchPlayerClient(
+      "\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"",
+      WEB_UA, "1", WEB_VERSION, videoId, resp, &respLen);
+   if (rc != 0) {
+      logWarn("[yt] members-only check request failed video=%s rc=%d\n", videoId, rc);
+      free(resp);
+      return -1;
+   }
+
+   const char *end = resp + respLen;
+   const char *playEnd = NULL;
+   const char *play = jsonObjectForKey(resp, end, "playabilityStatus", &playEnd);
+   int membersOnly = 0;
+   if (play) {
+      char reason[512] = "";
+      char messages[3][192] = {{0}};
+      jsonString(play, playEnd, "reason", reason, sizeof reason);
+      membersOnly = isMembersOnlyResponse(reason);
+      int messageCount = jsonArrayStrings(play, playEnd, "messages", messages, 3);
+      for (int i = 0; !membersOnly && i < messageCount; i++)
+         membersOnly = isMembersOnlyResponse(messages[i]);
+   }
+
+   if (!membersOnly) {
+      const char *screenEnd = NULL;
+      const char *screen = jsonObjectForKey(resp, end, "errorScreen", &screenEnd);
+      const char *rendererEnd = NULL;
+      const char *renderer = screen ? jsonObjectForKey(screen, screenEnd,
+                                      "playerErrorMessageRenderer", &rendererEnd) : NULL;
+      if (renderer) {
+         char reason[256] = "";
+         char subreason[384] = "";
+         jsonString(renderer, rendererEnd, "reason", reason, sizeof reason);
+         const char *subEnd = NULL;
+         const char *sub = jsonObjectForKey(renderer, rendererEnd, "subreason", &subEnd);
+         if (sub) {
+            if (!jsonString(sub, subEnd, "simpleText", subreason, sizeof subreason))
+               jsonString(sub, subEnd, "text", subreason, sizeof subreason);
+         }
+         membersOnly = isMembersOnlyResponse(reason) || isMembersOnlyResponse(subreason);
+      }
+   }
+
+   free(resp);
+   logInfo("[yt] members-only check video=%s result=%s\n",
+           videoId, membersOnly ? "yes" : "no");
+   return membersOnly;
+}
+
 int getNextVideoId(const char *videoId, char *nextVideoId, int nextVideoIdCap, char *nextTitle, int nextTitleCap, const char watchedIds[][12], int watchedCount)
 {
    if (!videoId || !videoId[0] || !nextVideoId || nextVideoIdCap < 12) return -1;
@@ -1366,5 +1428,5 @@ static int fetchAccountFeed(AccountFeed feed, const char *continuation, SearchRe
 
 const Extractor youtubeExtractor = {
    "youtube", matches, extract, search, fetchTrending, getChannel, fetchAccountFeed,
-   youtubeGetVideoChannelId, youtubeGetVideoMetadata
+   youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly
 };

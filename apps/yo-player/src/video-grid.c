@@ -151,6 +151,25 @@ static void worker(uint64_t arg)
       free(page);
       break;
    }
+   case JOB_MEMBER_CHECK: {
+      int i = grid->memberCheckIndex;
+      if (i >= 0 && i < grid->thumbFetched && i < grid->results.count) {
+         if (!grid->stopWorker) {
+            const Extractor *extractor = findExtractor(grid->results.items[i].videoId);
+            int rc = extractor && extractor->isVideoMembersOnly
+                     ? extractor->isVideoMembersOnly(grid->results.items[i].videoId) : -1;
+            grid->membersOnly[i] = rc > 0 ? GRID_MEMBER_YES
+                                 : rc == 0 ? GRID_MEMBER_NO : GRID_MEMBER_FAILED;
+            __sync_synchronize();
+            logInfo("[grid] members-only check %s result=%s\n",
+                    grid->results.items[i].videoId,
+                    rc > 0 ? "yes" : rc == 0 ? "no" : "unavailable");
+         } else {
+            grid->membersOnly[i] = GRID_MEMBER_UNKNOWN;
+         }
+      }
+      break;
+   }
    }
    __sync_synchronize();
    grid->workerDone = 1;
@@ -198,6 +217,8 @@ static void resetFeed(VideoGrid *grid)
    grid->stage = GRID_RUNNING;
    grid->searchParsed = grid->workerDone = 0;
    grid->thumbFetched = 0;
+   memset(grid->membersOnly, 0, sizeof grid->membersOnly);
+   grid->memberCheckIndex = -1;
    grid->decodeIndex = -1;
    grid->selected = grid->scrollRow = grid->winStart = grid->winEnd = 0;
 }
@@ -240,6 +261,30 @@ static void loadThumbnails(VideoGrid *grid)
 {
    grid->job = JOB_THUMBS;
    if (!spawnWorker(grid)) grid->workerDone = 1;
+}
+
+// Schedule one low-priority members-only lookup at a time. Feed paging and
+// thumbnail fetches always take priority, so these checks never stall scrolling.
+static int nextMemberCheck(const VideoGrid *grid)
+{
+   int limit = grid->thumbFetched;
+   int frontier = thumbFrontier(grid);
+   if (limit > frontier) limit = frontier;
+   if (limit > grid->results.count) limit = grid->results.count;
+   for (int i = 0; i < limit; i++)
+      if (grid->membersOnly[i] == GRID_MEMBER_UNKNOWN) return i;
+   return -1;
+}
+
+static void loadMemberCheck(VideoGrid *grid, int index)
+{
+   grid->memberCheckIndex = index;
+   grid->membersOnly[index] = GRID_MEMBER_CHECKING;
+   grid->job = JOB_MEMBER_CHECK;
+   if (!spawnWorker(grid)) {
+      grid->membersOnly[index] = GRID_MEMBER_FAILED;
+      grid->workerDone = 1;
+   }
 }
 
 // join the non-empty metadata parts with " - " into "author - views - age".
@@ -325,9 +370,10 @@ static void decodeWindowThumbnails(VideoGrid *grid)
          int visible = row >= grid->scrollRow && row < grid->scrollRow + grid->visibleRows;
          if (rc > 0 && visible) {
             grid->thumbs[i].tex = uploadImageBuffer(&decoded);
-            if (grid->thumbs[i].tex.offset)
+            if (grid->thumbs[i].tex.offset) {
+               grid->thumbs[i].state = THUMB_FETCHED;
                logInfo("[grid] thumbnail %s decoded and uploaded\n", grid->results.items[i].videoId);
-            else {
+            } else {
                grid->thumbs[i].state = THUMB_FAILED;
                logWarn("[grid] thumbnail %s texture upload failed\n", grid->results.items[i].videoId);
             }
@@ -431,6 +477,12 @@ void initVideoGrid(VideoGrid *grid, Font *font, int x, int y, int width, int hei
    }
    initLabel(&grid->watchLaterBadge, font, 0, 0, AUTO, AUTO, WATCHLATER_BADGE_SIZE, activeTheme->textPrimary, TEXT_NOWRAP, "Watch Later");
    setLabelScaleWithUi(&grid->watchLaterBadge, 1);
+   initLabel(&grid->membersOnlyBadge, font, 0, 0, AUTO, AUTO, DUR_SIZE, 0xFF00FF00, TEXT_NOWRAP, "*Members only");
+   float badgeScale = getGfxUiScaleFactor();
+   if (badgeScale < 1.0f) badgeScale = 1.0f;
+   if (sdOutput) grid->membersOnlyBadge.size = (int)(DUR_SIZE * 1.5f / badgeScale + 0.5f);
+   setLabelScaleWithUi(&grid->membersOnlyBadge, 1);
+   grid->memberCheckIndex = -1;
    grid->labelScale = getGfxUiScaleFactor();
 }
 
@@ -440,6 +492,7 @@ void termVideoGrid(VideoGrid *grid)
    freeThumbnails(grid);
    for (int i = 0; i < MAX_SEARCH_RESULTS; i++) { freeLabel(&grid->rows[i]); freeLabel(&grid->metas[i]); freeLabel(&grid->durations[i]); }
    freeLabel(&grid->watchLaterBadge);
+   freeLabel(&grid->membersOnlyBadge);
 }
 
 void setGridWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *videoId)) { grid->isWatched = isWatched; }
@@ -496,6 +549,13 @@ void updateVideoGrid(VideoGrid *grid)
       } else if (grid->results.continuation[0] && grid->results.count < MAX_SEARCH_RESULTS) {
          int lastRow = (grid->results.count - 1) / grid->columns;
          if (selRow >= lastRow - 1) loadMore(grid);
+         else {
+            int memberIndex = nextMemberCheck(grid);
+            if (memberIndex >= 0) loadMemberCheck(grid, memberIndex);
+         }
+      } else {
+         int memberIndex = nextMemberCheck(grid);
+         if (memberIndex >= 0) loadMemberCheck(grid, memberIndex);
       }
    }
 }
@@ -527,6 +587,14 @@ static void drawTile(VideoGrid *grid, int i)
       int badgeX = tx + grid->tileW - badgeW - edgeGap, badgeY = ty + grid->thumbH - badgeH - edgeGap;
       fillGfxRectangleFixed(badgeX, badgeY, badgeW, badgeH, item->isLive ? activeTheme->accent : activeTheme->badgeFill);
       drawLabelAt(&grid->durations[i], badgeX + padX, badgeY + padY);
+   }
+
+   if (grid->membersOnly[i] == GRID_MEMBER_YES) {
+      int badgeW = grid->membersOnlyBadge.tt.tex.w + 2 * padX;
+      int badgeH = grid->membersOnlyBadge.tt.tex.h + 2 * padY;
+      int badgeX = tx + edgeGap, badgeY = ty + grid->thumbH - badgeH - edgeGap;
+      fillGfxRectangleFixed(badgeX, badgeY, badgeW, badgeH, 0xFF000000);
+      drawLabelAt(&grid->membersOnlyBadge, badgeX + padX, badgeY + padY);
    }
 
    if (grid->isWatchLater && grid->isWatchLater(item->videoId)) {
@@ -573,7 +641,10 @@ void drawVideoGrid(VideoGrid *grid)
          formatGridTitle(grid, grid->results.items[i].title, title, sizeof title, scale);
          setLabelText(&grid->rows[i], title);
       }
+      grid->membersOnlyBadge.size = isGfxSdVideoOutput()
+         ? (int)(DUR_SIZE * 1.5f / sizeScale + 0.5f) : DUR_SIZE;
       refreshLabelScale(&grid->watchLaterBadge);
+      refreshLabelScale(&grid->membersOnlyBadge);
       grid->labelScale = scale;
    }
 

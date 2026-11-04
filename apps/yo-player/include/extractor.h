@@ -133,6 +133,9 @@ typedef struct Extractor {
                            char *viewCount, int viewCountCap,
                            char *publishedDate, int publishedDateCap,
                            char *likeCount, int likeCountCap);
+   // Check whether a video is restricted to channel members. Blocking; call on a worker thread.
+   // Returns 1 for members-only, 0 for public/other, negative on request failure.
+   int (*isVideoMembersOnly)(const char *videoId);
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.
