@@ -625,6 +625,14 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
         "\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\",\"androidSdkVersion\":34,\"hl\":\"en\",\"gl\":\"US\"" },
       { "IOS", "20.10.4", WEB_UA,
         "\"clientName\":\"IOS\",\"clientVersion\":\"20.10.4\",\"deviceMake\":\"Apple\",\"deviceModel\":\"iPhone16,2\",\"osName\":\"iPhone\",\"osVersion\":\"18.3.0.22D63\",\"hl\":\"en\",\"gl\":\"US\"" },
+      { "WEB_EMBEDDED_PLAYER", WEB_VERSION, WEB_UA,
+        "\"clientName\":\"WEB_EMBEDDED_PLAYER\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"" },
+      { "TVHTML5_SIMPLY_EMBEDDED_PLAYER", WEB_VERSION, WEB_UA,
+        "\"clientName\":\"TVHTML5_SIMPLY_EMBEDDED_PLAYER\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"" },
+      { "MUSIC", WEB_VERSION, WEB_UA,
+        "\"clientName\":\"MUSIC\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"" },
+      { "ANDROID_MUSIC", "8.10.52", WEB_UA,
+        "\"clientName\":\"ANDROID_MUSIC\",\"clientVersion\":\"8.10.52\",\"androidSdkVersion\":34,\"hl\":\"en\",\"gl\":\"US\"" },
       { "MWEB", WEB_VERSION, WEB_UA,
         "\"clientName\":\"MWEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"" },
       { "TVHTML5", WEB_VERSION, WEB_UA,
@@ -637,7 +645,8 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
       logInfo("[yt] UNPLAYABLE; retrying video=%s with client=%s\n", videoId, clients[i].name);
       int rc = fetchPlayerClient(clients[i].fields, clients[i].ua,
                                  (i == 0 ? "1" : i == 1 ? "3" : i == 2 ? "5" :
-                                  i == 3 ? "2" : i == 4 ? "7" : "28"),
+                                  i == 3 ? "2" : i == 4 ? "7" : i == 5 ? "28" :
+                                  i == 6 ? "56" : i == 7 ? "85" : i == 8 ? "26" : "21"),
                                  clients[i].version, videoId, resp, respLen);
       if (rc != 0) {
          logError("[yt] retry client=%s request failed rc=%d\n", clients[i].name, rc);
@@ -654,6 +663,22 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
 
       out->formatCount = 0;
       parseFormats(resp, end, out);
+
+      // Some clients expose adaptive URLs that require a PoToken unavailable here.
+      // Keep only progressive muxed formats for these clients.
+      if (strcmp(clients[i].name, "WEB") == 0 ||
+          strcmp(clients[i].name, "ANDROID") == 0 ||
+          strcmp(clients[i].name, "MWEB") == 0) {
+         int kept = 0;
+         for (int j = 0; j < out->formatCount; j++) {
+            StreamFormat *format = &out->formats[j];
+            if (!format->hasVideo || !format->hasAudio) continue;
+            if (kept != j) out->formats[kept] = *format;
+            kept++;
+         }
+         out->formatCount = kept;
+      }
+
       if (out->formatCount > 0) {
          const char *details = strstr(resp, "\"videoDetails\"");
          if (details) {
@@ -907,21 +932,6 @@ static int extract(const char *input, StreamInfo *out)
    }
 
    int membersOnly = isMembersOnlyResponse(resp);
-
-   // Retry alternate player clients only for VOD responses explicitly rejected as
-   // UNPLAYABLE by VISIONOS. Keep the normal VISIONOS path unchanged.
-   if (!liveNow && out->formatCount == 0) {
-      const char *playEnd = NULL;
-      const char *play = jsonObjectForKey(resp, end, "playabilityStatus", &playEnd);
-      char retryStatus[48] = "";
-      if (play) jsonString(play, playEnd, "status", retryStatus, sizeof retryStatus);
-      if (strcmp(retryStatus, "UNPLAYABLE") == 0 &&
-          retryUnplayableWithOtherClients(videoId, resp, &respLen, out)) {
-         end = resp + respLen;
-         logInfo("[yt] alternate client resolved videoId=%s formats=%d\\n",
-                 videoId, out->formatCount);
-      }
-   }
 
    if (out->formatCount == 0) {
       if (isMembersOnlyResponse(resp)) membersOnly = 1;
