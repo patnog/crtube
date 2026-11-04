@@ -1,5 +1,9 @@
 # Yo! Player — Sign-In & CRT Edition
 
+<p align="center">
+  <img src="apps/yo-player/ICON0.PNG" alt="Yo! Player" width="180">
+</p>
+
 A PlayStation 3 YouTube client with optional Google/YouTube account sign-in and account-based feeds. Display layout follows the PS3's active video output: standard widescreen UI for 16:9, with additional CRT-oriented layout and scaling adjustments for SD 4:3.
 
 This repository is a fork of [vortigauntlet/yo-player-signin](https://github.com/vortigauntlet/yo-player-signin), which adds YouTube account support to the original [Yo! Player](https://github.com/mohasi/ps3-dev/tree/main/apps/yo-player). This fork continues that work with additional playback, display, and usability changes.
