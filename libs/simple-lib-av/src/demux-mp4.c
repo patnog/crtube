@@ -442,6 +442,8 @@ int openMp4Demuxer(Mp4Demuxer *demuxer, VideoSource *source, int audioOnly)
       if (type == FOURCC('s','i','d','x')) { sidxPos = pos; sidxSize = size; }   // seek index (before the first moof)
       if (type == FOURCC('m','o','o','f') && !firstMoofPos) { firstMoofPos = pos; fragmented = 1; }
       if (moovStart && firstMoofPos) break;
+      // In a non-fragmented MP4, moov already describes all samples; do not scan past mdat.
+      if (moovStart && !fragmented && type == FOURCC('m','d','a','t')) break;
       pos += size;
    }
    if (!moovStart) {

@@ -400,7 +400,9 @@ HttpStream *openHttpStream(const char *url)
    }
    stream->conn = openConnection(stream, 0, &totalSize);
    if (!stream->conn) { closeHttpStream(stream); return NULL; }
-   if (!stream->size) stream->size = totalSize;
+   // For query-range hosts, totalSize is only the current response window, not the full media size.
+   // Keep size unknown unless the URL supplied clen=; otherwise the first window becomes a false EOF.
+   if (!stream->size && !stream->rangeInQuery) stream->size = totalSize;
 
    stream->running = 1;
    stream->prefetchActive = spawnJoinableThread(&stream->prefetchThread, prefetchThread, (uint64_t)(uintptr_t)stream,
