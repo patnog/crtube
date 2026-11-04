@@ -48,6 +48,10 @@
 // seek controls (bar + time) show on activity / pause, then auto-hide. left/right scrub the target
 // instantly; the engine seek (a decoder flush + fragment reload each time) fires once input goes quiet.
 #define SEEK_STEP_SECONDS   5.0f
+#define CROSS_RESTART_HOLD_US 3000000ULL
+#define SEEK_ACCEL_1_US     1500000ULL
+#define SEEK_ACCEL_2_US     3000000ULL
+#define SEEK_ACCEL_3_US     5000000ULL
 #define SEEK_APPLY_IDLE_US  400000ULL
 #define CONTROLS_VISIBLE_US 2000000ULL
 #define HUD_VISIBLE_US      3000000ULL
@@ -639,7 +643,6 @@ static void worker(uint64_t arg)
    state.videoHasAudio[state.resolutionIndex] = video->hasAudio;
    state.videoAvailable[state.resolutionIndex] = 1;
    state.audItag = audio ? audio->itag : (video->hasAudio ? video->itag : 0);
-   if (state.audioPick >= 0 && state.audioPick < state.audioCount) snprintf(state.message, sizeof state.message, "Loading audio: %s", state.audioNames[state.audioPick]);
    state.isLive = video->isLiveSegmented;
 
    // Open the resolver's normal pick first. For VOD only, wait for a decoded pre-roll;
@@ -1120,10 +1123,34 @@ static void handlePlaybackInput(void)
 
    if (isPadButtonPressed(PAD_BTN_SQUARE)) cycleResolution();
 
-   if (isPadButtonPressed(PAD_BTN_CROSS)) {
-      if (isVideoEnded(state.player)) seekVideoPlayer(state.player, 0.0f);
-      else setVideoPaused(state.player, !isVideoPaused(state.player));
-      showControls();
+   if (state.isLive) {
+      if (isPadButtonPressed(PAD_BTN_CROSS)) {
+         setVideoPaused(state.player, !isVideoPaused(state.player));
+         showControls();
+      }
+   } else {
+      static uint64_t crossHoldStartUs;
+      static int crossRestartTriggered;
+      PadButtonState crossState = getPadButtonState(PAD_BTN_CROSS);
+
+      if (crossState == PAD_BUTTON_STATE_PRESSED) {
+         crossHoldStartUs = nowUs;
+         crossRestartTriggered = 0;
+      } else if (crossState == PAD_BUTTON_STATE_HELD && crossHoldStartUs &&
+                 !crossRestartTriggered && nowUs - crossHoldStartUs >= CROSS_RESTART_HOLD_US) {
+         crossRestartTriggered = 1;
+         state.seeking = 0;
+         seekVideoPlayer(state.player, 0.0f);
+         showControls();
+      } else if (crossState == PAD_BUTTON_STATE_RELEASED) {
+         if (!crossRestartTriggered) {
+            if (isVideoEnded(state.player)) seekVideoPlayer(state.player, 0.0f);
+            else setVideoPaused(state.player, !isVideoPaused(state.player));
+         }
+         crossHoldStartUs = 0;
+         crossRestartTriggered = 0;
+         showControls();
+      }
    }
 
    if (isPadButtonPressed(PAD_BTN_TRIANGLE)) cycleSubtitles();
@@ -1170,8 +1197,50 @@ static void handlePlaybackInput(void)
    if (state.isLive) return;   // a live stream has no seek index; scrubbing would break the segment stream
 
    static ButtonRepeat seekRepeat;
-   if (isRepeatDue(&seekRepeat, getPadButtonState(PAD_BTN_RIGHT)))     nudgeSeek(+SEEK_STEP_SECONDS, nowUs);
-   else if (isRepeatDue(&seekRepeat, getPadButtonState(PAD_BTN_LEFT))) nudgeSeek(-SEEK_STEP_SECONDS, nowUs);
+   static uint64_t seekHoldStartUs;
+   static int seekDirection;
+   PadButtonState rightState = getPadButtonState(PAD_BTN_RIGHT);
+   PadButtonState leftState = getPadButtonState(PAD_BTN_LEFT);
+   PadButtonState activeState = PAD_BUTTON_STATE_UP;
+   int direction = 0;
+
+   if (rightState == PAD_BUTTON_STATE_PRESSED || rightState == PAD_BUTTON_STATE_HELD) {
+      direction = 1;
+      activeState = rightState;
+   } else if (leftState == PAD_BUTTON_STATE_PRESSED || leftState == PAD_BUTTON_STATE_HELD) {
+      direction = -1;
+      activeState = leftState;
+   }
+
+   if (!direction) {
+      seekDirection = 0;
+      seekHoldStartUs = 0;
+   } else {
+      int directionChanged = (direction != seekDirection);
+      if (directionChanged) {
+         seekDirection = direction;
+         seekHoldStartUs = nowUs;
+         if (activeState == PAD_BUTTON_STATE_HELD) {
+            // Switching direction while held starts a fresh acceleration ramp and nudges immediately.
+            seekRepeat.timer = nowUs;
+            seekRepeat.repeats = 0;
+            nudgeSeek(direction * SEEK_STEP_SECONDS, nowUs);
+         }
+      }
+
+      int repeatDue = 0;
+      if (activeState == PAD_BUTTON_STATE_PRESSED || activeState == PAD_BUTTON_STATE_HELD)
+         repeatDue = isRepeatDue(&seekRepeat, activeState);
+
+      if (repeatDue) {
+         uint64_t heldUs = nowUs - seekHoldStartUs;
+         float step = SEEK_STEP_SECONDS;
+         if (heldUs >= SEEK_ACCEL_3_US)      step = 60.0f;
+         else if (heldUs >= SEEK_ACCEL_2_US) step = 30.0f;
+         else if (heldUs >= SEEK_ACCEL_1_US) step = 15.0f;
+         nudgeSeek(direction * step, nowUs);
+      }
+   }
 
    if (state.seeking && nowUs - state.lastSeekInputUs >= SEEK_APPLY_IDLE_US) {
       seekVideoPlayer(state.player, state.seekTarget);
