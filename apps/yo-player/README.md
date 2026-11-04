@@ -43,6 +43,37 @@ It reuses what this repo already has:
   on the seek bar in their category colours. How much gets skipped is a setting (see below).
 - **No PSN, no ads** — talks to YouTube directly; appears under the XMB **Video** column like the old app.
 
+## Display output and aspect ratios
+
+The app follows the PS3's active system video output configuration. It does not force
+the console into a fixed aspect ratio or permanently switch the interface to CRT mode.
+
+- **16:9 output:** The app uses its standard widescreen interface and video-grid layout.
+- **SD 4:3 output:** The app detects the SD display mode and applies additional CRT-oriented
+  UI adjustments. These include a 4:3-specific two-column video grid, revised navigation
+  hints, and an adjustable interface scale.
+
+The extra layout and scaling options are specific to SD 4:3 output. They do not replace
+or disable the normal 16:9 interface. Changing the PS3's video output configuration
+changes which display layout the app uses. On the home screen and in a channel listing,
+**L2** cycles the SD interface scale between **1.0x** and **1.5x**.
+
+## YouTube account sign-in
+
+Signing in is optional. From the home screen, press **SELECT** to open the account panel. The app displays a device code and verification URL; enter the code on a phone or computer and approve access there. No web browser is needed on the PS3.
+
+When signed in, the home screen can show the account's:
+- Recommended feed.
+- Subscriptions feed.
+- Watch History.
+- Watch Later playlist.
+
+The app uses the YouTube TV device authorization flow. It stores a refresh token locally in `/dev_hdd0/tmp/yo-player/account.txt` and refreshes short-lived access tokens when required. Press **SELECT** and choose **Sign out** to remove the saved token and attempt to revoke it with Google.
+
+**Playback does not use the signed-in account.** Account authorization is used for account-specific feeds; video resolution and playback continue through the app's separate anonymous player client.
+
+Treat `account.txt` as a credential: anyone who can read the file may be able to access the account feeds until the token is revoked. Do not share it in debug logs or support reports.
+
 ## How it works (high level)
 
 1. On launch it brings up the network, the modern TLS transport, graphics, audio, fonts and the pad, then loads
@@ -74,18 +105,28 @@ the bottom use the console's own controller glyphs.
 - **Triangle** — open the highlighted video's **channel** (that channel's videos only). Inside a channel,
   Triangle instead **subscribes / unsubscribes** from that channel.
 - **Start** — open the keyboard to search. Typing a YouTube link plays it directly.
-- **L1 / R1** (home only) — switch category: Subscriptions, Gaming, Sports, Podcasts, Watch Later.
-- **Select** — cycle the sort order (shown top-right): search = Relevance / Views, channel = Latest / Popular /
-  Oldest.
+- **L1 / R1** (home only) — switch home category.
+- **Select** — on the home screen, open the account panel; in search results, cycle Relevance / Views, and
+  inside a channel, cycle Latest / Popular / Oldest.
+- **L2** — on SD 4:3 output, cycle the UI scale on the home screen or in a channel listing.
+- **R2** (home only) — refresh the current category.
 - **Circle** — back out (channel → search results → home).
 - **PS button** — exit.
 
 ### In the player
 
 - **Up / Down** — volume (a pill meter shows briefly, remembered across videos).
-- **Left / Right** — seek back / forward. A seek bar with current / total time plus the video title shows when
-  playback starts and while scrubbing, then auto-hides.
-- **X** — pause / resume (restarts the video if it had ended).
+- **Left / Right** — seek back / forward in VOD. Holding a direction accelerates the seek; live streams cannot
+  be seeked.
+- **X** — pause / resume. Hold to restart a VOD from the beginning; live streams use a normal pause/resume press.
+- **Square** — switch to another available video resolution.
+- **L3** (left-stick click) — cycle available audio tracks when more than one exists.
+- **L1 / R1** — play the previous / next video. R1 can request the next recommendation when no next item is
+  already queued.
+- **L2** — show the full playback information HUD.
+- **R2** — toggle Crop-to-Fill mode.
+- **Right Analog Stick** — while Crop-to-Fill is enabled, move the cropped picture horizontally and vertically to adjust which part of the image is visible.
+- **R3** (right-stick click) — toggle playback statistics.
 - **Select** — show the video **description** over the video (playback carries on); scroll with up / down, close
   with Select or Circle.
 - **Triangle** — cycle **subtitles** (off by default) through the video's available languages; the current
@@ -95,6 +136,12 @@ the bottom use the console's own controller glyphs.
 
 Community **SponsorBlock** segments are skipped automatically during playback and marked on the seek bar in
 their category colours. Live streams have no seek bar (there's nothing to scrub).
+
+## SD 4:3 interface scaling
+
+The selected SD interface scale is saved in `/dev_hdd0/tmp/yo-player/sd-ui-scale.txt`
+and restored on the next launch. The scaling control is available only with SD 4:3
+output; it does not zoom the standard 16:9 interface.
 
 ## Downloads
 
@@ -169,6 +216,16 @@ The open-source target uses native PSL1GHT Makefiles and can be built on Linux,
 macOS, or the included GitHub Actions runner without a local VM. Its side-by-side
 title ID is `YOPSL0001`; see [BUILDING-PSL1GHT.md](BUILDING-PSL1GHT.md) for the
 exact command, package filename, and platform-specific limitations.
+
+## YouTube extraction and playback notes
+
+VOD and live streams use separate extraction paths because YouTube does not return the same usable media formats for both:
+
+- **VOD:** The player request identifies as the VISIONOS client. The extractor can retry supported alternate clients only when the primary VOD request explicitly returns an unplayable response.
+- **Live:** The extractor uses the Android VR client to obtain the DASH manifest, then follows the rolling live segment sequence. Live requests are not sent through the VOD fallback path.
+- **Members-only videos:** The grid checks restricted videos in the background and marks detected items with a `*Members only` badge. A restricted item may not provide a playable stream to an anonymous session.
+
+These client identifiers and YouTube endpoints are implementation details, not stable APIs. YouTube can change or block them without notice.
 
 ## Known limitations
 

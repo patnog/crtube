@@ -1,288 +1,147 @@
-# ps3-dev
+# Yo! Player — Sign-In & CRT Edition
 
-PS3 Cobra/EVILNAT VSH plugins and apps, built with Sony's official SDK on FW 4.75, plus the Windows
-tools that build and feed them.
+A PlayStation 3 YouTube client with optional Google/YouTube account sign-in and account-based feeds. Display layout follows the PS3's active video output: standard widescreen UI for 16:9, with additional CRT-oriented layout and scaling adjustments for SD 4:3.
 
-## Layout
+This repository is a fork of [vortigauntlet/yo-player-signin](https://github.com/vortigauntlet/yo-player-signin), which adds YouTube account support to the original [Yo! Player](https://github.com/mohasi/ps3-dev/tree/main/apps/yo-player). This fork continues that work with additional playback, display, and usability changes.
 
-```
-ps3-dev/
-├── common/
-│   ├── ps3.targets             shared MSBuild (warnings-as-errors, -O2, clean)
-│   ├── npdrm.targets           shared NPDRM packaging post-build for apps
-│   └── prx.targets             shared PRX signing post-build for plugins
-├── libs/
-│   ├── simple-lib-core/        cross-context primitives (printf, dbg, file, VFS + exFAT/NTFS, http, ftp, thread, wire, log-backlog, bridge-client)
-│   ├── simple-lib-app/         static library for apps (gfx, font, pad, screen, anim, ui)
-│   ├── simple-lib-av/          audio + H.264/AAC video playback (mixer, demux, decode, streaming source)
-│   ├── simple-lib-https/       modern TLS (BearSSL) — the HTTPS transport the firmware can't do
-│   ├── simple-lib-torrent/     BitTorrent: peers, magnets, trackers, piece checking and storage
-│   ├── simple-lib-wireguard/   WireGuard client, with its own TCP and DNS inside the tunnel
-│   ├── simple-lib-plugin/     header-only PRX-only extras (vsh NID stubs, module hook/inspect)
-│   ├── libvshtask_export_stub.a
-│   └── libvshmain_export_stub.a
-├── apps/
-│   ├── app-sample/             demo app showcasing engine features
-│   ├── cell-stream/            plays a live stream of a Windows PC, and sends the pad back
-│   ├── file-manager/           PS3 file browser, flat themeable UI (image/audio/video/text/hex viewers)
-│   ├── renpy-player/           runs Ren'Py visual novels packaged as .rpk
-│   ├── swarm/                  torrent client that speaks its own WireGuard tunnel
-│   ├── thermal-bench/          heat, fan and clock test tool, saves every run for comparison
-│   └── yo-player/              native YouTube client (streams video + audio directly)
-├── plugins/
-│   ├── simple-cd-info/       puts album and track names back on the XMB for audio CDs
-│   ├── simple-cheat-menu/    in-game cheat overlay, synced with the shared cheat repo
-│   ├── simple-debug-bridge/  remote debug/control over TCP (port 8785)
-│   ├── simple-disc-mount/    mounts ISOs from an XMB submenu
-│   └── simple-ftp/           anonymous, binary-only FTP server on port 21
-├── tools/
-│   ├── debug-bridge-client/    Windows host app: HTTP proxy to the on-console bridge (Logs, install, mem/file)
-│   ├── cell-stream-server/     PC side of cell-stream: captures, encodes, and takes the pad back
-│   ├── sprite-packer/          packs sprite PNGs into atlas + C header
-│   ├── xml-to-sfo/             generates PARAM.SFO from XML
-│   ├── nid-dump/               dumps firmware NIDs for symbol resolution
-│   ├── patch-studio/           makes texture patches from textures dumped on the console
-│   ├── renpy-to-ps3/           packages Ren'Py visual novels to run on PS3
-│   ├── rco-studio/             GUI for editing PS3 XMB resource files (RCOs)
-│   ├── theme-studio/           GUI to author PS3 static + dynamic 3D themes (.p3t)
-│   ├── pkg-custom/             builds the .pkg during an app build
-│   └── scetool/                PRX signing tool + keys
-├── out/                        build outputs (.sprx plugins, .pkg apps)
-└── README.md
-```
+> **Project scope:** The application lives in [`apps/yo-player`](apps/yo-player). The repository also retains the shared PS3 libraries, build infrastructure, and tools from the upstream `ps3-dev` project.
 
-## Shared Build Infrastructure
+## Highlights
 
-All PS3 vcxproj files import `common/ps3.targets` which provides:
-- `-O2` optimization
-- `-Wall` (all warnings enabled)
-- `-Werror` (warnings as errors)
-- Custom clean that wipes `bin/` and `obj/` contents
+- **Optional YouTube account sign-in:** Sign in using YouTube's device authorization flow. Approve the code on a phone or computer; no browser is required on the PS3.
+- **Personal account feeds:** Browse Recommended, Subscriptions, History, and Watch Later feeds from the signed-in account. Playback itself remains on the anonymous player client.
+- **Dynamic display layout:** The app follows the PS3's active video output. 16:9 keeps the standard widescreen UI; SD 4:3 activates a dedicated CRT layout, including a two-column video grid and adjusted navigation hints.
+- **Adjustable SD UI scale:** Press **L2** on the home screen or channel view to switch between the supported SD interface scales. The selection is saved separately from the normal settings file.
+- **Improved YouTube playback handling:** VOD and live playback use separate InnerTube client paths. VOD uses the VISIONOS client; live streams use the Android VR client to obtain the DASH segment data required by the live player.
+- **VOD client fallback:** When the primary VISIONOS request explicitly reports an unplayable VOD, the extractor can retry supported alternate clients. Live streams are kept out of this fallback path.
+- **Members-only identification:** Restricted videos can be identified and marked in the video grid instead of being mistaken for ordinary playable videos.
+- **Streaming playback:** H.264 video and AAC audio are streamed and decoded by the PS3; the app does not need to download an entire video before playback.
+- **User features:** Search, channel browsing, subscriptions, Watch Later, watch history, resume playback, subtitles, chapters, SponsorBlock, background downloads, and XMB video export.
 
-App projects additionally import `common/npdrm.targets` which handles the full NPDRM packaging pipeline (make_fself_npdrm → copy assets → make_package_npdrm → move the resulting `.pkg` to `out/<projectname>.pkg`). The deterministic filename is what `deploy.ps1` relies on for app installs.
+## What this fork adds
 
-## Build & deploy
+The fork is based on `vortigauntlet/yo-player-signin`. In addition to the account sign-in and feed functionality inherited from that project, this repository includes the following changes in the current source:
 
-All PS3 builds run inside the Windows 7 VM via SSH (`dev/vmbuild.ps1`).
-The local Windows host never invokes the Sony SDK directly.
+| Area | Changes in this fork |
+|---|---|
+| CRT / SD presentation | Dedicated 4:3 SD grid layout, SD-specific navigation hints, and a persistent 1.0x / 1.5x UI scale toggle |
+| YouTube extraction | VISIONOS-based VOD extraction and a separate Android VR request path for live streams |
+| Playback resilience | A limited alternate-client retry for VODs explicitly rejected by the primary client; live playback is excluded from that retry |
+| Live playback | DASH manifest parsing and rolling segment-sequence playback for live broadcasts |
+| Restricted content | Members-only detection and a visible `*Members only` badge on affected grid items |
+| Diagnostics | Additional boot-stage and playback/extraction logging to make failures easier to diagnose on real hardware |
+| PSL1GHT build | An open-toolchain PSL1GHT target and build documentation alongside the Sony SDK project |
 
-```
-dev/vmbuild.ps1 <plugins|apps|libs|tools> <name> [Build|Rebuild|Clean] [Release|Debug]
-```
+The original account functionality remains optional. Without signing in, the app continues to provide its anonymous browsing and playback paths.
 
-### Build stamp
+## User-facing features
 
-Every build is stamped with `<commit count>-<commit>`, plus `-dirty` when it
-includes edits that were never committed (only changes under `libs/` or the
-project's own folder count). `vmbuild.ps1` works it out from git — the VM has
-no git — and hands it to msbuild, which passes it to the compiler as
-`BUILD_NAME` / `BUILD_STAMP`. Every app and plugin logs it at startup via
-`logBuildVersion()`, so any `dbg.txt` says which build produced it, and the
-commit says which source. Apps also carry the build number as `APP_VER`, which
-the console shows in the game's info screen.
+### Account and feeds
+- Sign in or sign out from the home screen using **SELECT**.
+- Enter the device code at the verification URL shown by the app on another device.
+- Browse the account's Recommended, Subscriptions, History, and Watch Later feeds.
+- Access tokens are refreshed when needed. Signing out removes the locally saved token and attempts to revoke it.
+- Account authentication is used for account feeds; video playback remains separate from the signed-in account.
 
-A build started any other way (msbuild or Visual Studio directly) stamps
-`unknown`, since nothing traced it to a commit.
+### Browsing and playback
+- Browse trending categories, search YouTube, and open channel pages.
+- Sort search results by relevance or view count; sort channel videos by latest, popular, or oldest.
+- Paste or type a YouTube URL into search to open the video directly.
+- Stream H.264 video and AAC audio with hardware decoding.
+- Use pause, seek, volume, subtitles, chapter navigation, description overlay, and autoplay controls.
+- Resume videos from the last saved playback position.
+- Skip community-submitted SponsorBlock segments according to the selected setting.
 
-`deploy.ps1` is the one-shot "build + install on the live PS3" entry point.
-It auto-detects whether `<name>` is a plugin or an app from the folder layout:
+### Personal library and downloads
+- Subscribe to channels and browse their latest uploads.
+- Save videos to the local Watch Later list.
+- Keep local watch history and playback positions.
+- Queue video downloads in the background.
+- Export completed downloads to the PS3 XMB Video column.
 
-```
-dev/deploy.ps1 simple-debug-bridge -RestartXmb   # plugin: -RestartXmb when self-replacing
-dev/deploy.ps1 file-manager                       # app:    restart-xmb is automatic
-dev/deploy.ps1 app-sample -NoClean                # app:    keep existing /dev_hdd0/game/<TID>/
-```
+### CRT and SD display
+- On SD output, the application uses a layout designed around a 4:3 screen.
+- Press **L2** on the home screen or channel view to cycle the available SD UI scales.
+- The scale choice is persisted in `/dev_hdd0/tmp/yo-player/sd-ui-scale.txt`.
+- The video grid uses a two-column arrangement on 4:3 SD output to preserve readable titles and usable thumbnail sizes.
 
-Plugins are uploaded as `out/<name>.sprx` via `vsh-plugin-install`. Apps are
-uploaded as `out/<name>.pkg` via `pkg-install`, which extracts the package
-on-device (no XMB install dialog) into `/dev_hdd0/game/<TITLE_ID>/`. Both
-paths require `debug-bridge-client.exe` running on the host and the PS3
-bridge plugin reachable.
+## Controls
 
-## Libraries
+The controls below describe the main navigation and playback screens. Button hints shown
+in the app take precedence if a screen has a context-specific action.
 
-### simple-lib-core
-Cross-context primitives shared by both PRX plugins and apps: drop-in
-`printf`, leveled timestamped logging (`dbg`), a `/`-rooted **VFS** (`vfs`)
-with built-in hand-written **exFAT** and **NTFS** reader/writer backends for
-removable USB (`exfat` / `ntfs` + the shared `usb-storage` device layer) that the
-file helpers (`file`) route through, a transport-agnostic **HTTP(S)** client
-(`http`, with opt-in firmware-cellHttp or BearSSL backends), the shared anonymous
-**FTP** server (`ftp`), PPU thread spawn (`thread`), string utilities, framed TCP
-protocol (`wire`), pre-connect log ring (`log-backlog`), and the producer-side
-bridge client (`bridge-client`). Built with `-fno-builtin-printf
--nodefaultlibs` so it links safely into `vsh.self`. Must appear
-**before** SDK stubs in the link order or the PRX silently fails to
-load.
+### Navigation: home, search, and channel lists
 
-### simple-lib-app
-Reusable static library for apps. Provides 2D rendering, font,
-input, screen lifecycle, animation, color palette, and UI components
-(label, breadcrumb, image, slice, checkbox, circle, line, rectangle,
-triangle). Apps link `libsimple-lib-app.a` and include headers from
-`libs/simple-lib-app/include/`. Built on top of `simple-lib-core`.
+| Controller input | Action |
+|---|---|
+| D-pad | Move the selection through the video grid |
+| **X** | Play the selected video |
+| **Square** | Add the selected video to Watch Later, or remove it if it is already saved |
+| **R3** (right-stick click) | Queue the selected VOD for background download; live streams cannot be downloaded |
+| **Triangle** | Open the selected video's channel; inside a channel listing, subscribe to or unsubscribe from that channel |
+| **START** | Open YouTube search; entering a YouTube URL opens that video directly |
+| **SELECT** | On the home screen, open the account panel; in search results or a channel listing, change the sort order |
+| **L1 / R1** | Switch home categories |
+| **L2** | On SD 4:3 output, cycle the additional UI scale on the home screen or channel listing |
+| **R2** | Refresh the current home category |
+| **CIRCLE** | Go back to the previous screen |
+| **PS button** | Exit the application |
 
-### simple-lib-av
-Audio + video playback for apps: a multi-stream audio mixer (WAV / OGG / MP3 /
-FLAC) and the H.264/AAC video stack (cellVdec/cellAdec wrappers, MKV + MP4
-demuxers including fragmented MP4, a header probe, and a seekable source that
-reads from a local file or an `http(s)://` URL). Built on `simple-lib-core`; apps
-that draw video also need `simple-lib-app`. See `libs/simple-lib-av/README.md`.
+### Playback
 
-### simple-lib-https
-Self-contained modern TLS (BearSSL over raw sockets) that reaches hosts the
-firmware's RSA-only TLS can't (ECDSA certs, e.g. Cloudflare). It plugs in as the
-**modern transport** behind `simple-lib-core`'s http module: an app calls
-`initModernHttp()` and every `fetchHttp` / `openHttpStream` runs over BearSSL. Adds
-~80 KB, so it is opt-in and apps-only. See `libs/simple-lib-https/README.md`.
+| Controller input | Action |
+|---|---|
+| **X** | Pause or resume playback. Hold to restart a VOD from the beginning; live streams use a normal pause/resume press |
+| **LEFT / RIGHT** | Seek backward or forward in a VOD; holding a direction accelerates the seek. Live streams do not support seeking |
+| **UP / DOWN** | Decrease or increase the playback volume |
+| **TRIANGLE** | Cycle through available subtitle tracks |
+| **SQUARE** | Switch to another available video resolution |
+| **L3** (left-stick click) | Cycle through available audio tracks when alternatives exist |
+| **L1 / R1** | Play the previous / next video. If no next item is already queued, R1 can request the next recommendation |
+| **L2** | Show the full playback information HUD |
+| **R2** | Toggle crop-to-fill mode |
+| **Right Analog Stick** | While crop-to-fill is enabled, move the cropped picture horizontally and vertically to adjust which part of the image is visible |
+| **R3** (right-stick click) | Toggle playback statistics |
+| **SELECT** | Open the video description overlay; use **UP / DOWN** to scroll and **SELECT** or **CIRCLE** to close |
+| **START** | Open the chapter list; use **UP / DOWN** to select a chapter and **X** to jump to it. **START** or **CIRCLE** closes the list |
+| **CIRCLE** | Return to the video list |
 
-### simple-lib-wireguard
-A WireGuard client written from the protocol paper: the handshake, the crypto it
-needs (ChaCha20-Poly1305, BLAKE2s, X25519), and a hand-written TCP and DNS on top,
-so an app's traffic leaves the console inside the tunnel rather than beside it.
-See `libs/simple-lib-wireguard/README.md`.
+Live streams have no seek bar and cannot be downloaded. The description and chapter overlays temporarily take control of navigation while open.
 
-### simple-lib-torrent
-The parts of a BitTorrent client that do not depend on how the traffic gets out:
-peers (BEP 3), magnet links (BEP 9/10), UDP trackers (BEP 15), piece checking and
-storage. The app lends it a network, which for Swarm means the tunnel.
-See `libs/simple-lib-torrent/README.md`.
+## Build and installation
 
-### simple-lib-plugin
-Header-only library for the PRX-only extras: VSH NID stubs (`vsh.h`) and
-module hook/inspect helpers (`module-hook.h`, `module-inspect.h`). No archive
-output — plugins just add its `include/` path. The LV2 syscall trampolines and
-all other non-PRX-specific helpers (printf, dbg, VFS, …) live in `simple-lib-core`.
+The application has two build paths:
 
-## Plugins
+- **Sony SDK project:** Uses the repository's existing PS3 development environment and shared build infrastructure.
+- **PSL1GHT project:** An open-toolchain build intended for Linux, macOS, or the included GitHub Actions workflow.
 
-### simple-cd-info
-Puts the album, artist and track names back on the XMB when an audio CD goes in. The service the
-console used for that was shut down years ago, so current firmware shows "Track 1, Track 2, …".
-The names come from the gnudb database instead. Nothing to configure. See
-`plugins/simple-cd-info/README.md` for details.
+For PSL1GHT dependencies, build commands, packaging, installation, and known platform differences, see [`apps/yo-player/BUILDING-PSL1GHT.md`](apps/yo-player/BUILDING-PSL1GHT.md).
 
-### simple-cheat-menu
-In-game cheat overlay. A short PS press over a running game opens a panel listing that title's
-cheats; toggling one patches the game's memory live (cobra syscall-8) and verifies the write
-landed. Cheats are downloaded per title from the shared
-[game-cheats](https://github.com/mohasi/game-cheats) repo, and players can mark a cheat working or
-failed — those votes become a crowd score plus a per-build "will this work on your copy" verdict.
-See `plugins/simple-cheat-menu/README.md` for details.
+For the application architecture, settings, storage files, playback behavior, and detailed controls, see [`apps/yo-player/README.md`](apps/yo-player/README.md).
 
-### simple-disc-mount
-Adds a "Mount Disc Image" submenu below "Package Manager" in the XMB Games
-column, listing every `.iso` in `/dev_hdd0/PS3ISO`. Selecting an item mounts
-it as a virtual Blu-ray disc via Cobra syscalls. Uses Sony's `webrender_plugin`
-as an entry point to trigger the mount from the XMB menu. See
-`plugins/simple-disc-mount/README.md` for details.
+## Known limitations
 
-### simple-ftp
-Minimal FTP server: PASV-only, binary-only, anonymous. Listens on :21 once
-XMB is ready. Up to two concurrent sessions. Full filesystem access, including
-exFAT USB drives (mounted via the shared VFS and surfaced as `/exfat0` …). See
-`plugins/simple-ftp/README.md` for details.
+- YouTube changes its internal APIs and client restrictions frequently. Extraction compatibility may require future updates.
+- Live streams use a rolling segment window. They start and exit differently from VOD and do not support normal seeking or background downloading.
+- 1080p60 may fall back to 720p60 because of the PS3's video-decoding performance limits.
+- Account feeds require a working network connection and valid Google authorization. Access can be revoked from the Google account security page.
+- The SD scale toggle is intended for SD/CRT output; it is not a general display zoom control.
 
-## Apps
+## Credits and upstream
 
-### app-sample
-Demo app showcasing the engine features: RSX 2D renderer, system fonts, audio,
-animation, input, and screen/overlay lifecycle. See
-`apps/app-sample/README.md` for details.
+This project builds on the work of:
 
-### cell-stream
-Plays a live stream of a Windows PC on the console: picture and sound down, the pad back up, in the
-manner of Steam Remote Play. 720p60 over WiFi with about 25 ms from the encoder to the screen, so
-games are playable. The pad arrives at the PC either as a mouse and keyboard or as an Xbox
-controller. PC side is `tools/cell-stream-server`. See `apps/cell-stream/README.md` for details.
+- **mohasi** — original Yo! Player and the `ps3-dev` project, including the PS3 application foundation, shared libraries, rendering, and media playback infrastructure.
+- **vortigauntlet** — the `yo-player-signin` fork and its YouTube account sign-in implementation.
+- **openlewa** — the PSL1GHT Yo! Player port that forms part of the project's toolchain lineage.
+- **PS3 homebrew and PSL1GHT contributors** — the open-source libraries and tools used by the project.
 
-### file-manager
-PS3 file browser with a flat, themeable UI. Features directory listing with file-type
-icons, checkboxes, breadcrumb navigation, hold-to-scroll, search, image/audio/video viewers,
-a text editor and hex viewer, read/write access to **exFAT and NTFS USB drives** (via the
-shared VFS, with hotplug), a built-in FTP server, and a runtime theme system (Original Blue /
-Light / Dark, switch with R1, user-editable `themes.txt`). See
-`apps/file-manager/README.md` for details.
-
-### renpy-player
-Runs Ren'Py visual novels on the console. It reads the `.rpk` bundle that `tools/renpy-to-ps3`
-produces and plays the script itself: scenes, choices, saves and history, with the typewriter text
-and the game menus the originals have.
-
-### swarm
-Torrent client that runs its own VPN: the WireGuard tunnel is spoken by the app, so
-trackers and peers see the VPN's address and never the console's. Searches the sites
-listed in its sources folder, downloads to the hard disk, and can write over content
-before deleting it. See `apps/swarm/README.md` for details.
-
-### thermal-bench
-Heat, fan and clock test tool. It shows what the console is doing thermally, puts it under a
-controlled load, and saves every run, so two runs can be compared: before against after a repaste,
-or stock clocks against an overclock. See `apps/thermal-bench/README.md` for details.
-
-### yo-player
-Native YouTube client — browse feeds, search, open channels, and play up to 1080p
-with sound, streamed as it plays (no PSN, no ads). Talks to YouTube directly, streams
-adaptive H.264/AAC over the http module (BearSSL transport), and skips community
-**SponsorBlock** segments. Built on `simple-lib-av` + `simple-lib-app`. See
-`apps/yo-player/README.md` for details.
-
-## Tools
-
-### debug-bridge-client
-Windows host app that pairs with the on-console `simple-debug-bridge` plugin. Hosts a
-local HTTP proxy at `http://localhost:8786` that all deploys and the ps3 MCP bridge tools
-talk to, and provides a Logs tab (the source of truth for forwarded console logs),
-Install & Launch, and memory/file transfer. See `tools/debug-bridge-client/README.md`.
-
-### cell-stream-server
-Windows side of the `cell-stream` app. Captures the desktop, encodes it to H.264 on the graphics
-card, sends it to the console over UDP, and turns the pad packets coming back into a virtual Xbox
-360 controller (ViGEmBus) or into mouse and keyboard. See `tools/cell-stream-server/README.md`.
-
-### sprite-packer
-Two modes. **Sprite mode** packs a directory of PNGs into a power-of-2 atlas and
-generates a C header (`sprite-regions.h`) of named `SpriteRegion` coordinates (used
-by renpy-player's hand-cursor). **Icons mode** turns a Fontello TTF + `config.json`
-into an embedded byte array (`icon-data.c`) and a name→codepoint header
-(`icon-ids.h`) — the icon font shared by simple-lib-app and its apps.
-
-### xml-to-sfo
-Generates `PARAM.SFO` from a human-readable XML source. Every app build runs it
-(see `common/npdrm.targets`), stamping the build number into `APP_VER`, so
-`PARAM.SFO` is a build output rather than a committed file.
-
-### nid-dump
-Dumps firmware NIDs (symbol IDs) from PS3 modules, for resolving VSH/system symbols.
-See `tools/nid-dump/README.md`.
-
-### patch-studio
-Windows tool for making PS3 texture patches. Textures are dumped from a running game on the console,
-edited on the PC, and sent back as a patch that `simple-cheat-menu` applies in game. Nothing is
-injected into the game: textures are swapped in video memory and matched by content, so a patch keeps
-working across reboots and reloads. See `tools/patch-studio/README.md`.
-
-### renpy-to-ps3
-Dark-theme WPF GUI that converts Ren'Py visual-novel games into a single `.rpk`
-bundle for the on-console renpy-player. See `tools/renpy-to-ps3/README.md`.
-
-### rco-studio
-Dark-theme WPF GUI for editing PS3 XMB resource files (RCOs). Drives bundled rcomage +
-GimConv to dump RCOs to editable png/wav/xml, add or edit resources, and recompile with
-byte-exact verify. Non-destructive (pristine copies + revert), with sets and shareable
-`.rcopatch` patches for whole-theme workflows, one-click migration of pre-4.89 mods onto
-current firmware, and FTP deploy straight to the console's dev_blind. See
-`tools/rco-studio/README.md`.
-
-### theme-studio
-WPF editor for PS3 themes, including true **dynamic 3D themes** — models, motion and lights scripted
-in Sony's PSJS — which Sony's own theme creator never supported. Builds custom backgrounds, icons,
-cursors and menu sounds into a `.p3t`, with a live preview that plays the scene as you type,
-self-contained one-file projects, worked script examples, and FTP deploy. See
-`tools/theme-studio/README.md`.
+Upstream repositories:
+- [This fork](https://github.com/patnog/yo-player-signin-crt)
+- [Parent fork: yo-player-signin](https://github.com/vortigauntlet/yo-player-signin)
+- [Original Yo! Player in ps3-dev](https://github.com/mohasi/ps3-dev/tree/main/apps/yo-player)
+- [PSL1GHT Yo! Player project](https://github.com/openlewa/yo-player-psl1ght)
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Vendored third-party components
-(BearSSL, Ogg Vorbis) keep their own licenses.
-
+See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). The project retains the applicable upstream licensing and third-party notices. Check the individual component notices before redistributing bundled dependencies.
