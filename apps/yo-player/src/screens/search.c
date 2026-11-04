@@ -263,6 +263,16 @@ static void updateSearch(void)
    updateVideoGrid(&search.grid);
    if (gridStage(&search.grid) != GRID_READY) return;
 
+   // The video byline is only a provisional channel label. Prefer the channel's
+   // canonical title returned by the channel browse response once it is ready.
+   if (search.channelId[0]) {
+      const SearchResults *results = gridResults(&search.grid);
+      if (results->channelName[0] && strcmp(search.channelName, results->channelName) != 0) {
+         strCopy(search.channelName, sizeof search.channelName, results->channelName);
+         setHeading();
+      }
+   }
+
    const SearchResult *selected = gridSelected(&search.grid);
    if (!selected) return;
    if (isPadButtonPressed(PAD_BTN_SQUARE)) { toggleWatchLater(selected); return; }

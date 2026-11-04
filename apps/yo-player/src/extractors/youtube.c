@@ -660,8 +660,8 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
       logInfo("[yt] UNPLAYABLE; retrying video=%s with client=%s\n", videoId, clients[i].name);
       int rc = fetchPlayerClient(clients[i].fields, clients[i].ua,
                                  (i == 0 ? "1" : i == 1 ? "3" : i == 2 ? "5" :
-                                  i == 3 ? "2" : i == 4 ? "7" : i == 5 ? "28" :
-                                  i == 6 ? "56" : i == 7 ? "85" : i == 8 ? "26" : "21"),
+                                  i == 3 ? "56" : i == 4 ? "85" : i == 5 ? "67" :
+                                  i == 6 ? "21" : i == 7 ? "2" : i == 8 ? "7" : "28"),
                                  clients[i].version, videoId, resp, respLen);
       if (rc != 0) {
          logError("[yt] retry client=%s request failed rc=%d\n", clients[i].name, rc);
