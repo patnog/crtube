@@ -47,6 +47,8 @@ typedef struct {
    int  formatCount;
    StreamFormat formats[MAX_STREAM_FORMATS];
    char author[128];       // owning channel name (appended to preserve existing field offsets)
+   char viewCount[32];     // raw YouTube videoDetails.viewCount
+   char publishedDate[24];// microformat publishDate (ISO date)
 } StreamInfo;
 
 // accumulated across pages (infinite scroll); one page is ~20. only the ~30 on-screen tiles hold a
@@ -126,6 +128,8 @@ typedef struct Extractor {
    int (*getAccountFeed)(AccountFeed feed, const char *continuation, SearchResults *out);
    // Resolve a video's owning channel without fetching playback formats.
    int (*getVideoChannelId)(const char *videoId, char *channelId, int channelIdCap);
+   // Fetch the displayed like count from YouTube's /next response. Blocking; call on a worker thread.
+   int (*getVideoLikeCount)(const char *videoId, char *likeCount, int likeCountCap);
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.

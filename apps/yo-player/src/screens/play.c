@@ -221,6 +221,12 @@ static struct {
    char             title[256];        // resolved video title (worker sets, UI reads after adoption)
    char             author[128];       // resolved channel name
    char             description[2048]; // resolved video description (worker sets, UI reads after adoption)
+   char             viewCount[32];
+   char             publishedDate[24];
+   char             likeCount[32];
+   volatile int     metadataWorkerDone;
+   int              metadataThreadActive, metadataFetchTried;
+   sys_ppu_thread_t metadataWorkerTid;
 
    // description overlay: the text is rasterised once, on first open, into one tall texture that
    // up/down scroll. playback carries on untouched underneath.
@@ -495,6 +501,8 @@ static void worker(uint64_t arg)
    strCopy(state.title, sizeof state.title, info->title);
    strCopy(state.author, sizeof state.author, info->author);
    strCopy(state.description, sizeof state.description, info->description);
+   strCopy(state.viewCount, sizeof state.viewCount, info->viewCount);
+   strCopy(state.publishedDate, sizeof state.publishedDate, info->publishedDate);
    parseChapters(state.description, &state.chapters);
    for (int i = 0; i < info->captionCount; i++)   // keep only tracks the system font can render
       if (isRenderableSubtitleLanguage(info->captions[i].languageCode))
@@ -692,6 +700,23 @@ static void chapterWorker(uint64_t arg)
    fetchChapters(requestedInput, &state.fetchedChapters);
    __sync_synchronize();
    state.chWorkerDone = 1;
+   exitThread();
+}
+
+// The /next request is deferred until SELECT opens the panel; it must never delay video startup.
+static void metadataWorker(uint64_t arg)
+{
+   (void)arg;
+   char videoId[12] = "";
+   const Extractor *extractor = findExtractor(requestedInput);
+   if (extractPlaybackId(requestedInput, videoId) && extractor && extractor->getVideoLikeCount &&
+       extractor->getVideoLikeCount(videoId, state.likeCount, sizeof state.likeCount) == 0) {
+      // state.likeCount is now ready for the UI thread.
+   } else {
+      strCopy(state.likeCount, sizeof state.likeCount, "Unavailable");
+   }
+   __sync_synchronize();
+   state.metadataWorkerDone = 1;
    exitThread();
 }
 
@@ -1276,15 +1301,53 @@ static void autoSkipSponsor(void)
    }
 }
 
-// SELECT opens the description: rasterise the text once, off the draw path, as one tall wrapped
-// texture the draw scrolls through. playback carries on untouched underneath.
+// Compose both sections into one texture so metadata and description share the same font scale,
+// width and scrolling behaviour while remaining visually distinct through section headings.
+static void renderDescription(void)
+{
+   char content[3072];
+   char views[48];
+   const char *rawViews = state.viewCount[0] ? state.viewCount : "Unavailable";
+   // Add thousands separators to the numeric view count without changing the source value.
+   int digits = (int)strlen(rawViews), commas = digits > 3 ? (digits - 1) / 3 : 0;
+   int out = 0;
+   for (int i = 0; i < digits && out < (int)sizeof views - 1; i++) {
+      views[out++] = rawViews[i];
+      if (rawViews[i] >= '0' && rawViews[i] <= '9' && i + 1 < digits &&
+          (digits - i - 1) % 3 == 0 && rawViews[i + 1] >= '0' && rawViews[i + 1] <= '9' && commas > 0) {
+         views[out++] = ',';
+         commas--;
+      }
+   }
+   views[out] = 0;
+
+   snprintf(content, sizeof content,
+            "METADATA\nViews: %s\nPublished: %s\nLikes: %s\n\n"
+            "----------------------------------------\n"
+            "DESCRIPTION\n\n%s",
+            views, state.publishedDate[0] ? state.publishedDate : "Unavailable",
+            state.likeCount[0] ? state.likeCount : "Loading...",
+            state.description[0] ? state.description : "No description.");
+   if (descriptionTexture.tex.w) freeTextTexture(&descriptionTexture);
+   renderFontRaw(&descriptionTexture, &uiFont, playbackFontSize(DESCRIPTION_TEXT_SIZE), content,
+                 activeTheme->textPrimary, state.screenW - 2 * DESCRIPTION_MARGIN_X, TEXT_WRAP);
+   state.descriptionRendered = 1;
+}
+
+// SELECT opens the metadata + description panel. Likes are fetched asynchronously on first open;
+// the request never delays playback startup or blocks drawing/input.
 static void openDescription(void)
 {
-   if (!state.descriptionRendered) {
-      renderFontRaw(&descriptionTexture, &uiFont, playbackFontSize(DESCRIPTION_TEXT_SIZE), state.description[0] ? state.description : "No description.",
-                    activeTheme->textPrimary, state.screenW - 2 * DESCRIPTION_MARGIN_X, TEXT_WRAP);
-      state.descriptionRendered = 1;
+   if (!state.metadataFetchTried) {
+      state.metadataFetchTried = 1;
+      state.likeCount[0] = 0;
+      state.metadataWorkerDone = 0;
+      state.metadataThreadActive = (spawnJoinableThread(&state.metadataWorkerTid, metadataWorker, 0,
+                                     THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-metadata") == 0);
+      if (!state.metadataThreadActive)
+         strCopy(state.likeCount, sizeof state.likeCount, "Unavailable");
    }
+   if (!state.descriptionRendered) renderDescription();
    state.descriptionScroll = 0;
    state.descriptionVisible = 1;
 }
@@ -1544,6 +1607,14 @@ static void updatePlay(void)
       joinThread(state.chWorkerTid);
       state.chThreadActive = 0;
       state.chapters = state.fetchedChapters;   // safe to adopt now the worker is reaped
+   }
+
+   // Refresh the combined panel texture after the asynchronous likes lookup completes.
+   if (state.metadataWorkerDone && state.metadataThreadActive) {
+      joinThread(state.metadataWorkerTid);
+      state.metadataThreadActive = 0;
+      state.descriptionRendered = 0;
+      if (state.descriptionVisible) renderDescription();
    }
 
    // subtitles: reap a finished fetch (stale if the pick moved mid-fetch), then start one whenever
@@ -1992,6 +2063,7 @@ static void termPlay(void)
    if (state.audioSwitchThreadActive) { joinThread(state.audioSwitchTid); state.audioSwitchThreadActive = 0; }
    if (state.resolutionSwitchThreadActive) { joinThread(state.resolutionSwitchTid); state.resolutionSwitchThreadActive = 0; }
    if (state.chThreadActive) { joinThread(state.chWorkerTid); state.chThreadActive = 0; }
+   if (state.metadataThreadActive) { joinThread(state.metadataWorkerTid); state.metadataThreadActive = 0; }
    if (state.nextThreadActive) { joinThread(state.nextWorkerTid); state.nextThreadActive = 0; }
    free(state.subtitleTrack);
    state.subtitleTrack = NULL;
