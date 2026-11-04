@@ -21,7 +21,15 @@ typedef enum { GRID_RUNNING, GRID_READY, GRID_EMPTY } GridStage;
 
 // what the background worker is doing this spawn. LOAD/CACHE fetch page 1 (CACHE restores kept results first);
 // MORE appends the next continuation page; THUMBS extends thumbnails to the current window frontier.
-typedef enum { JOB_LOAD, JOB_CACHE, JOB_MORE, JOB_THUMBS } GridJob;
+typedef enum { JOB_LOAD, JOB_CACHE, JOB_MORE, JOB_THUMBS, JOB_MEMBER_CHECK } GridJob;
+
+typedef enum {
+   GRID_MEMBER_UNKNOWN,
+   GRID_MEMBER_CHECKING,
+   GRID_MEMBER_YES,
+   GRID_MEMBER_NO,
+   GRID_MEMBER_FAILED
+} GridMemberState;
 
 // fetch one page into out: token NULL = first page, else a continuation / sort token. 0 ok, negative error.
 typedef int (*GridFetchFn)(const char *token, SearchResults *out, void *user);
@@ -50,6 +58,9 @@ typedef struct {
    Label            metas[MAX_SEARCH_RESULTS];             // per-tile "author - views - age"
    Label            durations[MAX_SEARCH_RESULTS];         // per-tile duration / LIVE badge
    Label            watchLaterBadge;                       // shared "Watch Later" tag drawn on queued tiles
+   Label            membersOnlyBadge;                       // shared "*Members only" tag drawn on restricted tiles
+   volatile GridMemberState membersOnly[MAX_SEARCH_RESULTS];
+   int              memberCheckIndex;
 
    int              selected, scrollRow, winStart, winEnd;
    ButtonRepeat     horizontalRepeat, verticalRepeat;
