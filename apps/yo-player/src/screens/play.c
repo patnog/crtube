@@ -703,15 +703,38 @@ static void chapterWorker(uint64_t arg)
    exitThread();
 }
 
-// The /next request is deferred until SELECT opens the panel; it must never delay video startup.
+// WEB metadata is deferred until SELECT opens the panel; it never delays playback startup.
 static void metadataWorker(uint64_t arg)
 {
    (void)arg;
    char videoId[12] = "";
+   char views[32] = "";
+   char published[24] = "";
+   char likes[32] = "";
    const Extractor *extractor = findExtractor(requestedInput);
-   if (extractPlaybackId(requestedInput, videoId) && extractor && extractor->getVideoLikeCount &&
-       extractor->getVideoLikeCount(videoId, state.likeCount, sizeof state.likeCount) == 0) {
-      // state.likeCount is now ready for the UI thread.
+
+   if (extractPlaybackId(requestedInput, videoId) && extractor && extractor->getVideoMetadata &&
+       extractor->getVideoMetadata(videoId, views, sizeof views, published, sizeof published,
+                                   likes, sizeof likes) == 0) {
+      if (views[0]) strCopy(state.viewCount, sizeof state.viewCount, views);
+      if (published[0]) strCopy(state.publishedDate, sizeof state.publishedDate, published);
+      if (likes[0]) {
+         // WEB microformat returns an integer; keep the compact display used by the old /next UI.
+         char *end = NULL;
+         long count = strtol(likes, &end, 10);
+         if (end != likes && count >= 1000) {
+            if (count >= 1000000000L)
+               snprintf(state.likeCount, sizeof state.likeCount, "%ldb", count / 1000000000L);
+            else if (count >= 1000000L)
+               snprintf(state.likeCount, sizeof state.likeCount, "%ldm", count / 1000000L);
+            else
+               snprintf(state.likeCount, sizeof state.likeCount, "%ldk", count / 1000L);
+         } else {
+            strCopy(state.likeCount, sizeof state.likeCount, likes);
+         }
+      } else {
+         strCopy(state.likeCount, sizeof state.likeCount, "Unavailable");
+      }
    } else {
       strCopy(state.likeCount, sizeof state.likeCount, "Unavailable");
    }
@@ -1322,7 +1345,7 @@ static void renderDescription(void)
    views[out] = 0;
 
    snprintf(content, sizeof content,
-            "METADATA\nViews: %s\nPublished: %s\nLikes: %s\n\n"
+            "METADATA\nViews: %s\nPublished: %s\nLikes: %s\n"
             "----------------------------------------\n"
             "DESCRIPTION\n\n%s",
             views, state.publishedDate[0] ? state.publishedDate : "Unavailable",

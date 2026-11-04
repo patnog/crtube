@@ -781,76 +781,70 @@ static int youtubeGetVideoChannelId(const char *videoId, char *channelId, int ch
 }
 
 
-// Fetch the public like count from the same /next payload used by chapter/autoplay UI.
-// YouTube currently nests it under videoPrimaryInfoRenderer's segmented like button.
-static int youtubeGetVideoLikeCount(const char *videoId, char *likeCount, int likeCountCap)
+// Fetch public metadata with WEB. WEB may report UNPLAYABLE while still returning
+// videoDetails and playerMicroformatRenderer; metadata does not depend on playback status.
+static int youtubeGetVideoMetadata(const char *videoId,
+                                   char *viewCount, int viewCountCap,
+                                   char *publishedDate, int publishedDateCap,
+                                   char *likeCount, int likeCountCap)
 {
-   if (!videoId || strlen(videoId) != 11 || !likeCount || likeCountCap < 2) return -1;
-   likeCount[0] = 0;
+   if (!videoId || strlen(videoId) != 11 ||
+       !viewCount || viewCountCap < 2 ||
+       !publishedDate || publishedDateCap < 2 ||
+       !likeCount || likeCountCap < 2) return -1;
 
-   char body[512];
-   int bodyLen = snprintf(body, sizeof body, NEXT_BODY_FMT, WEB_VERSION, videoId);
-   if (bodyLen <= 0 || bodyLen >= (int)sizeof body) return -1;
+   viewCount[0] = publishedDate[0] = likeCount[0] = 0;
+   if (ensureVisitorData() != 0) {
+      logWarn("[yt] metadata visitor session unavailable video=%s\n", videoId);
+      return -1;
+   }
 
    char *resp = malloc(RESP_CAP);
    if (!resp) return -1;
-   HttpHeader headers[] = {
-      { "Content-Type", "application/json" },
-      { "User-Agent", WEB_UA },
-      { "X-YouTube-Client-Name", "1" },
-      { "X-YouTube-Client-Version", WEB_VERSION },
-      { "Origin", "https://www.youtube.com" },
-      { "Accept-Encoding", "identity" },
-   };
-   int respLen = 0, status = 0;
-   int rc = fetchHttp("POST", NEXT_URL, headers, sizeof headers / sizeof headers[0],
-                      body, bodyLen, resp, RESP_CAP, &respLen, &status);
-   if (rc < 0 || status != 200) {
-      logWarn("[yt] metadata /next failed video=%s rc=%d status=%d\n", videoId, rc, status);
+
+   int respLen = 0;
+   int rc = fetchPlayerClient(
+      "\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"",
+      WEB_UA, "1", WEB_VERSION, videoId, resp, &respLen);
+   if (rc != 0) {
+      logWarn("[yt] WEB metadata player request failed video=%s rc=%d\n", videoId, rc);
       free(resp);
-      return rc < 0 ? rc : -status;
+      return rc;
    }
 
    const char *end = resp + respLen;
-   const char *primaryEnd = NULL;
-   const char *primary = jsonObjectForKey(resp, end, "videoPrimaryInfoRenderer", &primaryEnd);
-   const char *segmentedEnd = NULL;
-   const char *segmented = primary ? jsonObjectForKey(primary, primaryEnd,
-                                                       "segmentedLikeDislikeButtonViewModel", &segmentedEnd) : NULL;
-   int found = segmented && jsonString(segmented, segmentedEnd, "title", likeCount, likeCountCap);
-   if (segmented && (!found || !likeCount[0] || strcmp(likeCount, "Like") == 0)) {
-      char accessibility[192] = "";
-      if (jsonString(segmented, segmentedEnd, "accessibilityText", accessibility, sizeof accessibility)) {
-         const char *number = accessibility;
-         while (*number && (*number < '0' || *number > '9')) number++;
-         int length = 0;
-         while ((number[length] >= '0' && number[length] <= '9') || number[length] == ',') length++;
-         if (length > 0 && length < likeCountCap) {
-            memcpy(likeCount, number, length);
-            likeCount[length] = 0;
-            found = 1;
+   const char *detailsEnd = NULL;
+   const char *details = jsonObjectForKey(resp, end, "videoDetails", &detailsEnd);
+   if (details)
+      jsonString(details, detailsEnd, "viewCount", viewCount, viewCountCap);
+
+   const char *microEnd = NULL;
+   const char *micro = jsonObjectForKey(resp, end, "playerMicroformatRenderer", &microEnd);
+   if (micro) {
+      // Prefer microformat values, which are also present on WEB responses that
+      // have no playable formats. Fall back to videoDetails for views/channel.
+      char rawDate[64] = "";
+      if (jsonString(micro, microEnd, "publishDate", rawDate, sizeof rawDate) ||
+          jsonString(micro, microEnd, "uploadDate", rawDate, sizeof rawDate)) {
+         int dateLen = (int)strlen(rawDate);
+         if (dateLen > 10) dateLen = 10;
+         if (dateLen > 0 && dateLen < publishedDateCap) {
+            memcpy(publishedDate, rawDate, dateLen);
+            publishedDate[dateLen] = 0;
          }
       }
+      jsonString(micro, microEnd, "likeCount", likeCount, likeCountCap);
+      if (!viewCount[0])
+         jsonString(micro, microEnd, "viewCount", viewCount, viewCountCap);
    }
-   // Older WEB responses used the renderer-based segmented button instead of the view model.
-   if (!found && primary) {
-      const char *legacyEnd = NULL;
-      const char *legacy = jsonObjectForKey(primary, primaryEnd, "segmentedLikeDislikeButtonRenderer", &legacyEnd);
-      const char *likeEnd = NULL;
-      const char *like = legacy ? jsonObjectForKey(legacy, legacyEnd, "likeButton", &likeEnd) : NULL;
-      const char *toggleEnd = NULL;
-      const char *toggle = like ? jsonObjectForKey(like, likeEnd, "toggleButtonRenderer", &toggleEnd) : NULL;
-      if (toggle)
-         found = jsonString(toggle, toggleEnd, "simpleText", likeCount, likeCountCap) ||
-                 jsonString(toggle, toggleEnd, "label", likeCount, likeCountCap);
-   }
+
    free(resp);
-   if (!found || !likeCount[0]) {
-      likeCount[0] = 0;
-      logWarn("[yt] metadata like count unavailable video=%s\n", videoId);
+   if (!viewCount[0] && !publishedDate[0] && !likeCount[0]) {
+      logWarn("[yt] WEB metadata unavailable video=%s\n", videoId);
       return -1;
    }
-   logInfo("[yt] metadata like count video=%s value=%s\n", videoId, likeCount);
+   logInfo("[yt] WEB metadata video=%s views=%s published=%s likes=%s\n",
+           videoId, viewCount, publishedDate, likeCount);
    return 0;
 }
 
@@ -1372,5 +1366,5 @@ static int fetchAccountFeed(AccountFeed feed, const char *continuation, SearchRe
 
 const Extractor youtubeExtractor = {
    "youtube", matches, extract, search, fetchTrending, getChannel, fetchAccountFeed,
-   youtubeGetVideoChannelId, youtubeGetVideoLikeCount
+   youtubeGetVideoChannelId, youtubeGetVideoMetadata
 };

@@ -128,8 +128,11 @@ typedef struct Extractor {
    int (*getAccountFeed)(AccountFeed feed, const char *continuation, SearchResults *out);
    // Resolve a video's owning channel without fetching playback formats.
    int (*getVideoChannelId)(const char *videoId, char *channelId, int channelIdCap);
-   // Fetch the displayed like count from YouTube's /next response. Blocking; call on a worker thread.
-   int (*getVideoLikeCount)(const char *videoId, char *likeCount, int likeCountCap);
+   // Fetch public video metadata using a WEB player request. Blocking; call on a worker thread.
+   int (*getVideoMetadata)(const char *videoId,
+                           char *viewCount, int viewCountCap,
+                           char *publishedDate, int publishedDateCap,
+                           char *likeCount, int likeCountCap);
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.
