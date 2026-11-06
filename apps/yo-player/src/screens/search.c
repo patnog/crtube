@@ -2,6 +2,7 @@
 // Pushed on top of home. Triangle drills into a channel in place, Circle backs out (channel -> search
 // results -> pop to home), SELECT cycles the sort, Start re-searches, X plays.
 
+#include "app-config.h"
 #include "screens/search.h"
 #include "screens/play.h"
 #include "video-grid.h"
@@ -32,7 +33,7 @@
 #define SD_HINTS_BOTTOM 100
 #define SD_HINT_ROW_GAP 8
 #define SD_MAX_SCALE 1.5f
-#define SD_SCALE_PATH "/dev_hdd0/tmp/yo-player/sd-ui-scale.txt"
+#define SD_SCALE_PATH CRTUBE_DATA_DIR "/sd-ui-scale.txt"
 #define SD_SCALE_COUNT 2
 static const float SdScaleChoices[SD_SCALE_COUNT] = { 1.00f, 1.50f };
 #define TRIANGLE_HINT 3         // Triangle's slot in the hint row (see initSearch): retitled per mode

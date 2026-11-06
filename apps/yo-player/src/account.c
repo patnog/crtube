@@ -1,5 +1,6 @@
 // account - signed-in YouTube account state (see account.h).
 
+#include "app-config.h"
 #include "account.h"
 #include "account-oauth.h"
 #include "http.h"               // fetchHttp
@@ -11,7 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define ACCOUNT_PATH      "/dev_hdd0/tmp/yo-player/account.txt"
+#define ACCOUNT_PATH      CRTUBE_DATA_DIR "/account.txt"
 #define RESP_CAP          4096
 #define BODY_CAP          1024
 #define RENEW_MARGIN_US   (5 * 60 * 1000000ULL)   // renew this long before the access token runs out

@@ -12,6 +12,7 @@
 #include <cell/fs/cell_fs_errno.h>
 #endif
 
+#include "app-config.h"
 #include "app.h"
 #include "vfs.h"
 #include "http.h"
@@ -81,8 +82,8 @@ SYS_PROCESS_PARAM(PROCESS_PRIORITY_DEFAULT, PROCESS_STACK_SIZE_64KB)
 static const char *const bootLogPaths[] = {
    // The installed title directory remains writable when media-service launch
    // policy denies access to the shared temporary directory.
-   "/dev_hdd0/game/YOPSL0001/USRDIR/yo-player-psl1ght-boot.log",
-   "/dev_hdd0/tmp/yo-player-psl1ght-boot.log"
+   "/dev_hdd0/game/CRTUBE001/USRDIR/crtube-boot.log",
+   "/dev_hdd0/tmp/crtube/crtube-boot.log"
 };
 
 static void bootMark(const char *text, uint64_t length)
@@ -115,10 +116,10 @@ int main(int argc, char **argv)
    initVfs();                    // file i/o routing (the temp download lands via openFs)
    BOOT_MARK("vfs\n");
 
-   // Start each application run with a fresh diagnostic log. Do this after
-   // VFS initialization and before the first logBuildVersion() call.
+   // Select this build’s private log before any app or library diagnostics are emitted.
+   setDebugLogPath(CRTUBE_LOG_PATH);
    VfsFile logFile;
-   if (openFs(DBG_LOG, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC, &logFile) == 0)
+   if (openFs(CRTUBE_LOG_PATH, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC, &logFile) == 0)
       closeFs(&logFile);
 
    logBuildVersion();
@@ -144,7 +145,7 @@ int main(int argc, char **argv)
    // The loopback debug bridge is a companion to the Sony-SDK development
    // environment.  It is optional and unavailable in a standalone PSL1GHT
    // package, so do not start its background socket thread on retail hardware.
-   registerWithBridge("app", "yo-player");
+   registerWithBridge("app", "crtube-sdk");
 #endif
 
    if (initGfx(GFX_VSYNC_ON) != 0) { BOOT_MARK("gfx failed\n"); return 1; }
@@ -159,7 +160,7 @@ int main(int argc, char **argv)
    BOOT_MARK("pad\n");
 
    initStats(5, 5, 14, activeTheme->textSecondary);
-   initStorage();          // prefs (last category) + watch history, under /dev_hdd0/tmp/yo-player/
+   initStorage();          // prefs (last category) + watch history, under this build’s private data directory
    initAccount();          // saved YouTube sign-in, if any (account.txt beside the prefs)
    loadSettings();         // user-editable settings.txt (created with defaults on first launch)
    loadConsoleGlyphs();    // decode the console's own button glyphs for the on-screen hints

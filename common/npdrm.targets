@@ -24,6 +24,9 @@
    EBOOT (scetool -i) and matching it field for field. Don't tweak them blind;
    re-dump and compare if a change is needed.
   -->
+  <PropertyGroup>
+    <PackageName Condition="'$(PackageName)'==''">$(MSBuildProjectName)</PackageName>
+  </PropertyGroup>
   <!-- PARAM.SFO is generated, not committed: APP_VER carries the build number so the
       console's info screen shows which build is installed. -->
   <Target Name="GenerateParamSfo" BeforeTargets="ClCompile" DependsOnTargets="ComputeBuildStamp">
@@ -33,7 +36,7 @@
 
   <ItemDefinitionGroup>
    <PostBuildEvent>
-     <Message>Packaging $(MSBuildProjectName).pkg (NPDRM, vsh-privileged)</Message>
+     <Message>Packaging $(PackageName).pkg (NPDRM, vsh-privileged)</Message>
      <Command>@echo off
 echo [pkg] === $(MSBuildProjectName): building vsh-privileged NPDRM package ===
 
@@ -78,7 +81,7 @@ copy /Y "$(ProjectDir)ICON0.PNG" "%STAGE%\ICON0.PNG" >nul
 
 rem --- 5. wrap into a .pkg ---
 echo [pkg] building pkg with pkg_custom...
-"$(SolutionDir)tools\pkg-custom\pkg_custom.exe" -c %NP_CID% "%STAGE%" "$(OutDir)$(MSBuildProjectName).pkg"
+"$(SolutionDir)tools\pkg-custom\pkg_custom.exe" -c %NP_CID% "%STAGE%" "$(OutDir)$(PackageName).pkg"
 if errorlevel 1 (
   echo [pkg] ERROR: pkg_custom failed - aborting
   exit /b 1
@@ -86,8 +89,8 @@ if errorlevel 1 (
 
 rem --- 6. publish to out/ ---
 if not exist "$(SolutionDir)out" mkdir "$(SolutionDir)out"
-move /Y "$(OutDir)$(MSBuildProjectName).pkg" "$(SolutionDir)out\$(MSBuildProjectName).pkg" >nul
-echo [pkg] done -^> out\$(MSBuildProjectName).pkg</Command>
+move /Y "$(OutDir)$(PackageName).pkg" "$(SolutionDir)out\$(PackageName).pkg" >nul
+echo [pkg] done -^> out\$(PackageName).pkg</Command>
    </PostBuildEvent>
   </ItemDefinitionGroup>
 </Project>

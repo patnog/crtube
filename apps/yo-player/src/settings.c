@@ -1,11 +1,12 @@
 // settings - load (and first-launch create) yo-player's settings.txt (see settings.h).
 // the file format + parsing is the shared simple-lib-core settings-file.h standard.
 
+#include "app-config.h"
 #include "settings.h"
 #include "settings-file.h"
 #include "dbg.h"
 
-#define SETTINGS_PATH "/dev_hdd0/tmp/yo-player/settings.txt"
+#define SETTINGS_PATH CRTUBE_DATA_DIR "/settings.txt"
 
 // the file written on first launch: each setting at its default, with a comment explaining the values.
 static const char *DEFAULT_SETTINGS =

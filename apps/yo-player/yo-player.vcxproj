@@ -20,6 +20,7 @@
    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup>
+   <PackageName>crtube-sdk</PackageName>
    <OutDir>$(ProjectDir)bin\$(Configuration)\</OutDir>
    <IntDir>$(ProjectDir)obj\$(Configuration)\</IntDir>
    <TargetName>$(MSBuildProjectName).ppu</TargetName>

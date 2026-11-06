@@ -1,5 +1,6 @@
 // video-export - registers finished downloads with the system's video database (see video-export.h).
 
+#include "app-config.h"
 #include "video-export.h"
 
 #include "thread.h"             // lwmutex
@@ -15,10 +16,10 @@
 
 #define MAX_PENDING    8
 #define TITLE_MAX      64     // CELL_VIDEO_EXPORT_UTIL_VIDEO_TITLE_MAX_LENGTH
-#define ALBUM_TITLE    "Yo! Player Downloads"   // the album the XMB groups these under
+#define ALBUM_TITLE    "CRTube Downloads"   // the album the XMB groups these under
 #define SHUTDOWN_WAIT_MS 15000   // cap on how long exit waits for a registration to commit
 #define SHUTDOWN_POLL_MS 20
-#define FALLBACK_DIR   "/dev_hdd0/tmp/yo-player/downloads"   // exports will fail from here; downloads still work
+#define FALLBACK_DIR   CRTUBE_DATA_DIR "/downloads"   // exports will fail from here; downloads still work
 
 typedef enum { EXPORT_IDLE, EXPORT_INITIALIZING, EXPORT_REGISTERING, EXPORT_FINALIZING } ExportState;
 

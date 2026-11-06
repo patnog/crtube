@@ -16,7 +16,7 @@
 #endif
 
 #ifndef BUILD_NAME
-#define BUILD_NAME "yo-player-psl1ght"
+#define BUILD_NAME "CRTube"
 #endif
 
 #ifndef BUILD_STAMP

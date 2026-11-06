@@ -1,5 +1,6 @@
 // storage - plain-text preferences + watch history under /dev_hdd0/tmp/yo-player/ (see storage.h).
 
+#include "app-config.h"
 #include "storage.h"
 #include "vfs.h"
 #include "string-utilities.h"   // strCopy
@@ -7,7 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define DATA_DIR        "/dev_hdd0/tmp/yo-player"
+#define DATA_DIR        CRTUBE_DATA_DIR
 #define HISTORY_PATH    DATA_DIR "/history.txt"
 #define SUBS_PATH       DATA_DIR "/subscriptions.txt"
 #define WATCHLATER_PATH DATA_DIR "/watchlater.txt"

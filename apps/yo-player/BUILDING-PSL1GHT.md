@@ -47,8 +47,8 @@ make -C apps/yo-player pkg
 ```
 
 The first command produces `yo-player-psl1ght.elf`, a CEX SELF, and a fake
-SELF. The second also produces `yo-player-psl1ght.pkg` and the finalized NPDRM
-package, `yo-player-psl1ght.gnpdrm.pkg`. `make -C apps/yo-player clean`
+SELF. The second also produces `crtube.pkg` and the finalized NPDRM
+package, `crtube.gnpdrm.pkg`. `make -C apps/yo-player clean`
 removes only PSL1GHT outputs.
 
 The shaders are RSX assembly compiled with PSL1GHT's `cgcomp -a`; Nvidia Cg and
@@ -66,7 +66,7 @@ PSL1GHT's all-symbol stub archive from exposing an unresolved app-side
 
 ## Install on Evilnat CFW
 
-Copy `apps/yo-player/yo-player-psl1ght.gnpdrm.pkg` to a FAT32 USB drive's
+Copy `apps/yo-player/crtube.gnpdrm.pkg` to a FAT32 USB drive's
 `/packages` directory or to `/dev_hdd0/packages`, then install it through
 Package Manager. The distinct title ID makes rollback simple: uninstall the
 PSL1GHT entry and the official release remains installed.

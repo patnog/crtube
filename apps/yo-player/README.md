@@ -199,8 +199,9 @@ or move it to another console:
 
 ## Build & deploy
 
-Both targets produce an NPDRM `.pkg`. The original Sony-SDK target goes
-through the **ps3 MCP tool** (or its build VM):
+Both targets produce an NPDRM `.pkg`. The PSL1GHT build produces `crtube.pkg`
+(and `crtube.gnpdrm.pkg`); the original Sony-SDK build produces
+`out/crtube-sdk.pkg` through the **ps3 MCP tool** (or its build VM):
 
 1. `mcp__ps3__list` — confirm the app name.
 2. `mcp__ps3__build` with kind `apps`, name `yo-player` — returns a job id.

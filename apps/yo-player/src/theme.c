@@ -2,13 +2,14 @@
 // live in simple-lib-app's theme-registry; this file is the built-in palette, the field table that maps
 // its colours onto "key=" lines, and the two file paths.
 
+#include "app-config.h"
 #include "theme.h"
 #include "theme-registry.h"
 #include "vfs.h"                // readFile / makeDir / fileExists
 #include "settings-file.h"      // findSettingValue
 #include "dbg.h"                // logInfo / logError
 
-#define TMP_DIR        "/dev_hdd0/tmp/yo-player"
+#define TMP_DIR        CRTUBE_DATA_DIR
 #define THEMES_PATH    TMP_DIR "/themes.txt"
 #define SETTINGS_PATH  TMP_DIR "/settings.txt"
 

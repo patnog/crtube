@@ -4,4 +4,10 @@
 #include "dbg.h"
 
 LogCallback logCallback = 0;
+const char *debugLogPath = DBG_LOG;
+
+void setDebugLogPath(const char *path)
+{
+   if (path && path[0]) debugLogPath = path;
+}
 int logDetailed = 0;   // off until an app asks for it, so an ordinary log is short and says little

@@ -11,6 +11,7 @@ include $(PSL1GHT)/ppu_rules
 LD := $(CC)
 
 TARGET  := yo-player-psl1ght
+PKG_NAME := crtube
 BUILD   := build/psl1ght
 SOURCES := src src/screens src/extractors psl1ght
 INCLUDES := include ../../libs/simple-lib-app/include ../../libs/simple-lib-av/include \
@@ -21,8 +22,8 @@ CFILES := main.c home.c play.c search.c video-grid.c storage.c stream-select.c \
           subtitles.c chapters.c settings.c theme.c \
           account.c account-oauth.c youtube-tv.c
 
-TITLE     := Yo! Player CRT
-APPID     := YOPSL0001
+TITLE     := CRTube
+APPID     := CRTUBE001
 CONTENTID := UP0001-$(APPID)_00-0000000000000000
 ICON0     := $(CURDIR)/ICON0.PNG
 SFOXML    := $(CURDIR)/psl1ght/PARAM.SFO.xml
@@ -37,7 +38,7 @@ PORTLIBS   := $(PS3DEV)/portlibs/ppu
 
 CFLAGS = -O2 -Wall -Wextra -std=gnu11 -mcpu=cell $(MACHDEP) $(INCLUDE) \
           -DPSL1GHT -DNDEBUG -include psl1ght_compat.h \
-          -DBUILD_NAME=\"yo-player-psl1ght\" -DBUILD_STAMP=\"$(shell git -C $(ROOT) rev-parse --short HEAD 2>/dev/null || echo unknown)\"
+          -DBUILD_NAME=\"CRTube\" -DBUILD_STAMP=\"$(shell git -C $(ROOT) rev-parse --short HEAD 2>/dev/null || echo unknown)\"
 ASFLAGS = $(MACHDEP) -mregnames -mcpu=cell -Wa,-mcell $(INCLUDE)
 # The compiler driver links PSL1GHT's lv2-sprx.o as a start file, and its 0x28-byte
 # process PRX parameters would sit in front of lv2-sprx-modern.o's.  -B finds this
@@ -91,7 +92,7 @@ clean:
 	@$(MAKE) --no-print-directory -C $(ROOT)/libs/simple-lib-https -f Makefile.psl1ght clean
 	@$(MAKE) --no-print-directory -C $(ROOT)/libs/simple-lib-av -f Makefile.psl1ght clean
 	@$(MAKE) --no-print-directory -C $(ROOT)/libs/simple-lib-app -f Makefile.psl1ght clean
-	@rm -rf $(BUILD) $(OUTPUT).elf $(OUTPUT).self $(OUTPUT).fake.self $(OUTPUT).pkg $(OUTPUT).gnpdrm.pkg
+	@rm -rf $(BUILD) $(OUTPUT).elf $(OUTPUT).self $(OUTPUT).fake.self $(OUTPUT).pkg $(OUTPUT).gnpdrm.pkg $(CURDIR)/$(PKG_NAME).pkg $(CURDIR)/$(PKG_NAME).gnpdrm.pkg
 
 run: $(BUILD)
 	@$(PS3LOADAPP) $(OUTPUT).self
@@ -100,8 +101,10 @@ run: $(BUILD)
 # The conventional `pkg: $(BUILD) $(OUTPUT).pkg` form permits both prerequisites
 # to run concurrently and can start a second object build in this directory.
 pkg: $(BUILD)
-	@rm -f $(OUTPUT).pkg $(OUTPUT).gnpdrm.pkg
+	@rm -f $(OUTPUT).pkg $(OUTPUT).gnpdrm.pkg $(CURDIR)/$(PKG_NAME).pkg $(CURDIR)/$(PKG_NAME).gnpdrm.pkg
 	@$(MAKE) --no-print-directory $(OUTPUT).pkg
+	@cp $(OUTPUT).pkg $(CURDIR)/$(PKG_NAME).pkg
+	@if [ -f $(OUTPUT).gnpdrm.pkg ]; then cp $(OUTPUT).gnpdrm.pkg $(CURDIR)/$(PKG_NAME).gnpdrm.pkg; fi
 else
 DEPENDS := $(OFILES:.o=.d)
 

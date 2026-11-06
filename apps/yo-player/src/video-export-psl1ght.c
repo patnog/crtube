@@ -2,11 +2,12 @@
 // Preserve completed files in an explicit app-owned directory instead of
 // pretending they were inserted into the XMB media database.
 
+#include "app-config.h"
 #include "video-export.h"
 #include "vfs.h"
 #include "dbg.h"
 
-#define DOWNLOAD_DIR "/dev_hdd0/tmp/yo-player/downloads"
+#define DOWNLOAD_DIR CRTUBE_DATA_DIR "/downloads"
 
 void initVideoExport(void)
 {

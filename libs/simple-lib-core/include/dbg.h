@@ -13,6 +13,10 @@
 
 #define DBG_LOG "/dev_hdd0/tmp/dbg.txt"
 
+// Apps may select an isolated persistent log before starting worker threads.
+extern const char *debugLogPath;
+void setDebugLogPath(const char *path);
+
 // Optional live-log callback. If set, every logInfo/Warn/Error call hands
 // the fully-formatted line (timestamp + level + body) to the callback
 // AFTER the file write. Unset == file only. One process-wide definition
@@ -67,7 +71,7 @@ static inline int dbgFormatTimestamp(char *out)
    return o;  // == 15
 }
 
-// Append one timestamped, level-prefixed line to /dev_hdd0/tmp/dbg.txt.
+// Append one timestamped, level-prefixed line to the currently selected debug log.
 // Variadic: plain string ("hello\n") or printf-style ("rc=0x%x\n", rc).
 // Full C99 printf minus floats (see common/printf.h).
 //
@@ -104,7 +108,7 @@ static inline void logEmit(const char *level, const char *fmt, va_list ap)
    // O_APPEND so the kernel positions+writes atomically per call: concurrent
    // loggers from different threads/PRXs can't interleave halves of a line.
    VfsFile f;
-   if (openFs(DBG_LOG, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_APPEND, &f) == 0)
+   if (openFs(debugLogPath, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_APPEND, &f) == 0)
    {
       writeFs(&f, line, (uint64_t)(o + n));
       closeFs(&f);

@@ -9,6 +9,7 @@
 // (Oculus) was capped to ~60 seconds of media on 2026-08-26; VISIONOS replaced it
 // and serves full-length urls. Expect this to need swapping again in future.
 
+#include "app-config.h"
 #include "extractor.h"
 #include "http.h"               // fetchHttp
 #include "string-utilities.h"   // strCopy
@@ -467,7 +468,7 @@ static void parseFormats(const char *resp, const char *end, StreamInfo *out)
 // The anonymous visitor session. Without it a logged-out player request gets LOGIN_REQUIRED. Minting
 // a fresh one every launch is itself a bot signal that re-triggers the wall, so it persists to disk:
 // we reuse a saved session and only mint (and save) when there's none, or a saved one goes stale.
-#define VISITOR_CACHE_PATH "/dev_hdd0/tmp/yo-player/visitor.txt"
+#define VISITOR_CACHE_PATH CRTUBE_DATA_DIR "/visitor.txt"
 
 static char visitorData[192];
 static int  visitorFromDisk;   // the current session was loaded from the cache (vs minted this launch)

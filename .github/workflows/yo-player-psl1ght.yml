@@ -72,7 +72,7 @@ jobs:
             apps/yo-player/yo-player-psl1ght.elf
             apps/yo-player/yo-player-psl1ght.self
             apps/yo-player/yo-player-psl1ght.fake.self
-            apps/yo-player/yo-player-psl1ght.pkg
-            apps/yo-player/yo-player-psl1ght.gnpdrm.pkg
+            apps/yo-player/crtube.pkg
+            apps/yo-player/crtube.gnpdrm.pkg
             apps/yo-player/build/psl1ght/*.map
             apps/yo-player/build/psl1ght/lv2-sprx-modern.o

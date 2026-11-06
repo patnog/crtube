@@ -1,5 +1,6 @@
 // home - the landing screen: trending categories in a VideoGrid (see home.h).
 
+#include "app-config.h"
 #include "screens/home.h"
 #include "screens/search.h"
 #include "screens/play.h"
@@ -103,7 +104,7 @@ static int         sdHintsTwoRows;
 
 // L2 cycles through these SD-only scales. The value is saved separately from
 // settings.txt so the homebrew can update it without rewriting user settings.
-#define SD_SCALE_PATH "/dev_hdd0/tmp/yo-player/sd-ui-scale.txt"
+#define SD_SCALE_PATH CRTUBE_DATA_DIR "/sd-ui-scale.txt"
 static const float SdScaleChoices[] = { 1.00f, 1.50f };
 #define SD_SCALE_COUNT ((int)(sizeof SdScaleChoices / sizeof SdScaleChoices[0]))
 static int sdScaleLoaded;
