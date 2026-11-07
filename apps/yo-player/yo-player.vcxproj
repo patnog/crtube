@@ -58,6 +58,7 @@
    <ClCompile Include="src\chapters.c" />
    <ClCompile Include="src\settings.c" />
    <ClCompile Include="src\theme.c" />
+   <ClCompile Include="src\sidebar.c" />
   </ItemGroup>
   <ItemGroup>
    <ClInclude Include="include\screens\home.h" />
@@ -74,6 +75,7 @@
    <ClInclude Include="include\chapters.h" />
    <ClInclude Include="include\settings.h" />
    <ClInclude Include="include\theme.h" />
+   <ClInclude Include="include\sidebar.h" />
   </ItemGroup>
   <ItemGroup>
    <None Include="yo-player.conf" />

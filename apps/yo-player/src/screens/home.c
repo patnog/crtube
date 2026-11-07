@@ -10,6 +10,7 @@
 #include "vfs.h"
 #include "account.h"
 #include "downloads.h"
+#include "sidebar.h"
 #include "ui/button-hints.h"
 #include "ui/console-glyphs.h"
 
@@ -93,6 +94,9 @@ static struct {
    int       category;
    int       screenW, screenH;
    int       accountOpen;   // the sign-in / account panel is showing
+   int       settingsOpen;  // the settings window is showing
+   int       settingsSelected;
+   int       pendingAccountCategory; // account feed selected before signing in, or -1
 } home;
 
 static Font        uiFont;
@@ -163,6 +167,24 @@ static void setAccountHintCaption(const char *caption)
 static Label       panelTitle, panelLine1, panelLine2, panelCode, panelFooter;
 static ButtonHints panelHints;
 static int         panelConfirmHint, panelBackHint;
+
+// Settings window shell. Content Region and per-category SponsorBlock controls
+// are populated by the settings implementation patch; scaling already exists.
+#define SETTINGS_PANEL_W 900
+#define SETTINGS_PANEL_H 430
+static Label settingsTitle, settingsRows[3], settingsFooter;
+
+static int getSettingsPanelWidth(void)
+{
+   int width = home.screenW - 48;
+   return width < SETTINGS_PANEL_W ? width : SETTINGS_PANEL_W;
+}
+
+static int getSettingsPanelHeight(void)
+{
+   int height = home.screenH - 48;
+   return height < SETTINGS_PANEL_H ? height : SETTINGS_PANEL_H;
+}
 
 // approximate seconds-ago from a "N unit ago" string. approximate is fine here (unlike a precise date sort):
 // it only needs to group recent above old across channels. unknown/live sorts last.
@@ -333,6 +355,44 @@ static void cacheCurrent(void)
    categoryCached[home.category] = 1;
 }
 
+static void switchToCategory(int category);
+static void openAccountPanel(void);
+
+static void setSidebarForCategory(void)
+{
+   if (home.category == HOME_WATCHLATER) setSidebarCurrent(SIDEBAR_PS3_WATCH_LATER);
+   else if (home.category == HOME_LOCAL_HISTORY) setSidebarCurrent(SIDEBAR_PS3_HISTORY);
+   else if (home.category == HOME_SUBS) setSidebarCurrent(SIDEBAR_PS3_SUBSCRIPTIONS);
+   else if (home.category == HOME_ACCOUNT + ACCOUNT_FEED_HOME) setSidebarCurrent(SIDEBAR_RECOMMENDED);
+   else if (home.category == HOME_ACCOUNT + ACCOUNT_FEED_SUBSCRIPTIONS) setSidebarCurrent(SIDEBAR_ACCOUNT_SUBSCRIPTIONS);
+   else if (home.category == HOME_ACCOUNT + ACCOUNT_FEED_HISTORY) setSidebarCurrent(SIDEBAR_ACCOUNT_HISTORY);
+   else if (home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER) setSidebarCurrent(SIDEBAR_ACCOUNT_WATCH_LATER);
+   else if (home.category == TREND_GAMING) setSidebarCurrent(SIDEBAR_TRENDING_GAMING);
+   else if (home.category == TREND_SPORTS) setSidebarCurrent(SIDEBAR_TRENDING_SPORTS);
+   else if (home.category == TREND_PODCASTS) setSidebarCurrent(SIDEBAR_TRENDING_PODCASTS);
+   else setSidebarCurrent(SIDEBAR_TRENDING);
+}
+
+static void selectAccountFeed(AccountFeed feed)
+{
+   int category = HOME_ACCOUNT + (int)feed;
+   if (isSignedIn()) {
+      switchToCategory(category);
+      return;
+   }
+   home.pendingAccountCategory = category;
+   openAccountPanel();
+}
+
+static void switchToCategory(int category)
+{
+   if (category < 0 || category >= HOME_CAT_COUNT || category == home.category) return;
+   cacheCurrent();
+   home.category = category;
+   loadCategory();
+   setSidebarForCategory();
+}
+
 static void switchCategory(int delta)
 {
    cacheCurrent();
@@ -344,6 +404,7 @@ static void switchCategory(int delta)
    if (position == count) position = 0;   // the category left the cycle (signed out): restart it
    home.category = order[(position + delta + count) % count];
    loadCategory();
+   setSidebarForCategory();
 }
 
 // signed in or out (here, or a revoked token found by a feed request): the account caches belong to the
@@ -358,12 +419,25 @@ static void applyAccountChange(void)
    setAccountHintCaption(isSignedIn() ? "Account" : "Sign in");
    home.category = isSignedIn() ? HOME_ACCOUNT + ACCOUNT_FEED_HOME : HOME_SUBS;
    loadCategory();
+   setSidebarForCategory();
 }
 
 // ---- account panel (Select) ----
 
 #define PANEL_W 820
 #define PANEL_H 360
+
+static int getAccountPanelWidth(void)
+{
+   int width = home.screenW - 48;
+   return width < PANEL_W ? width : PANEL_W;
+}
+
+static int getAccountPanelHeight(void)
+{
+   int height = home.screenH - 48;
+   return height < PANEL_H ? height : PANEL_H;
+}
 
 // setLabelText re-rasterises, so the countdown only pays for it once a second
 static void setLabelIfChanged(Label *label, const char *text)
@@ -381,6 +455,7 @@ static void closeAccountPanel(void)
 {
    cancelSignIn();
    home.accountOpen = 0;
+   home.pendingAccountCategory = -1;
 }
 
 static void updateAccountPanel(void)
@@ -389,7 +464,15 @@ static void updateAccountPanel(void)
    getSignInStatus(&status);
    int retryable = status.stage == SIGNIN_DENIED || status.stage == SIGNIN_EXPIRED || status.stage == SIGNIN_FAILED;
 
-   if (status.stage == SIGNIN_DONE) { home.accountOpen = 0; return; }   // applyAccountChange shows the new feeds
+   if (status.stage == SIGNIN_DONE) {
+      home.accountOpen = 0;
+      if (home.pendingAccountCategory >= HOME_ACCOUNT && home.pendingAccountCategory < HOME_LOCAL_HISTORY) {
+         int category = home.pendingAccountCategory;
+         home.pendingAccountCategory = -1;
+         switchToCategory(category);
+      }
+      return;
+   }   // applyAccountChange shows the new feeds
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { closeAccountPanel(); return; }
    if (isPadButtonPressed(PAD_BTN_CROSS)) {
       if (isSignedIn())   { signOut(); home.accountOpen = 0; }
@@ -433,16 +516,68 @@ static void drawAccountPanel(void)
    const char *back = (status.stage == SIGNIN_STARTING || status.stage == SIGNIN_WAITING) ? "Cancel" : "Close";
    if (strcmp(panelHints.hints[panelBackHint].caption.text, back) != 0) setButtonHintCaption(&panelHints, panelBackHint, back);
 
-   int x = (home.screenW - PANEL_W) / 2, y = (home.screenH - PANEL_H) / 2, centerX = home.screenW / 2;
+   int panelW = getAccountPanelWidth(), panelH = getAccountPanelHeight();
+   int x = (home.screenW - panelW) / 2, y = (home.screenH - panelH) / 2, centerX = home.screenW / 2;
    fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
-   fillGfxRectangle(x, y, PANEL_W, PANEL_H, activeTheme->appBg);
-   fillGfxRectangle(x, y, PANEL_W, 4, activeTheme->accent);
-   drawLabelCentered(&panelTitle, centerX, y + 30);
-   drawLabelCentered(&panelLine1, centerX, y + 92);
-   if (line2[0])  drawLabelCentered(&panelLine2, centerX, y + 128);
-   if (code[0])   drawLabelCentered(&panelCode, centerX, y + 178);
-   if (footer[0]) drawLabelCentered(&panelFooter, centerX, y + 252);
+   fillGfxRectangle(x, y, panelW, panelH, activeTheme->appBg);
+   fillGfxRectangle(x, y, panelW, 4, activeTheme->accent);
+   drawLabelCentered(&panelTitle, centerX, y + 28);
+   drawLabelCentered(&panelLine1, centerX, y + panelH / 4);
+   if (line2[0])  drawLabelCentered(&panelLine2, centerX, y + panelH / 4 + 36);
+   if (code[0])   drawLabelCentered(&panelCode, centerX, y + panelH / 2 - 4);
+   if (footer[0]) drawLabelCentered(&panelFooter, centerX, y + panelH - 92);
    drawButtonHints(&panelHints, home.screenW);
+}
+
+static void openSettingsPanel(void)
+{
+   home.settingsOpen = 1;
+   home.settingsSelected = 0;
+}
+
+static void updateSettingsPanel(void)
+{
+   if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.settingsOpen = 0; return; }
+   if (isPadButtonPressed(PAD_BTN_UP)) home.settingsSelected = (home.settingsSelected + 2) % 3;
+   if (isPadButtonPressed(PAD_BTN_DOWN)) home.settingsSelected = (home.settingsSelected + 1) % 3;
+   if ((isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
+        isPadButtonPressed(PAD_BTN_RIGHT)) && home.settingsSelected == 0) {
+      cycleSdScale();
+      refreshScaleHint();
+   }
+}
+
+static void drawSettingsPanel(void)
+{
+   char scaleText[96];
+   if (isGfxSdVideoOutput())
+      snprintf(scaleText, sizeof scaleText, "UI Scaling                         %.1fx", (double)getGfxUiScaleFactor());
+   else
+      snprintf(scaleText, sizeof scaleText, "UI Scaling                         Not available on HD output");
+   setLabelIfChanged(&settingsRows[0], scaleText);
+   setLabelIfChanged(&settingsRows[1], "Content Region                    Configurable in next settings update");
+   setLabelIfChanged(&settingsRows[2], "SponsorBlock                      Per-category controls in next settings update");
+
+   int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
+   int x = (home.screenW - panelW) / 2;
+   int y = (home.screenH - panelH) / 2;
+   fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRectangle(x, y, panelW, panelH, activeTheme->appBg);
+   fillGfxRectangle(x, y, panelW, 4, activeTheme->accent);
+   drawLabelCentered(&settingsTitle, home.screenW / 2, y + 30);
+
+   int rowGap = (panelH - 184) / 3;
+   for (int i = 0; i < 3; i++) {
+      int rowY = y + 92 + i * rowGap;
+      if (i == home.settingsSelected)
+         fillGfxRectangle(x + 24, rowY - 8, panelW - 48, 58, activeTheme->rowHighlight);
+      setLabelColor(&settingsRows[i], i == home.settingsSelected ? activeTheme->accent : activeTheme->textPrimary);
+      refreshLabelScale(&settingsRows[i]);
+      moveLabel(&settingsRows[i], x + 52, rowY);
+      drawLabel(&settingsRows[i]);
+   }
+   refreshLabelScale(&settingsFooter);
+   drawLabelCentered(&settingsFooter, home.screenW / 2, y + panelH - 42);
 }
 
 // OSK confirmed: a link plays directly, anything else opens a search.
@@ -460,6 +595,9 @@ static void onQueryEntered(const char *text)
 
 static void initHome(void)
 {
+   home.pendingAccountCategory = -1;
+   home.settingsOpen = 0;
+   home.settingsSelected = 0;
    loadSdScale();
    home.screenW = getGfxScreenWidth();
    home.screenH = getGfxScreenHeight();
@@ -468,6 +606,7 @@ static void initHome(void)
    int gridTop = sdHintsTwoRows ? SD_GRID_TOP : GRID_TOP;
 
    uiFont = openSystemFont(FONT_POP);
+   initSidebar(&uiFont, home.screenW, home.screenH);
    initLabel(&titleLabel,  &uiFont, MARGIN_X, headerY, home.screenW - 2 * MARGIN_X, AUTO, TITLE_SIZE, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabel(&statusLabel, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, AUTO, 21, activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
    // Home heading/status grow by rerasterising their font, while retaining their
@@ -509,13 +648,22 @@ static void initHome(void)
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R1),       "Category");
    }
 
-   int panelY = (home.screenH - PANEL_H) / 2;
-   initLabel(&panelTitle,  &uiFont, 0, 0, PANEL_W, AUTO, 30, activeTheme->textPrimary,   TEXT_NOWRAP, "");
-   initLabel(&panelLine1,  &uiFont, 0, 0, PANEL_W, AUTO, 22, activeTheme->textSecondary, TEXT_NOWRAP, "");
-   initLabel(&panelLine2,  &uiFont, 0, 0, PANEL_W, AUTO, 22, activeTheme->textPrimary,   TEXT_NOWRAP, "");
-   initLabel(&panelCode,   &uiFont, 0, 0, PANEL_W, AUTO, 56, activeTheme->textPrimary,   TEXT_NOWRAP, "");
-   initLabel(&panelFooter, &uiFont, 0, 0, PANEL_W, AUTO, 20, activeTheme->textSecondary, TEXT_NOWRAP, "");
-   initButtonHints(&panelHints, &uiFont, panelY + PANEL_H - 48, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
+   int panelY = (home.screenH - getAccountPanelHeight()) / 2;
+   int accountTextW = getAccountPanelWidth() - 40;
+   int settingsTextW = getSettingsPanelWidth();
+   initLabel(&panelTitle,  &uiFont, 0, 0, accountTextW, AUTO, 30, activeTheme->textPrimary,   TEXT_NOWRAP, "");
+   initLabel(&panelLine1,  &uiFont, 0, 0, accountTextW, AUTO, 22, activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
+   initLabel(&panelLine2,  &uiFont, 0, 0, accountTextW, AUTO, 22, activeTheme->textPrimary,   TEXT_NOWRAP_ELLIPSIS, "");
+   initLabel(&panelCode,   &uiFont, 0, 0, accountTextW, AUTO, 56, activeTheme->textPrimary,   TEXT_NOWRAP, "");
+   initLabel(&panelFooter, &uiFont, 0, 0, accountTextW, AUTO, 20, activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
+   initLabel(&settingsTitle, &uiFont, 0, 0, settingsTextW - 48, AUTO, 30, activeTheme->textPrimary, TEXT_NOWRAP, "Settings");
+   for (int i = 0; i < 3; i++)
+      initLabel(&settingsRows[i], &uiFont, 0, 0, settingsTextW - 88, AUTO, 23, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
+   initLabel(&settingsFooter, &uiFont, 0, 0, settingsTextW - 48, AUTO, 19, activeTheme->textSecondary, TEXT_NOWRAP, "X / LEFT / RIGHT: Change     O: Close");
+   setLabelScaleWithUi(&settingsTitle, 1);
+   for (int i = 0; i < 3; i++) setLabelScaleWithUi(&settingsRows[i], 1);
+   setLabelScaleWithUi(&settingsFooter, 1);
+   initButtonHints(&panelHints, &uiFont, panelY + getAccountPanelHeight() - 48, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
    panelConfirmHint = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CROSS),  "Try again");
    panelBackHint    = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CIRCLE), "Close");
 
@@ -536,6 +684,7 @@ static void initHome(void)
    // signed in, start on the account's Recommended feed; otherwise on Subscriptions, as before
    home.category = isSignedIn() ? HOME_ACCOUNT + ACCOUNT_FEED_HOME : HOME_SUBS;
    loadCategory();
+   setSidebarForCategory();
 }
 
 static void updateHome(void)
@@ -544,7 +693,71 @@ static void updateHome(void)
    updateSignIn();
    if (getAccountRevision() != accountRevisionSeen) applyAccountChange();
    if (home.accountOpen) { updateAccountPanel(); return; }
+   if (home.settingsOpen) { updateSettingsPanel(); return; }
    if (oskInputActive()) return;
+
+   // Circle remains a global shortcut for the menu. LEFT only opens it when
+   // the selected thumbnail is in the first column; elsewhere LEFT belongs to
+   // the grid and must move the selection normally.
+   if (!isSidebarActive()) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+         openSidebar();
+         return;
+      }
+      if (isPadButtonPressed(PAD_BTN_LEFT) && gridStage(&home.grid) == GRID_READY &&
+          home.grid.columns > 0 && home.grid.selected >= 0 &&
+          (home.grid.selected % home.grid.columns) == 0) {
+         openSidebar();
+         return;
+      }
+   }
+   if (isSidebarActive()) {
+      int picked = updateSidebar();
+      if (picked >= 0) {
+         switch (picked) {
+            case SIDEBAR_SEARCH:
+               oskInputBegin("Search YouTube", "", onQueryEntered);
+               break;
+            case SIDEBAR_RECOMMENDED:
+               selectAccountFeed(ACCOUNT_FEED_HOME);
+               break;
+            case SIDEBAR_ACCOUNT_SUBSCRIPTIONS:
+               selectAccountFeed(ACCOUNT_FEED_SUBSCRIPTIONS);
+               break;
+            case SIDEBAR_ACCOUNT_HISTORY:
+               selectAccountFeed(ACCOUNT_FEED_HISTORY);
+               break;
+            case SIDEBAR_ACCOUNT_WATCH_LATER:
+               selectAccountFeed(ACCOUNT_FEED_WATCH_LATER);
+               break;
+            case SIDEBAR_TRENDING_GAMING:
+               switchToCategory(TREND_GAMING);
+               break;
+            case SIDEBAR_TRENDING_SPORTS:
+               switchToCategory(TREND_SPORTS);
+               break;
+            case SIDEBAR_TRENDING_PODCASTS:
+               switchToCategory(TREND_PODCASTS);
+               break;
+            case SIDEBAR_PS3_SUBSCRIPTIONS:
+               switchToCategory(HOME_SUBS);
+               break;
+            case SIDEBAR_PS3_HISTORY:
+               switchToCategory(HOME_LOCAL_HISTORY);
+               break;
+            case SIDEBAR_PS3_WATCH_LATER:
+               switchToCategory(HOME_WATCHLATER);
+               break;
+            case SIDEBAR_ACCOUNT:
+               openAccountPanel();
+               break;
+            case SIDEBAR_SETTINGS:
+               openSettingsPanel();
+               break;
+         }
+      }
+      return;
+   }
 
    // Cycle and persist the SD readability scale; thumbnails keep their size.
    if (isPadButtonPressed(PAD_BTN_L2) && isGfxSdVideoOutput()) {
@@ -630,7 +843,9 @@ static void drawHome(void)
    drawButtonHints(&hints, home.screenW);
    if (sdHintsTwoRows) drawButtonHints(&hintsSecondRow, home.screenW);
    drawDownloadOverlay(home.screenW);
+   if (!home.accountOpen && !home.settingsOpen) drawSidebar();
    if (home.accountOpen) drawAccountPanel();
+   if (home.settingsOpen) drawSettingsPanel();
 }
 
 static void suspendHome(void) { stopVideoGrid(&home.grid); }   // free the http pools for the pushed screen
@@ -665,6 +880,7 @@ static void resumeHome(void)
 static void termHome(void)
 {
    termVideoGrid(&home.grid);
+   termSidebar();
    termButtonHints(&hints);
    termButtonHints(&hintsSecondRow);
    termButtonHints(&panelHints);
@@ -675,6 +891,9 @@ static void termHome(void)
    freeLabel(&panelLine2);
    freeLabel(&panelCode);
    freeLabel(&panelFooter);
+   freeLabel(&settingsTitle);
+   for (int i = 0; i < 3; i++) freeLabel(&settingsRows[i]);
+   freeLabel(&settingsFooter);
    closeFont(&uiFont);
 }
 

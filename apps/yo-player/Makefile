@@ -20,7 +20,7 @@ INCLUDES := include ../../libs/simple-lib-app/include ../../libs/simple-lib-av/i
 CFILES := main.c home.c play.c search.c video-grid.c storage.c stream-select.c \
           downloads.c video-export-psl1ght.c extractor.c youtube.c sponsorblock.c \
           subtitles.c chapters.c settings.c theme.c \
-          account.c account-oauth.c youtube-tv.c
+          account.c account-oauth.c youtube-tv.c sidebar.c
 
 TITLE     := CRTube
 APPID     := CRTUBE001
