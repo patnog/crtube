@@ -15,3 +15,4 @@ void enqueueDownload(const SearchResult *item);   // add a video to the download
 
 void updateDownloadOverlay(void);         // refresh the "Downloading ..." label; call each frame in a screen update
 void drawDownloadOverlay(int screenWidth); // draw it top-right if a download is active; call in a screen draw
+int consumeDownloadCompletion(void); // consume a completion event on the UI thread

@@ -21,7 +21,7 @@
 #include <stdio.h>
 
 #define MAX_QUEUE          16
-#define DISPLAY_TITLE_MAX  32       // longest title shown in the "Downloading ..." overlay
+#define DISPLAY_TITLE_MAX  15       // maximum visible title characters, including the ellipsis
 #define OVERLAY_TEXT_SIZE  19       // matches the grid's Watch Later / duration badge
 
 typedef struct { char videoId[16]; char title[160]; } QueueItem;
@@ -36,6 +36,7 @@ static struct {
    volatile int     cancelAll;     // app exit: abort the current download and drain the queue
    volatile int     active;        // a download is currently running (drives the overlay)
    volatile int     percent;
+   volatile unsigned int completionSerial; // incremented by the worker after a successful download
    char             activeTitle[160];
    char             activeId[16];  // videoId of the running download (for dedupe; valid while active)
 
@@ -44,6 +45,7 @@ static struct {
 
 static Font  uiFont;
 static Label overlayLabel;
+static unsigned int consumedCompletionSerial;
 
 // ---- filename ----
 
@@ -136,7 +138,11 @@ static void runOneDownload(const QueueItem *item)
 
    if (rc != 0) { deleteFile(partPath); logInfo("[dl] %s %s\n", item->videoId, dl.cancelAll ? "cancelled" : "failed"); }
    else if (renamePath(partPath, finalPath) != 0) { deleteFile(partPath); logError("[dl] %s rename failed\n", item->videoId); }
-   else { logInfo("[dl] %s done\n", item->videoId); queueVideoExport(finalPath, item->title); }
+   else {
+      logInfo("[dl] %s done\n", item->videoId);
+      queueVideoExport(finalPath, item->title);
+      __sync_add_and_fetch(&dl.completionSerial, 1);
+   }
 }
 
 // ---- worker + queue ----
@@ -197,23 +203,58 @@ void enqueueDownload(const SearchResult *item)
 
 // ---- overlay ----
 
-// "Downloading "<title>" NN%" with the title truncated so it can't fill the screen; "(+N)" when more are
-// queued.
+// Clip by UTF-8 code points, reserving three of the 15 visible characters for "...".
+static int clipDisplayTitle(char *out, int cap, const char *title)
+{
+   const unsigned char *p = (const unsigned char *)title;
+   int chars = 0;
+   while (*p && chars < DISPLAY_TITLE_MAX) {
+      unsigned char c = *p;
+      p += (c < 0x80) ? 1 : ((c & 0xE0) == 0xC0) ? 2 : ((c & 0xF0) == 0xE0) ? 3 : ((c & 0xF8) == 0xF0) ? 4 : 1;
+      chars++;
+   }
+   if (!*p) { strCopy(out, cap, title); return 0; }
+
+   p = (const unsigned char *)title;
+   for (int i = 0; i < DISPLAY_TITLE_MAX - 3 && *p; i++) {
+      unsigned char c = *p;
+      p += (c < 0x80) ? 1 : ((c & 0xE0) == 0xC0) ? 2 : ((c & 0xF0) == 0xE0) ? 3 : ((c & 0xF8) == 0xF0) ? 4 : 1;
+   }
+   int bytes = (int)(p - (const unsigned char *)title);
+   if (bytes > cap - 4) bytes = cap - 4;
+   if (bytes < 0) bytes = 0;
+   memcpy(out, title, bytes);
+   out[bytes] = 0;
+   return 1;
+}
+
+// "Downloading "<title>" NN%" with the title limited to 15 visible characters;
+// "(+N)" is appended when more downloads are queued.
 static void formatOverlay(char *out, int cap)
 {
    char clipped[sizeof dl.activeTitle];
-   strCopy(clipped, sizeof clipped, dl.activeTitle);
-   truncateUtf8(clipped, DISPLAY_TITLE_MAX);
-   int truncated = strcmp(clipped, dl.activeTitle) != 0;
+   int truncated = clipDisplayTitle(clipped, sizeof clipped, dl.activeTitle);
 
    int queued = dl.count;
    if (queued > 0) snprintf(out, cap, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
    else            snprintf(out, cap, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
 }
 
+int consumeDownloadCompletion(void)
+{
+   if (!dl.initialized) return 0;
+   unsigned int serial = dl.completionSerial;
+   if (serial == consumedCompletionSerial) return 0;
+   consumedCompletionSerial = serial;
+   return 1;
+}
+
 void updateDownloadOverlay(void)
 {
-   if (!dl.initialized || !dl.active) return;
+   if (!dl.initialized) return;
+   /* Completions while browsing should not produce a stale toast on a later playback. */
+   consumedCompletionSerial = dl.completionSerial;
+   if (!dl.active) return;
    char text[128];
    formatOverlay(text, sizeof text);
    setLabelText(&overlayLabel, text);   // only rasterises on a real change
@@ -223,7 +264,7 @@ void drawDownloadOverlay(int screenWidth)
 {
    if (!dl.initialized || !dl.active || overlayLabel.tt.tex.w == 0) return;
    int badgeW = overlayLabel.tt.tex.w + 12, badgeH = OVERLAY_TEXT_SIZE + 8;
-   int x = screenWidth - badgeW - 6, y = 6;
+   int x = screenWidth - badgeW - 6 - OVERLAY_TEXT_SIZE, y = 50; // extra right offset of approximately two characters
    fillGfxRectangle(x, y, badgeW, badgeH, activeTheme->badgeFill);
    drawLabelAt(&overlayLabel, x + 6, y + 4);
 }
@@ -236,6 +277,9 @@ void initDownloads(void)
    createLock(&dl.mutex);
    uiFont = openSystemFont(FONT_POP);
    initLabel(&overlayLabel, &uiFont, 0, 0, AUTO, AUTO, OVERLAY_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP, "");
+   /* Rasterize at the selected UI scale without scaling the screen-space anchor. */
+   setLabelScaleWithUi(&overlayLabel, 1);
+   consumedCompletionSerial = 0;
    dl.initialized = 1;
 }
 

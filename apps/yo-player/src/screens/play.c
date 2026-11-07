@@ -11,6 +11,7 @@
 
 #include "screens/play.h"
 #include "screens/home.h"
+#include "downloads.h"
 #include "extractor.h"
 #include "stream-select.h"   // pickBestVideo / pickBestAudio (shared with download)
 
@@ -297,6 +298,7 @@ static struct {
    int              sbThreadActive, sbReady;
    sys_ppu_thread_t sbWorkerTid;
    uint64_t         toastShownUs;      // brief toast timer (0 = hidden)
+   uint64_t         toastDurationUs;   // per-toast lifetime; defaults to TOAST_VISIBLE_US
 
    // subtitles: triangle picks a track (-1 = off, the default); a worker fetches it in the background
    // (updatePlay respawns the fetch whenever the pick and the fetched track disagree), and once ready
@@ -896,10 +898,16 @@ static void formatTime(char *buffer, int cap, int seconds)
    else                 snprintf(buffer, cap, "%d:%02d", seconds / 60, seconds % 60);
 }
 
-static void showToast(const char *text)
+static void showToastFor(const char *text, uint64_t durationUs)
 {
    setLabelText(&toastLabel, text);
    state.toastShownUs = sys_time_get_system_time();
+   state.toastDurationUs = durationUs;
+}
+
+static void showToast(const char *text)
+{
+   showToastFor(text, TOAST_VISIBLE_US);
 }
 
 // fetches the picked caption track in the background; updatePlay reaps it and respawns on a new pick.
@@ -1457,6 +1465,8 @@ static void handleChaptersInput(void)
 
 static void updatePlay(void)
 {
+   if (consumeDownloadCompletion()) showToastFor("Download Complete", 3000000ULL);
+
    // an overlay owns the pad for the whole frame it was (or just became) visible, so the button that
    // closed or opened it can't leak into playback input below (e.g. cross toggling pause on the way out)
    int overlayHadPad = state.descriptionVisible || state.chaptersVisible;
@@ -1908,7 +1918,8 @@ static void drawChapters(void)
 // a brief toast in the top-right notification spot, one badge row below the subtitle-language badge.
 static void drawToast(void)
 {
-   if (state.toastShownUs == 0 || sys_time_get_system_time() - state.toastShownUs >= TOAST_VISIBLE_US) return;
+   uint64_t duration = state.toastDurationUs ? state.toastDurationUs : TOAST_VISIBLE_US;
+   if (state.toastShownUs == 0 || sys_time_get_system_time() - state.toastShownUs >= duration) return;
    int y = fullPlaybackHudVisible() && playbackInfoLabel.tt.tex.h > 0
          ? 32 + playbackInfoLabel.tt.tex.h + 20 : 80;
    int maxY = state.screenH - toastLabel.tt.tex.h - 2 * BADGE_PAD_X - 8;
