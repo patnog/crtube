@@ -105,11 +105,10 @@ static Font        uiFont;
 static Label       titleLabel, statusLabel;
 static ButtonHints hints, hintsSecondRow;
 static int         accountHint;   // index of the Select hint ("Sign in" / "Account")
-static int         scaleHint = -1;
 static int         sdHintsTwoRows;
 
-// L2 cycles through these SD-only scales. The value is saved separately from
-// settings.txt so the homebrew can update it without rewriting user settings.
+// SD UI scaling is configured in Settings and persisted separately from
+// settings.txt so it can be updated without rewriting the other user settings.
 #define SD_SCALE_PATH CRTUBE_DATA_DIR "/sd-ui-scale.txt"
 static const float SdScaleChoices[] = { 1.00f, 1.50f };
 #define SD_SCALE_COUNT ((int)(sizeof SdScaleChoices / sizeof SdScaleChoices[0]))
@@ -149,14 +148,6 @@ static void cycleSdScale(void)
    char buf[32];
    int n = snprintf(buf, sizeof buf, "%.2f\n", (double)SdScaleChoices[sdScaleIndex]);
    if (n > 0) writeFile(SD_SCALE_PATH, buf, (uint64_t)n);
-}
-
-static void refreshScaleHint(void)
-{
-   if (!sdHintsTwoRows || scaleHint < 0) return;
-   char caption[32];
-   snprintf(caption, sizeof caption, "Scale %.1fx", (double)getGfxSdUiScale());
-   setButtonHintCaption(&hintsSecondRow, scaleHint, caption);
 }
 
 static void setAccountHintCaption(const char *caption)
@@ -569,7 +560,6 @@ static void updateSettingsPanel(void)
          setAutoplayEnabled(enabled);
       } else if (home.settingsSelected == 1) {
          cycleSdScale();
-         refreshScaleHint();
       } else if (home.settingsSelected == 2) {
          int delta = isPadButtonPressed(PAD_BTN_LEFT) ? -1 : 1;
          setOverscanPercent(getOverscanPercent() + delta);
@@ -778,8 +768,8 @@ static void initHome(void)
    setLabelScaleWithUi(&statusLabel, 1);
 
    if (sdHintsTwoRows) {
-      // Reserve the maximum row height so pressing L2 only changes text/icon size,
-      // not the absolute positions of the footer or grid.
+      // Reserve the maximum row height for both SD scaling choices so the
+      // footer and grid keep fixed positions when the setting changes.
       int maxGlyphHeight = (int)(HINT_GLYPH_H * SD_MAX_SCALE + 0.5f);
       initButtonHints(&hints, &uiFont,
                       home.screenH - SD_HINTS_BOTTOM - maxGlyphHeight - SD_HINT_ROW_GAP,
@@ -796,9 +786,8 @@ static void initHome(void)
       accountHint = addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_SELECT), isSignedIn() ? "Account" : "Sign in");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_L1), "");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R1), "Category");
-      scaleHint = addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_L2), "Scale 1.5x");
+      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R2), "Refresh");
       setButtonHintsStableLayout(&hintsSecondRow, 1);
-      refreshScaleHint();
    } else {
       initButtonHints(&hints, &uiFont, home.screenH - HINTS_BOTTOM, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
       addButtonHint(&hints, getConsoleGlyph(GLYPH_CROSS),    "Play");
@@ -809,6 +798,7 @@ static void initHome(void)
       accountHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT), isSignedIn() ? "Account" : "Sign in");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_L1),       "");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R1),       "Category");
+      addButtonHint(&hints, getConsoleGlyph(GLYPH_R2),       "Refresh");
    }
 
    int panelY = (home.screenH - getAccountPanelHeight()) / 2;
@@ -899,13 +889,6 @@ static void updateHome(void)
    if (isSidebarActive()) {
       int picked = updateSidebar();
       if (picked >= 0) handleHomeSidebarSelection(picked);
-      return;
-   }
-
-   // Cycle and persist the SD readability scale; thumbnails keep their size.
-   if (isPadButtonPressed(PAD_BTN_L2) && isGfxSdVideoOutput()) {
-      cycleSdScale();
-      refreshScaleHint();
       return;
    }
 

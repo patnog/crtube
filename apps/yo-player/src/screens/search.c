@@ -35,9 +35,6 @@
 #define SD_HINTS_BOTTOM 100
 #define SD_HINT_ROW_GAP 8
 #define SD_MAX_SCALE 1.5f
-#define SD_SCALE_PATH CRTUBE_DATA_DIR "/sd-ui-scale.txt"
-#define SD_SCALE_COUNT 2
-static const float SdScaleChoices[SD_SCALE_COUNT] = { 1.00f, 1.50f };
 #define TRIANGLE_HINT 3         // Triangle's slot in the hint row (see initSearch): retitled per mode
 
 static const char *SortNames[SORT_COUNT]                = { "Relevance", "Views" };
@@ -63,7 +60,6 @@ static Font        uiFont;
 static Label       titleLabel, sortLabel, statusLabel;
 static ButtonHints hints, hintsSecondRow;
 static int sdHintsTwoRows;
-static int scaleHint = -1;
 
 static int searchFetch(const char *token, SearchResults *out, void *user)
 {
@@ -84,30 +80,6 @@ static int searchFetch(const char *token, SearchResults *out, void *user)
 }
 
 // in channel mode Triangle toggles the subscription (you're already in the channel); elsewhere it drills in.
-static void refreshScaleHint(void)
-{
-   if (!sdHintsTwoRows || scaleHint < 0) return;
-   char caption[32];
-   snprintf(caption, sizeof caption, "Scale %.1fx", (double)getGfxUiScaleFactor());
-   setButtonHintCaption(&hintsSecondRow, scaleHint, caption);
-}
-
-static void cycleSdScale(void)
-{
-   float current = getGfxUiScaleFactor();
-   int index = 0;
-   for (int i = 0; i < SD_SCALE_COUNT; i++) {
-      float diff = current - SdScaleChoices[i];
-      if (diff > -0.001f && diff < 0.001f) { index = i; break; }
-   }
-   index = (index + 1) % SD_SCALE_COUNT;
-   setGfxSdUiScale(SdScaleChoices[index]);
-   char buf[16];
-   int n = snprintf(buf, sizeof buf, "%.2f\n", (double)SdScaleChoices[index]);
-   if (n > 0) writeFile(SD_SCALE_PATH, buf, (uint64_t)n);
-   refreshScaleHint();
-}
-
 static void updateTriangleHint(void)
 {
    const char *caption = "Channel";
@@ -216,9 +188,8 @@ static void initSearch(void)
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_SELECT), "Sort");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R3),     "Download");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_START),  "Search");
-      scaleHint = addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_L2), "Scale 1.5x");
+      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R2), "Refresh");
       setButtonHintsStableLayout(&hintsSecondRow, 1);
-      refreshScaleHint();
    } else {
       initButtonHints(&hints, &uiFont, search.screenH - HINTS_BOTTOM, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
       addButtonHint(&hints, getConsoleGlyph(GLYPH_CROSS),    "Play");
@@ -228,6 +199,7 @@ static void initSearch(void)
       addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT),   "Sort");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R3),       "Download");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_START),    "Search");
+      addButtonHint(&hints, getConsoleGlyph(GLYPH_R2),       "Refresh");
    }
 
    logInfo("[diag-search] initSearch initVideoGrid begin dimensions=%dx%d\n",
@@ -261,11 +233,6 @@ static void updateSearch(void)
       return;
    }
 
-   if (search.channelId[0] && isPadButtonPressed(PAD_BTN_L2) && isGfxSdVideoOutput()) {
-      cycleSdScale();
-      return;
-   }
-
    if (isPadButtonPressed(PAD_BTN_START)) { oskInputBegin("Search YouTube", search.query[0] ? search.query : "", onQueryEntered); }
 
    // Circle: channel-with-underlying-search -> back to results; otherwise pop to home
@@ -279,6 +246,7 @@ static void updateSearch(void)
       else { search.sort = (search.sort + 1) % SORT_COUNT; reload(); }
       return;
    }
+   if (isPadButtonPressed(PAD_BTN_R2)) { reload(); return; }
 
    updateVideoGrid(&search.grid);
    if (gridStage(&search.grid) != GRID_READY) return;
