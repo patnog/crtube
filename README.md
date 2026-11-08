@@ -21,7 +21,7 @@ This repository is a fork of [vortigauntlet/yo-player-signin](https://github.com
 - **Members-only identification:** Restricted videos can be identified and marked in the video grid instead of being mistaken for ordinary playable videos.
 - **Streaming playback:** H.264 video and AAC audio are streamed during playback. The app includes the TEE H.264 decoder as an experimental option for supported 1080p50/60 streams, with Sony VDEC remaining the default.
 - **Navigation and feeds:** A sidebar provides Search, Recommended, account feeds, PS3-local lists, Trending, Live, Account, Settings and Exit. Trending has Gaming, Sports and Podcasts tabs; Live has Popular, Music, Gaming, Sports, Podcasts and News.
-- **Playback and settings:** Search, channel browsing, resume, subtitles, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, region selection, background downloads and XMB video export.
+- **Playback and settings:** Search, channel browsing, resume, subtitles, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, region selection and background downloads.
 
 ## What this fork adds
 
@@ -62,8 +62,9 @@ The original account functionality remains optional. Without signing in, the app
 - Subscribe to channels and browse their latest uploads.
 - Save videos to the local Watch Later list.
 - Keep local watch history and playback positions.
-- Queue video downloads in the background.
-- Export completed downloads to the PS3 XMB Video column.
+- Queue VOD downloads in the background. Live streams cannot be downloaded.
+- Completed files are stored on the PS3 HDD. The Sony SDK build uses the application's content directory (`/dev_hdd0/game/YOPCRT001/USRDIR`); if the system content directory cannot be obtained, it falls back to `/dev_hdd0/tmp/crtube_sdk/downloads`. The PSL1GHT build stores downloads in `/dev_hdd0/tmp/crtube/downloads`.
+- **XMB Video column integration is planned for a future release and is not available in this release.** Downloads must currently be accessed through the PS3 file system.
 
 ### CRT and SD display
 - On SD output, the application uses a layout designed around a 4:3 screen.
@@ -123,7 +124,7 @@ in the app take precedence if a screen has a context-specific action.
 | **START** | Open playback Options, including Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay |
 | **CIRCLE** | Return to the video list |
 
-Live streams have no seek bar and cannot be downloaded. The description and chapter overlays temporarily take control of navigation while open. Audio tracks, quality and chapters are selected from playback Options; Square is reserved for SponsorBlock Ask actions.
+Live streams have no seek bar and cannot be downloaded. The description and chapter overlays temporarily take control of navigation while open. Audio tracks, quality and chapters are selected from playback Options; Square is reserved for SponsorBlock Ask actions. Background downloads are saved to the HDD locations listed above; they are not added to the XMB Video column in this release.
 
 ## Build and installation
 
@@ -140,6 +141,7 @@ For the application architecture, settings, storage files, playback behavior, an
 
 - YouTube changes its internal APIs and client restrictions frequently. Extraction compatibility may require future updates.
 - Live streams use a rolling segment window. They start and exit differently from VOD and do not support normal seeking or background downloading.
+- Completed background downloads remain in the application's HDD storage directory. Automatic registration in the XMB Video column is planned for a future release and is not part of the current release.
 - The TEE Decoder is experimental and opt-in. It supports a defined subset of H.264 (8-bit 4:2:0, progressive, CABAC, one slice per picture, up to 1920×1088); unsupported streams continue through Sony VDEC where possible. If TEE decoding fails during playback, the player attempts to switch to a lower rendition using Sony VDEC.
 - Account feeds require a working network connection and valid Google authorization. Access can be revoked from the Google account security page.
 
