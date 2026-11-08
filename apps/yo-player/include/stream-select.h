@@ -13,6 +13,9 @@ const StreamFormat *pickBestVideo(const StreamInfo *info);
 // Playback selector: additionally allows 1080p50/60 only when TEE initializes.
 const StreamFormat *pickBestPlaybackVideo(const StreamInfo *info);
 
+// True when a format is playable by the currently enabled PS3 decoder path.
+int isPlaybackVideoFormatDecodable(const StreamFormat *format);
+
 // Best format in a resolution profile: 0 <=480p60, 1 481-720p60, 2 721-1080p30.
 const StreamFormat *pickVideoForProfile(const StreamInfo *info, int profile);
 

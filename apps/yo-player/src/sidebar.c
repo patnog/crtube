@@ -5,6 +5,7 @@
 #include "gfx.h"
 #include "theme.h"
 #include "pad.h"
+#include "button-repeat.h"
 #include "thread.h"
 #include "ui/label.h"
 #include "ui/icon-font.h"
@@ -70,6 +71,7 @@ static struct {
    uint64_t animationStart;
    float animationFrom;
    int animationRunning;
+   ButtonRepeat navigateRepeat;
    Label title;
    Label mainNames[SIDEBAR_MAX_ROWS];
    Icon mainIcons[SIDEBAR_MAX_ROWS];
@@ -221,6 +223,7 @@ void setSidebarCurrent(SidebarItem item)
 void openSidebar(void)
 {
    side.focused = 1;
+   side.navigateRepeat.timer = side.navigateRepeat.repeats = 0;
    keepSelectionVisible();
    updateSelectedColors();
    animateTo(1);
@@ -263,8 +266,8 @@ int updateSidebar(void)
    }
 
    if (!side.focused) return -1;
-   if (isPadButtonPressed(PAD_BTN_UP)) moveSelection(-1);
-   if (isPadButtonPressed(PAD_BTN_DOWN)) moveSelection(1);
+   if (isRepeatDue(&side.navigateRepeat, getPadButtonState(PAD_BTN_DOWN))) moveSelection(1);
+   else if (isRepeatDue(&side.navigateRepeat, getPadButtonState(PAD_BTN_UP))) moveSelection(-1);
 
    if (isPadButtonPressed(PAD_BTN_LEFT) || isPadButtonPressed(PAD_BTN_CIRCLE)) {
       side.focused = 0;

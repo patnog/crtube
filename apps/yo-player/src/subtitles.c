@@ -68,15 +68,20 @@ int fetchSubtitles(const char *url, SubtitleTrack *out)
 {
    memset(out, 0, sizeof *out);
 
-   // the track url usually carries its own fmt=srv3 (a layout we don't parse); fmt isn't among the
-   // signature-protected params, so rewrite it to srv1 rather than appending a duplicate.
+   // Force the XML format this parser understands, while preserving tlang and all
+   // signed query parameters. The translation target must survive this rewrite.
    char fullUrl[2200];
-   const char *fmt = strstr(url, "&fmt=");
+   strCopy(fullUrl, sizeof fullUrl, url);
+   char *fmt = strstr(fullUrl, "&fmt=");
+   if (!fmt) fmt = strstr(fullUrl, "?fmt=");
    if (fmt) {
-      const char *afterValue = strchr(fmt + 5, '&');
-      snprintf(fullUrl, sizeof fullUrl, "%.*s&fmt=srv1%s", (int)(fmt - url), url, afterValue ? afterValue : "");
-   } else
-      snprintf(fullUrl, sizeof fullUrl, "%s&fmt=srv1", url);
+      char *afterValue = strchr(fmt + 1, '&');
+      if (afterValue) memmove(fmt, afterValue, strlen(afterValue) + 1);
+      else *fmt = 0;
+   }
+   size_t urlLength = strlen(fullUrl);
+   snprintf(fullUrl + urlLength, sizeof fullUrl - urlLength, "%cfmt=srv1",
+            strchr(fullUrl, '?') ? '&' : '?');
 
    char *resp = malloc(SUBS_RESP_CAP);
    if (!resp) return -1;
@@ -84,12 +89,16 @@ int fetchSubtitles(const char *url, SubtitleTrack *out)
    int respLen = 0, status = 0;
    int rc = getHttp(fullUrl, resp, SUBS_RESP_CAP, &respLen, &status);
    if (rc < 0)        { logWarn("[subs] fetch failed rc=%d\n", rc); free(resp); return rc; }
+   logInfo("[subs] HTTP status=%d bytes=%d translated=%d\n",
+           status, respLen, strstr(url, "tlang=") != NULL);
    if (status != 200) { logWarn("[subs] unexpected status=%d\n", status); free(resp); return -status; }
 
    const char *end = resp + respLen;
    const char *scan = resp;
    while (scan && out->count < MAX_SUBTITLE_CUES) scan = parseCue(scan, end, out);
    logInfo("[subs] %d cue(s) parsed (%d bytes)\n", out->count, respLen);
+   if (strstr(url, "tlang=") && out->count == 0)
+      logWarn("[subs] YouTube returned an empty translated track; verify tlang source/target availability\n");
    if (respLen >= SUBS_RESP_CAP - 1 || out->count == MAX_SUBTITLE_CUES)
       logWarn("[subs] track truncated at a cap, later lines will be missing\n");
 

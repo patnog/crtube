@@ -1,6 +1,6 @@
 // search screen - a VideoGrid in one of two modes: a text search or a channel's videos (see search.h).
 // Pushed on top of home. Triangle drills into a channel in place, Circle backs out (channel -> search
-// results -> pop to home), SELECT cycles the sort, Start re-searches, X plays.
+// results -> pop to home), SELECT opens search, START opens Settings, X plays.
 
 #include "app-config.h"
 #include "screens/search.h"
@@ -122,14 +122,6 @@ static void enterChannel(const SearchResult *item)
    reload();
 }
 
-static void cycleChannelSort(void)
-{
-   const SearchResults *results = gridResults(&search.grid);
-   if (!results->sortTokens[CHANNEL_SORT_LATEST][0]) return;   // chips not loaded yet
-   search.channelSort = (search.channelSort + 1) % CHANNEL_SORT_COUNT;
-   strCopy(search.channelSortToken, sizeof search.channelSortToken, results->sortTokens[search.channelSort]);
-   reload();
-}
 
 static void onQueryEntered(const char *text)
 {
@@ -185,9 +177,9 @@ static void initSearch(void)
 
       initButtonHints(&hintsSecondRow, &uiFont, search.screenH - SD_HINTS_BOTTOM,
                       HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
-      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_SELECT), "Sort");
+      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_SELECT), "Search");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R3),     "Download");
-      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_START),  "Search");
+      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_START),  "Settings");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R2), "Refresh");
       setButtonHintsStableLayout(&hintsSecondRow, 1);
    } else {
@@ -196,9 +188,9 @@ static void initSearch(void)
       addButtonHint(&hints, getConsoleGlyph(GLYPH_CIRCLE),   "Back");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE),   "Watch Later");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_TRIANGLE), "Channel");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT),   "Sort");
+      addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT),   "Search");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R3),       "Download");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_START),    "Search");
+      addButtonHint(&hints, getConsoleGlyph(GLYPH_START),    "Settings");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R2),       "Refresh");
    }
 
@@ -216,15 +208,15 @@ static void updateSearch(void)
    updateDownloadOverlay();
    if (oskInputActive()) return;
 
-   // Channel pages share the home sidebar. LEFT opens it from the first
-   // column (or while the grid is loading); Circle remains the channel back action.
-   if (search.channelId[0] && !isSidebarActive() && isPadButtonPressed(PAD_BTN_LEFT) &&
+   // Search and channel views share the home sidebar. LEFT opens it from the
+   // first column (or while the grid is loading); Circle returns to home navigation.
+   if (!isSidebarActive() && isPadButtonPressed(PAD_BTN_LEFT) &&
        (gridStage(&search.grid) != GRID_READY || search.grid.columns <= 0 ||
         search.grid.selected < 0 || (search.grid.selected % search.grid.columns) == 0)) {
       openSidebar();
       return;
    }
-   if (search.channelId[0] && isSidebarActive()) {
+   if (isSidebarActive()) {
       int picked = updateSidebar();
       if (picked >= 0) {
          popScreen();
@@ -233,19 +225,18 @@ static void updateSearch(void)
       return;
    }
 
-   if (isPadButtonPressed(PAD_BTN_START)) { oskInputBegin("Search YouTube", search.query[0] ? search.query : "", onQueryEntered); }
-
-   // Circle: channel-with-underlying-search -> back to results; otherwise pop to home
-   if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
-      if (search.channelId[0] && search.query[0]) { search.channelId[0] = 0; reload(); }
-      else popScreen();
-      return;
-   }
    if (isPadButtonPressed(PAD_BTN_SELECT)) {
-      if (search.channelId[0]) cycleChannelSort();
-      else { search.sort = (search.sort + 1) % SORT_COUNT; reload(); }
+      oskInputBegin("Search YouTube", search.query[0] ? search.query : "", onQueryEntered);
       return;
    }
+   if (isPadButtonPressed(PAD_BTN_START)) {
+      popScreen();
+      openHomeSettingsPanel();
+      return;
+   }
+
+   // Circle leaves search/channel sub-screens and returns to normal home navigation.
+   if (isPadButtonPressed(PAD_BTN_CIRCLE)) { popScreen(); return; }
    if (isPadButtonPressed(PAD_BTN_R2)) { reload(); return; }
 
    updateVideoGrid(&search.grid);

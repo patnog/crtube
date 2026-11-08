@@ -112,7 +112,6 @@ static struct {
 static Font        uiFont;
 static Label       titleLabel, statusLabel;
 static ButtonHints hints, hintsSecondRow;
-static int         accountHint;   // index of the Select hint ("Sign in" / "Account")
 static int         sdHintsTwoRows;
 
 // SD UI scaling is configured in Settings and persisted separately from
@@ -158,11 +157,6 @@ static void cycleSdScale(void)
    if (n > 0) writeFile(SD_SCALE_PATH, buf, (uint64_t)n);
 }
 
-static void setAccountHintCaption(const char *caption)
-{
-   setButtonHintCaption(sdHintsTwoRows ? &hintsSecondRow : &hints, accountHint, caption);
-}
-
 
 // the account panel
 static Label       panelTitle, panelLine1, panelLine2, panelCode, panelFooter;
@@ -191,6 +185,7 @@ static Label sponsorTitle, sponsorDescription, sponsorCategoryLabels[SPONSOR_CAT
 static Label sponsorActionLabels[3];
 static ButtonHints sponsorHints;
 static ButtonRepeat sponsorNavigateRepeat;
+static ButtonRepeat settingsNavigateRepeat;
 #define REGION_MAX_ROWS 40
 #define REGION_PANEL_W 620
 #define REGION_PANEL_H 440
@@ -454,7 +449,6 @@ static void applyAccountChange(void)
       categoryCached[HOME_ACCOUNT + feed] = 0;
       accountFeedRefreshUs[feed] = 0;
    }
-   setAccountHintCaption(isSignedIn() ? "Account" : "Sign in");
    home.category = isSignedIn() ? HOME_ACCOUNT + ACCOUNT_FEED_HOME : HOME_SUBS;
    loadCategory();
    setSidebarForCategory();
@@ -814,10 +808,11 @@ static void drawSponsorBlockPanel(void)
    drawButtonHints(&sponsorHints, home.screenW);
 }
 
-static void openSettingsPanel(void)
+void openHomeSettingsPanel(void)
 {
    home.settingsOpen = 1;
    home.settingsSelected = 0;
+   settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
 }
 
 static void updateSettingsPanel(void)
@@ -825,10 +820,10 @@ static void updateSettingsPanel(void)
    if (home.regionOpen) { updateRegionPicker(); return; }
    if (home.sponsorblockOpen) { updateSponsorBlockPanel(); return; }
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.settingsOpen = 0; return; }
-   if (isPadButtonPressed(PAD_BTN_UP))
-      home.settingsSelected = (home.settingsSelected + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
-   if (isPadButtonPressed(PAD_BTN_DOWN))
+   if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
       home.settingsSelected = (home.settingsSelected + 1) % SETTINGS_ROW_COUNT;
+   else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
+      home.settingsSelected = (home.settingsSelected + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
    if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
        isPadButtonPressed(PAD_BTN_RIGHT)) {
       if (home.settingsSelected == 0 || home.settingsSelected == 1) {
@@ -1021,7 +1016,7 @@ void handleHomeSidebarSelection(int picked)
          openAccountPanel();
          break;
       case SIDEBAR_SETTINGS:
-         openSettingsPanel();
+         openHomeSettingsPanel();
          break;
       default:
          break;
@@ -1071,8 +1066,8 @@ static void initHome(void)
 
       initButtonHints(&hintsSecondRow, &uiFont, home.screenH - SD_HINTS_BOTTOM,
                       HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
-      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_START), "Search");
-      accountHint = addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_SELECT), isSignedIn() ? "Account" : "Sign in");
+      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_SELECT), "Search");
+      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_START), "Settings");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_L1), "");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R1), "Category");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R2), "Refresh");
@@ -1083,8 +1078,8 @@ static void initHome(void)
       addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE),   "Watch Later");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_TRIANGLE), "Channel");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R3),       "Download");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_START),    "Search");
-      accountHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT), isSignedIn() ? "Account" : "Sign in");
+      addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT),  "Search");
+      addButtonHint(&hints, getConsoleGlyph(GLYPH_START),   "Settings");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_L1),       "");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R1),       "Category");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R2),       "Refresh");
@@ -1236,8 +1231,8 @@ static void updateHome(void)
       return;
    }
 
-   if (isPadButtonPressed(PAD_BTN_START)) oskInputBegin("Search YouTube", "", onQueryEntered);
-   if (isPadButtonPressed(PAD_BTN_SELECT)) { openAccountPanel(); return; }
+   if (isPadButtonPressed(PAD_BTN_SELECT)) { oskInputBegin("Search YouTube", "", onQueryEntered); return; }
+   if (isPadButtonPressed(PAD_BTN_START)) { openHomeSettingsPanel(); return; }
    if (isPadButtonPressed(PAD_BTN_R2)) { refreshCurrentCategory(); return; }
 
    // L1/R1 stay responsive even mid-load (the source swap is non-blocking)

@@ -67,6 +67,13 @@ const StreamFormat *pickBestPlaybackVideo(const StreamInfo *info)
    return pickBestVideoInternal(info, getEnable1080p60());
 }
 
+int isPlaybackVideoFormatDecodable(const StreamFormat *format)
+{
+   if (!format || !format->hasVideo || format->needsCipher || !format->url[0]) return 0;
+   if (strcmp(format->container, "mp4") != 0) return 0;
+   return decodableVideo(format, getEnable1080p60());
+}
+
 const StreamFormat *pickVideoForProfile(const StreamInfo *info, int profile)
 {
    if (!info || profile < 0 || profile > 2) return NULL;

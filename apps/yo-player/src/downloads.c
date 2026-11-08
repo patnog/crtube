@@ -113,9 +113,15 @@ cleanup:
 
 static void runOneDownload(const QueueItem *item)
 {
-   StreamInfo *info = (StreamInfo *)malloc(sizeof *info);
+   StreamInfo *info = (StreamInfo *)calloc(1, sizeof *info);
    const Extractor *extractor = findExtractor(item->videoId);
-   if (!info || !extractor || extractor->extract(item->videoId, info) != 0 || info->formatCount == 0) {
+   int extractResult = (info && extractor) ? extractor->extract(item->videoId, info) : -1;
+   if (info) {
+      free(info->captions);   // downloads do not consume subtitle metadata
+      info->captions = NULL;
+      info->captionCount = info->captionCapacity = 0;
+   }
+   if (!info || !extractor || extractResult != 0 || info->formatCount == 0) {
       logError("[dl] resolve failed for %s\n", item->videoId);
       free(info);
       return;

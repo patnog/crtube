@@ -29,6 +29,10 @@ int setAutoplayEnabled(int enabled);
 int getEnable1080p60(void);
 int setEnable1080p60(int enabled);
 
+// Preferred subtitle language code (e.g. en or pt-BR); persisted to settings.txt.
+const char *getSubtitleLanguage(void);
+int setSubtitleLanguage(const char *languageCode);
+
 // Uniform display overscan in percent (-10..+10). Changes are saved immediately to settings.txt.
 int getOverscanPercent(void);
 int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails

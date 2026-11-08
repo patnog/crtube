@@ -5,6 +5,7 @@
 // a channel (both push the search screen), X plays.
 
 void openHome(void);
+void openHomeSettingsPanel(void);
 
 // Apply an action selected from the shared sidebar overlay (also used by channel view).
 void handleHomeSidebarSelection(int picked);

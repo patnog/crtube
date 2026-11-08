@@ -9,6 +9,7 @@
 // (createVideoPlayer does blocking network I/O and must stay off the UI thread),
 // the UI thread adopts the built player and pulls frames each render frame.
 
+#include "app-config.h"
 #include "screens/play.h"
 #include "screens/home.h"
 #include "downloads.h"
@@ -21,6 +22,8 @@
 #include "pad.h"
 #include "font.h"
 #include "ui/label.h"
+#include "ui/button-hints.h"
+#include "ui/console-glyphs.h"
 #include "ui/volume-meter.h"
 #include "button-repeat.h"     // left/right scrub auto-repeat
 #include "thread.h"
@@ -31,6 +34,7 @@
 #include "http.h"               // cancel network I/O before joining playback workers
 #include "image-loader.h"       // decode the autoplay thumbnail without blocking the render thread
 #include "storage.h"            // resume position (get/setWatchedPosition)
+#include "vfs.h"                // persist the shared SD UI scale preference
 #include "settings.h"           // per-category SponsorBlock actions
 #include "sponsorblock.h"       // skip segments (auto-skip + seek-bar marks)
 #include "subtitles.h"          // fetch + parse a caption track; cue lookup during playback
@@ -57,11 +61,11 @@
 #define CONTROLS_VISIBLE_US 2000000ULL
 #define HUD_VISIBLE_US      3000000ULL
 #define TOAST_VISIBLE_US    2000000ULL   // how long a toast ("Skipped ...", "Subtitles: ...") stays up
+#define ASK_PROMPT_VISIBLE_US 3000000ULL
 #define AUTOPLAY_NOTICE_US  3000000ULL
 #define AUTOPLAY_THUMB_CAP  (128 * 1024)
 
-// subtitles: triangle cycles off -> track 1 -> track 2 -> ... -> off; the active cue draws above the
-// seek bar, and the HUD shows the chosen language top-right while the controls are up.
+// subtitles: Triangle toggles captions on/off; language selection lives in Options.
 #define SUBTITLE_TEXT_SIZE 30
 #define MAX_AUDIO_TRACKS 128
 
@@ -77,6 +81,55 @@
 #define CHAPTER_ROW_HEIGHT   46
 #define CHAPTER_VISIBLE_ROWS 12
 #define CHAPTER_TIME_GAP     24   // between the right-aligned time column and the title column
+
+#define OPTIONS_COUNT 8
+#define MAX_PLAYBACK_QUALITIES 12
+#define OPTIONS_DROPDOWN_MAX MAX_AUDIO_TRACKS
+#define OPTIONS_DROPDOWN_VISIBLE_MAX 10
+static const char *optionsNames[OPTIONS_COUNT] = {"Quality", "Audio", "Subtitles", "Subs language", "Chapters", "Crop to Fill", "Autoplay", "Playback Settings"};
+static const char *optionsValues[OPTIONS_COUNT][OPTIONS_DROPDOWN_MAX] = {
+   {"Auto"},
+   {"Default"},
+   {"Off", "On"},
+   {"English"},
+   {"Open chapters"},
+   {"Off", "On"},
+   {"Off", "On"},
+   {"Open settings"}
+};
+static int optionsValueCounts[OPTIONS_COUNT] = {1, 1, 2, 1, 1, 2, 2, 1};
+static char optionsQualityLabels[OPTIONS_DROPDOWN_MAX][32];
+static char optionsAudioLabels[MAX_AUDIO_TRACKS][64];
+static int optionsQualityTargets[OPTIONS_DROPDOWN_MAX];
+static int preferredQualityHeight, preferredQualityFps; // 0/0 means Auto; persists across videos in RAM
+static int optionsVisible, optionsDropdownOpen, optionsSelected, optionsDropdownSelected;
+static int lastSubtitlePick = -1;     // preserve the selected track while captions are switched OFF
+static int suppressPlaybackCrossUntilRelease;
+static ButtonRepeat optionsNavigateRepeat, optionsDropdownRepeat, chapterNavigateRepeat;
+static Label optionsLabels[OPTIONS_COUNT];
+static Label optionsValueLabels[OPTIONS_DROPDOWN_MAX];
+static Label optionsCurrentValueLabels[3]; // Quality, Audio, Subs language
+
+// Playback-owned settings panel. It deliberately shares the persisted settings APIs
+// with navigation, but owns its input state, labels, layout and SponsorBlock submenu.
+#define PLAYBACK_SETTINGS_COUNT 4
+#define PLAYBACK_SETTINGS_ROW_H 54
+#define PLAYBACK_SETTINGS_PANEL_W 650
+#define PLAYBACK_SETTINGS_PANEL_H 380
+#define PLAYBACK_SPONSOR_PANEL_W 780
+#define PLAYBACK_SPONSOR_PANEL_H 470
+#define PLAYBACK_SPONSOR_ROW_H 42
+#define PLAYBACK_SPONSOR_OPTION_W 82
+#define PLAYBACK_SPONSOR_OPTION_GAP 5
+#define PLAYBACK_SD_SCALE_PATH CRTUBE_DATA_DIR "/sd-ui-scale.txt"
+static int playbackSettingsOpen, playbackSettingsSelected;
+static int playbackSponsorOpen, playbackSponsorSelected;
+static ButtonRepeat playbackSettingsRepeat, playbackSponsorRepeat;
+static Label playbackSettingsTitle, playbackSettingsLabels[PLAYBACK_SETTINGS_COUNT];
+static Label playbackSettingsValues[PLAYBACK_SETTINGS_COUNT];
+static Label playbackSettingsToggleLabels[2];
+static Label playbackSponsorTitle, playbackSponsorCategoryLabels[SPONSOR_CATEGORY_COUNT];
+static Label playbackSponsorActionLabels[3];
 
 // the video to play, set by playVideo() before the screen is pushed. defaults to
 // a short public clip so pushing the screen directly still does something.
@@ -218,7 +271,7 @@ static struct {
    int              screenW, screenH;
    int              firstFrameSeen;   // a real frame has been presented (loading status ends, save is safe)
    int              historyRecorded;  // prevents duplicates after resolution switches
-   int              showStats;        // R3 toggles a debug overlay
+   int              showStats;        // debug overlay visibility; no controller binding
    char             title[256];        // resolved video title (worker sets, UI reads after adoption)
    char             author[128];       // resolved channel name
    char             description[2048]; // resolved video description (worker sets, UI reads after adoption)
@@ -249,12 +302,14 @@ static struct {
    int              chapterTimeWidth;    // widest time label (the right-aligned time column)
    int              chapterPanelWidth;
    int              vidItag, vidW, vidH, vidFps, audItag;   // picked formats (worker sets, UI reads)
-   char             videoUrls[3][MAX_STREAM_URL];
+   char             videoUrls[MAX_PLAYBACK_QUALITIES][MAX_STREAM_URL];
    char             fallbackAudioUrl[MAX_STREAM_URL];
-   int              videoItags[3], videoWidths[3], videoHeights[3], videoFps[3];
-   int              videoHasAudio[3];
+   int              videoItags[MAX_PLAYBACK_QUALITIES], videoWidths[MAX_PLAYBACK_QUALITIES];
+   int              videoHeights[MAX_PLAYBACK_QUALITIES], videoFps[MAX_PLAYBACK_QUALITIES];
+   int              videoHasAudio[MAX_PLAYBACK_QUALITIES];
    int              fallbackAudioItag;
-   int              videoAvailable[3], resolutionIndex;
+   int              videoAvailable[MAX_PLAYBACK_QUALITIES], videoCount;
+   int              resolutionIndex, autoResolutionIndex;
    VideoPlayer     *pendingResolutionPlayer;
    VideoPlayer     *retiringResolutionPlayer;
    volatile int     resolutionSwitchDone;
@@ -298,14 +353,15 @@ static struct {
    volatile int     sbWorkerDone;
    int              sbThreadActive, sbReady;
    int              askPromptShown;  // current Ask segment already announced; -1 when outside one
+   uint64_t         askPromptStartedUs;
    sys_ppu_thread_t sbWorkerTid;
    uint64_t         toastShownUs;      // brief toast timer (0 = hidden)
    uint64_t         toastDurationUs;   // per-toast lifetime; defaults to TOAST_VISIBLE_US
 
-   // subtitles: triangle picks a track (-1 = off, the default); a worker fetches it in the background
+   // subtitles: Options selects a track; Triangle toggles it on/off. A worker fetches it in the background
    // (updatePlay respawns the fetch whenever the pick and the fetched track disagree), and once ready
    // the cue for the current position drives subtitleLabel each frame.
-   CaptionTrack     captionTracks[MAX_CAPTION_TRACKS];   // copied from the resolve (worker sets)
+   CaptionTrack    *captionTracks;     // dynamically sized to include every source and translated track
    int              captionCount;
    int              subtitlePick;        // chosen track index, -1 = off
    int              subtitleFetched;     // track index the fetch (in flight or done) belongs to, -1 = none
@@ -313,6 +369,7 @@ static struct {
    int              subtitleScanFrom;    // cue lookup cache (getSubtitleCueText)
    SubtitleTrack   *subtitleTrack;       // heap; ~800 KB, allocated on first enable, freed on exit
    volatile int     subWorkerDone;
+   int              subtitleFetchResult; // fetchSubtitles result: 0, network error, or -HTTP status
    int              subThreadActive;
    sys_ppu_thread_t subWorkerTid;
 } state;
@@ -324,6 +381,7 @@ static Label statusLabel;
 static Label statLabels[STAT_LINES];
 static Label timeLeftLabel, timeRightLabel;   // seek bar: current time (left) / total (right)
 static Label toastLabel;                      // brief centred toast ("Skipped ...", "Subtitles: ...")
+static Label askPromptPrefixLabel, askPromptSuffixLabel;
 static Label titleLabel;                      // video title, top-left while the HUD is visible
 static Label authorLabel;                     // channel name below the title
 static Label nextNoticeHeadingLabel;           // "next video" notice heading
@@ -333,6 +391,7 @@ static Label playbackInfoLabel;               // resolution, current audio and a
 static Label chapterLabels[MAX_CHAPTERS];     // chapter titles (picker overlay rows)
 static Label chapterTimeLabels[MAX_CHAPTERS]; // chapter start times, right-aligned in their own column
 static TextTexture descriptionTexture;        // whole description as one tall texture (scrolled by draw)
+static int statsTextPadding;
 
 // the shared pill meter; its level is kept in `volumeLevel` outside `state` so it survives across videos.
 static VolumeMeter volumeMeter;
@@ -344,8 +403,8 @@ static int cropToFillEnabled;
 static float cropPanX;
 static float cropPanY;
 static uint64_t cropPanLastUpdateUs;
-// In-memory subtitle preference: survives video changes, resets when the app exits.
-static char preferredSubtitleName[64];
+// Subtitle enablement is session-only; language preference is persisted in settings.txt.
+static int subtitlesEnabled;
 
 static const StreamFormat *pickAudioForTrack(const StreamInfo *info, const char *trackId)
 {
@@ -477,22 +536,316 @@ static VideoPlayer *openInitialWithFallback(const StreamInfo *info,
    return NULL;
 }
 
-// only languages FONT_POP renders reliably (hardware-checked: western/central europe + japanese fine,
-// vietnamese diacritics broken). prefix match, so "en-GB" passes as "en". extend after testing a new
-// language on the console.
-static int isRenderableSubtitleLanguage(const char *code)
+static int addPlaybackQuality(const StreamFormat *format,
+                              const StreamFormat *qualityFormats[MAX_PLAYBACK_QUALITIES],
+                              int preferVideoOnly)
 {
-   static const char *supported[] = { "en", "es", "pt", "fr", "de", "it", "nl", "sv", "da", "no", "fi",
-                                      "pl", "cs", "sk", "hu", "ro", "tr", "id", "ms", "ja" };
-   for (int i = 0; i < (int)(sizeof supported / sizeof *supported); i++)
-      if (strncmp(code, supported[i], strlen(supported[i])) == 0) return 1;
+   if (!isPlaybackVideoFormatDecodable(format)) return 0;
+   int insert = 0;
+   while (insert < state.videoCount &&
+          (state.videoHeights[insert] < format->height ||
+           (state.videoHeights[insert] == format->height && state.videoFps[insert] < format->fps)))
+      insert++;
+
+   if (insert < state.videoCount && state.videoHeights[insert] == format->height &&
+       state.videoFps[insert] == format->fps) {
+      // Keep one rendition per resolution/frame-rate pair. Prefer video-only when an AAC
+      // track can be paired, otherwise retain the muxed rendition.
+      if (format->hasAudio && !qualityFormats[insert]->hasAudio) return 0;
+      if (!format->hasAudio && qualityFormats[insert]->hasAudio && !preferVideoOnly) return 0;
+      qualityFormats[insert] = format;
+      strCopy(state.videoUrls[insert], sizeof state.videoUrls[insert], format->url);
+      state.videoItags[insert] = format->itag;
+      state.videoWidths[insert] = format->width;
+      state.videoHeights[insert] = format->height;
+      state.videoFps[insert] = format->fps;
+      state.videoHasAudio[insert] = format->hasAudio;
+      return 1;
+   }
+   if (state.videoCount >= MAX_PLAYBACK_QUALITIES) {
+      if (insert == 0) return 0;
+      for (int i = 0; i < state.videoCount - 1; i++) {
+         qualityFormats[i] = qualityFormats[i + 1];
+         strCopy(state.videoUrls[i], sizeof state.videoUrls[i], state.videoUrls[i + 1]);
+         state.videoItags[i] = state.videoItags[i + 1];
+         state.videoWidths[i] = state.videoWidths[i + 1];
+         state.videoHeights[i] = state.videoHeights[i + 1];
+         state.videoFps[i] = state.videoFps[i + 1];
+         state.videoHasAudio[i] = state.videoHasAudio[i + 1];
+         state.videoAvailable[i] = state.videoAvailable[i + 1];
+      }
+      state.videoCount--;
+      insert--;
+   }
+   for (int i = state.videoCount; i > insert; i--) {
+      qualityFormats[i] = qualityFormats[i - 1];
+      strCopy(state.videoUrls[i], sizeof state.videoUrls[i], state.videoUrls[i - 1]);
+      state.videoItags[i] = state.videoItags[i - 1];
+      state.videoWidths[i] = state.videoWidths[i - 1];
+      state.videoHeights[i] = state.videoHeights[i - 1];
+      state.videoFps[i] = state.videoFps[i - 1];
+      state.videoHasAudio[i] = state.videoHasAudio[i - 1];
+      state.videoAvailable[i] = state.videoAvailable[i - 1];
+   }
+   qualityFormats[insert] = format;
+   strCopy(state.videoUrls[insert], sizeof state.videoUrls[insert], format->url);
+   state.videoItags[insert] = format->itag;
+   state.videoWidths[insert] = format->width;
+   state.videoHeights[insert] = format->height;
+   state.videoFps[insert] = format->fps;
+   state.videoHasAudio[insert] = format->hasAudio;
+   state.videoAvailable[insert] = 1;
+   state.videoCount++;
+   return 1;
+}
+
+static int findPreferredQuality(void)
+{
+   if (state.videoCount <= 0) return -1;
+   if (preferredQualityHeight <= 0) return state.videoCount - 1;
+
+   int exact = -1, sameHeightLowerFps = -1, sameHeightHigherFps = -1;
+   int lower = -1, higher = -1;
+   for (int i = 0; i < state.videoCount; i++) {
+      int height = state.videoHeights[i], fps = state.videoFps[i];
+      if (height == preferredQualityHeight && fps == preferredQualityFps) exact = i;
+      else if (height == preferredQualityHeight) {
+         if (fps <= preferredQualityFps &&
+             (sameHeightLowerFps < 0 || fps > state.videoFps[sameHeightLowerFps]))
+            sameHeightLowerFps = i;
+         if (fps > preferredQualityFps &&
+             (sameHeightHigherFps < 0 || fps < state.videoFps[sameHeightHigherFps]))
+            sameHeightHigherFps = i;
+      } else if (height < preferredQualityHeight) {
+         if (lower < 0 || height > state.videoHeights[lower] ||
+             (height == state.videoHeights[lower] && fps > state.videoFps[lower])) lower = i;
+      } else {
+         if (higher < 0 || height < state.videoHeights[higher] ||
+             (height == state.videoHeights[higher] && fps > state.videoFps[higher])) higher = i;
+      }
+   }
+   if (exact >= 0) return exact;
+   if (sameHeightLowerFps >= 0) return sameHeightLowerFps;
+   if (sameHeightHigherFps >= 0) return sameHeightHigherFps;
+   if (lower >= 0) return lower;
+   return higher >= 0 ? higher : state.videoCount - 1;
+}
+
+static void prepareQualityOptions(void)
+{
+   int count = (state.isLive ? 1 : state.videoCount + 1);
+   if (count > OPTIONS_DROPDOWN_MAX) count = OPTIONS_DROPDOWN_MAX;
+   optionsValueCounts[0] = count;
+   optionsQualityTargets[0] = -1;
+   if (state.autoResolutionIndex >= 0) {
+      snprintf(optionsQualityLabels[0], sizeof optionsQualityLabels[0], "Auto (%dp%d)",
+               state.videoHeights[state.autoResolutionIndex], state.videoFps[state.autoResolutionIndex]);
+   } else {
+      strCopy(optionsQualityLabels[0], sizeof optionsQualityLabels[0], "Auto");
+   }
+   for (int item = 1; item < count; item++) {
+      int target = state.videoCount - item;
+      optionsQualityTargets[item] = target;
+      snprintf(optionsQualityLabels[item], sizeof optionsQualityLabels[item], "%dp%d",
+               state.videoHeights[target], state.videoFps[target]);
+   }
+}
+
+static int qualityDropdownIndexForCurrent(void)
+{
+   for (int item = 1; item < optionsValueCounts[0]; item++)
+      if (optionsQualityTargets[item] == state.resolutionIndex) return item;
    return 0;
+}
+
+static void prepareAudioOptions(void)
+{
+   int count = state.audioCount;
+   if (count > MAX_AUDIO_TRACKS) count = MAX_AUDIO_TRACKS;
+   if (count <= 0) {
+      optionsValueCounts[1] = 1;
+      if (state.resolutionIndex >= 0 && state.resolutionIndex < state.videoCount &&
+          state.videoHasAudio[state.resolutionIndex])
+         strCopy(optionsAudioLabels[0], sizeof optionsAudioLabels[0], "Original upload");
+      else
+         strCopy(optionsAudioLabels[0], sizeof optionsAudioLabels[0], "Unavailable");
+      return;
+   }
+
+   optionsValueCounts[1] = count;
+   for (int i = 0; i < count; i++)
+      strCopy(optionsAudioLabels[i], sizeof optionsAudioLabels[i], state.audioNames[i]);
+}
+
+static int subtitleLanguageBaseMatches(const char *a, const char *b);
+static int subtitleNamesMatch(const char *a, const char *b);
+static int subtitleIsAutoGenerated(const CaptionTrack *track);
+static int subtitleIsAutoTranslated(const CaptionTrack *track);
+static int subtitleMainTrackCount(void);
+
+static void prepareSubtitleOptions(void)
+{
+   if (state.isLive || state.captionCount <= 0) {
+      optionsValueCounts[3] = 1;
+      return;
+   }
+   optionsValueCounts[3] = subtitleMainTrackCount();
+}
+
+static int subtitleLanguageBaseMatches(const char *a, const char *b)
+{
+   int i = 0;
+   while (a[i] && b[i] && a[i] != '-' && b[i] != '-') {
+      char ca = a[i], cb = b[i];
+      if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+      if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+      if (ca != cb) return 0;
+      i++;
+   }
+   return i > 0 && (a[i] == 0 || a[i] == '-') && (b[i] == 0 || b[i] == '-');
+}
+
+
+// Compare YouTube display names after removing the optional generated-caption suffix.
+// This makes "French" and "French (auto-generated)" the same language without
+// depending on the exact capitalization or on a locale-specific regex engine.
+static int subtitleNamesMatch(const char *a, const char *b)
+{
+   static const char *suffixes[] = { " (auto-generated)", " (auto-translated)" };
+   int lengthA = (int)strlen(a), lengthB = (int)strlen(b);
+   for (int suffixIndex = 0; suffixIndex < 2; suffixIndex++) {
+      int suffixLength = (int)strlen(suffixes[suffixIndex]);
+      if (lengthA >= suffixLength) {
+         int match = 1;
+         for (int j = 0; j < suffixLength; j++) {
+            char c = a[lengthA - suffixLength + j];
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (c != suffixes[suffixIndex][j]) { match = 0; break; }
+         }
+         if (match) lengthA -= suffixLength;
+      }
+      if (lengthB >= suffixLength) {
+         int match = 1;
+         for (int j = 0; j < suffixLength; j++) {
+            char c = b[lengthB - suffixLength + j];
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (c != suffixes[suffixIndex][j]) { match = 0; break; }
+         }
+         if (match) lengthB -= suffixLength;
+      }
+   }
+   if (lengthA <= 0 || lengthA != lengthB) return 0;
+   for (int i = 0; i < lengthA; i++) {
+      char ca = a[i], cb = b[i];
+      if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+      if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+      if (ca != cb) return 0;
+   }
+   return 1;
+}
+
+
+static int subtitleIsAutoTranslated(const CaptionTrack *track)
+{
+   return track->isAutoTranslated || strstr(track->name, "auto-translated") != NULL;
+}
+
+static int subtitleIsAutoGenerated(const CaptionTrack *track)
+{
+   return !subtitleIsAutoTranslated(track) &&
+          (track->isAutoGenerated || strstr(track->name, "auto-generated") != NULL);
+}
+
+static int subtitleMainTrackCount(void)
+{
+   int count = 0;
+   for (int i = 0; i < state.captionCount; i++)
+      if (!subtitleIsAutoGenerated(&state.captionTracks[i]) &&
+          !subtitleIsAutoTranslated(&state.captionTracks[i])) count++;
+   for (int i = 0; i < state.captionCount; i++)
+      if (subtitleIsAutoGenerated(&state.captionTracks[i])) count++;
+   return count;
+}
+
+static int subtitleMenuCount(void)
+{
+   int count = subtitleMainTrackCount();
+   return count > 0 ? count : 1;
+}
+
+// Resolve a visible row to its actual CaptionTrack index. Translated tracks are hidden.
+static int subtitleTrackAtMenuIndex(int menuIndex)
+{
+   int visible = 0;
+   for (int i = 0; i < state.captionCount; i++) {
+      CaptionTrack *track = &state.captionTracks[i];
+      if (subtitleIsAutoGenerated(track) || subtitleIsAutoTranslated(track)) continue;
+      if (visible++ == menuIndex) return i;
+   }
+   for (int i = 0; i < state.captionCount; i++) {
+      CaptionTrack *track = &state.captionTracks[i];
+      if (!subtitleIsAutoGenerated(track)) continue;
+      if (visible++ == menuIndex) return i;
+   }
+   return -1;
+}
+
+static int subtitleMainMenuIndexForTrack(int trackIndex)
+{
+   if (trackIndex < 0 || trackIndex >= state.captionCount ||
+       subtitleIsAutoTranslated(&state.captionTracks[trackIndex])) return 0;
+
+   int visible = 0;
+   for (int i = 0; i < state.captionCount; i++) {
+      CaptionTrack *track = &state.captionTracks[i];
+      if (subtitleIsAutoGenerated(track) || subtitleIsAutoTranslated(track)) continue;
+      if (i == trackIndex) return visible;
+      visible++;
+   }
+   for (int i = 0; i < state.captionCount; i++) {
+      CaptionTrack *track = &state.captionTracks[i];
+      if (!subtitleIsAutoGenerated(track)) continue;
+      if (i == trackIndex) return visible;
+      visible++;
+   }
+   return 0;
+}
+
+// Creator-provided captions win, followed by auto-generated and then auto-translated
+// captions in the requested language. English ASR remains the final fallback.
+static int findPreferredSubtitleTrack(const char *languageCode)
+{
+   if (!languageCode || !languageCode[0]) languageCode = "en";
+
+   const char *selectedName = NULL;
+   for (int i = 0; i < state.captionCount; i++) {
+      if (subtitleLanguageBaseMatches(state.captionTracks[i].languageCode, languageCode)) {
+         selectedName = state.captionTracks[i].name;
+         break;
+      }
+   }
+
+   for (int i = 0; i < state.captionCount; i++)
+      if (!subtitleIsAutoGenerated(&state.captionTracks[i]) &&
+          !subtitleIsAutoTranslated(&state.captionTracks[i]) &&
+          (subtitleLanguageBaseMatches(state.captionTracks[i].languageCode, languageCode) ||
+           (selectedName && subtitleNamesMatch(state.captionTracks[i].name, selectedName)))) return i;
+
+   for (int i = 0; i < state.captionCount; i++)
+      if (subtitleIsAutoGenerated(&state.captionTracks[i]) &&
+          (subtitleLanguageBaseMatches(state.captionTracks[i].languageCode, languageCode) ||
+           (selectedName && subtitleNamesMatch(state.captionTracks[i].name, selectedName)))) return i;
+
+   for (int i = 0; i < state.captionCount; i++)
+      if (subtitleIsAutoGenerated(&state.captionTracks[i]) &&
+          subtitleLanguageBaseMatches(state.captionTracks[i].languageCode, "en")) return i;
+   return -1;
 }
 
 static void worker(uint64_t arg)
 {
    (void)arg;
-   StreamInfo *info = malloc(sizeof *info);   // large format/URL table; keep it off the stack
+   StreamInfo *info = calloc(1, sizeof *info);   // large format/URL table; keep it off the stack
    const Extractor *extractor = findExtractor(requestedInput);
    if (!info || !extractor) { fail("unrecognised link or id"); goto done; }
 
@@ -508,50 +861,56 @@ static void worker(uint64_t arg)
    strCopy(state.viewCount, sizeof state.viewCount, info->viewCount);
    strCopy(state.publishedDate, sizeof state.publishedDate, info->publishedDate);
    parseChapters(state.description, &state.chapters);
-   for (int i = 0; i < info->captionCount; i++)   // keep only tracks the system font can render
-      if (isRenderableSubtitleLanguage(info->captions[i].languageCode))
-         state.captionTracks[state.captionCount++] = info->captions[i];
-
-   // Re-enable the same subtitle track on the next video, matching its displayed language name.
-   if (preferredSubtitleName[0]) {
-      int found = 0;
-      for (int i = 0; i < state.captionCount; i++) {
-         if (strcmp(state.captionTracks[i].name, preferredSubtitleName) == 0) {
-            state.subtitlePick = i;
-            found = 1;
-            break;
-         }
+   if (info->captionCount > 0) {
+      state.captionTracks = malloc((size_t)info->captionCount * sizeof *state.captionTracks);
+      if (state.captionTracks) {
+         for (int i = 0; i < info->captionCount; i++)
+            state.captionTracks[state.captionCount++] = info->captions[i];
+      } else {
+         logError("[subtitles] unable to allocate playback caption list\n");
       }
-      if (!found) preferredSubtitleName[0] = 0;
    }
 
    const StreamFormat *video = pickBestPlaybackVideo(info);
    if (!video) { fail("no playable mp4 video"); goto done; }
-   for (int profile = 0; profile < 3; profile++) {
-      const StreamFormat *candidate = pickVideoForProfile(info, profile);
-      if (!candidate) continue;
-      strCopy(state.videoUrls[profile], sizeof state.videoUrls[profile], candidate->url);
-      state.videoItags[profile] = candidate->itag;
-      state.videoWidths[profile] = candidate->width;
-      state.videoHeights[profile] = candidate->height;
-      state.videoFps[profile] = candidate->fps;
-      state.videoHasAudio[profile] = candidate->hasAudio;
-      state.videoAvailable[profile] = 1;
+   int isLivePlayback = info->isLive || video->isLiveSegmented;
+   const StreamFormat *availableAudio = pickBestAudio(info);
+   const StreamFormat *qualityFormats[MAX_PLAYBACK_QUALITIES] = {0};
+   state.videoCount = 0;
+   state.autoResolutionIndex = -1;
+   for (int i = 0; i < info->formatCount; i++) {
+      const StreamFormat *candidate = &info->formats[i];
+      if (!isPlaybackVideoFormatDecodable(candidate)) continue;
+      if (!candidate->hasAudio && !availableAudio && video->hasAudio) continue;
+      addPlaybackQuality(candidate, qualityFormats, availableAudio != NULL);
    }
-   // a muxed pick (itag 18) already carries audio; a video-only pick needs a separate audio track
-   const StreamFormat *audio = video->hasAudio ? NULL : pickBestAudio(info);
+   if (state.videoCount == 0) { fail("no playable mp4 video"); goto done; }
+   // Keep the selector's exact default rendition as the Auto choice when it shares a
+   // resolution/FPS pair with another duplicate format.
+   for (int i = 0; i < state.videoCount; i++) {
+      if (state.videoHeights[i] == video->height && state.videoFps[i] == video->fps) {
+         qualityFormats[i] = video;
+         strCopy(state.videoUrls[i], sizeof state.videoUrls[i], video->url);
+         state.videoItags[i] = video->itag;
+         state.videoWidths[i] = video->width;
+         state.videoHasAudio[i] = video->hasAudio;
+         break;
+      }
+   }
+   state.autoResolutionIndex = state.videoCount - 1;
+   int selectedQuality = (isLivePlayback || preferredQualityHeight <= 0) ?
+                         state.videoCount - 1 : findPreferredQuality();
+   if (selectedQuality < 0) { fail("no playable mp4 video"); goto done; }
+   video = qualityFormats[selectedQuality];
+   state.resolutionIndex = selectedQuality;
+   // A muxed rendition carries its own audio. Video-only choices use the original/default AAC track.
+   const StreamFormat *audio = video->hasAudio ? NULL : availableAudio;
    if (!audio && video->hasAudio) {
       const StreamFormat *fallbackAudio = pickBestAudio(info);
       if (fallbackAudio) {
          strCopy(state.fallbackAudioUrl, sizeof state.fallbackAudioUrl, fallbackAudio->url);
          state.fallbackAudioItag = fallbackAudio->itag;
       }
-   }
-   if (video->hasAudio && !state.fallbackAudioUrl[0]) {
-      // If there is no separate AAC rendition to carry across a switch, only offer
-      // profiles whose video stream itself contains audio.
-      for (int profile = 0; profile < 3; profile++)
-         if (!state.videoHasAudio[profile]) state.videoAvailable[profile] = 0;
    }
    state.audioPick = -1;
    state.audioCount = 0;
@@ -644,18 +1003,8 @@ static void worker(uint64_t arg)
            video->hasAudio ? "muxed" : "video-only", audio ? audio->itag : (video->hasAudio ? video->itag : 0));
 
    state.vidItag = video->itag; state.vidW = video->width; state.vidH = video->height; state.vidFps = video->fps;
-   state.resolutionIndex = video->height <= 480 ? 0 : (video->height <= 720 ? 1 : 2);
-   // Preserve the exact initial pick in the matching profile slot. It may be a muxed format
-   // selected by the normal selector, while the profile helper found a different adaptive URL.
-   strCopy(state.videoUrls[state.resolutionIndex], sizeof state.videoUrls[state.resolutionIndex], video->url);
-   state.videoItags[state.resolutionIndex] = video->itag;
-   state.videoWidths[state.resolutionIndex] = video->width;
-   state.videoHeights[state.resolutionIndex] = video->height;
-   state.videoFps[state.resolutionIndex] = video->fps;
-   state.videoHasAudio[state.resolutionIndex] = video->hasAudio;
-   state.videoAvailable[state.resolutionIndex] = 1;
    state.audItag = audio ? audio->itag : (video->hasAudio ? video->itag : 0);
-   state.isLive = video->isLiveSegmented;
+   state.isLive = isLivePlayback;
 
    // Open the resolver's normal pick first. For VOD only, wait for a decoded pre-roll;
    // if that rendition cannot become ready, automatically test muxed/AVC alternatives.
@@ -663,6 +1012,32 @@ static void worker(uint64_t arg)
    // streams have different readiness and retry behaviour.
    state.pendingPlayer = openInitialWithFallback(info, &video, &audio, !info->isLive && !video->isLiveSegmented);
    if (!state.pendingPlayer) { fail("primary and fallback streams failed"); goto done; }
+
+   // The initial pre-roll fallback may have selected a different format. Keep the live quality
+   // index and the HUD aligned with the rendition that actually opened.
+   state.resolutionIndex = -1;
+   for (int i = 0; i < state.videoCount; i++) {
+      if (strcmp(state.videoUrls[i], video->url) == 0) {
+         state.resolutionIndex = i;
+         break;
+      }
+   }
+   if (state.resolutionIndex < 0 && isPlaybackVideoFormatDecodable(video) &&
+       state.videoCount < MAX_PLAYBACK_QUALITIES) {
+      addPlaybackQuality(video, qualityFormats, availableAudio != NULL);
+      for (int i = 0; i < state.videoCount; i++)
+         if (strcmp(state.videoUrls[i], video->url) == 0) { state.resolutionIndex = i; break; }
+      state.autoResolutionIndex = state.videoCount - 1;
+   }
+   if (state.resolutionIndex < 0) state.resolutionIndex = selectedQuality;
+   if (preferredQualityHeight == 0) state.autoResolutionIndex = state.resolutionIndex;
+   state.vidItag = video->itag; state.vidW = video->width;
+   state.vidH = video->height; state.vidFps = video->fps;
+   state.audItag = audio ? audio->itag : (video->hasAudio ? video->itag : 0);
+   state.isLive = isLivePlayback;
+   state.subtitlePick = (subtitlesEnabled && !state.isLive) ?
+                        findPreferredSubtitleTrack(getSubtitleLanguage()) : -1;
+   lastSubtitlePick = state.subtitlePick;
 
    // resume where we left off. seekVideoPlayer only posts the target; the decode thread does the
    // reconnect + fragment reload. drawPlay keeps the "Loading..." status up until the first frame is
@@ -675,6 +1050,7 @@ static void worker(uint64_t arg)
    }
 
 done:
+   if (info) free(info->captions);
    free(info);
    __sync_synchronize();
    state.workerDone = 1;
@@ -798,8 +1174,7 @@ static float playbackFontScale = 1.0f;
 
 static int playbackFontSize(int baseSize)
 {
-   int size = (int)(baseSize * playbackFontScale + 0.5f);
-   return size > 0 ? size : 1;
+   return baseSize > 0 ? baseSize : 1;
 }
 
 static int playbackSubtitleFontSize(int baseSize)
@@ -812,8 +1187,58 @@ static int playbackSubtitleFontSize(int baseSize)
 
 static int playbackChapterRowHeight(void)
 {
-   int scaled = playbackFontSize(CHAPTER_TEXT_SIZE) * 3 / 2;
+   int scaled = (int)(playbackFontSize(CHAPTER_TEXT_SIZE) * playbackFontScale * 1.5f + 0.5f);
    return scaled > CHAPTER_ROW_HEIGHT ? scaled : CHAPTER_ROW_HEIGHT;
+}
+
+static void renderDescription(void);
+
+static void applyPlaybackUiLabelScale(float scale)
+{
+   if (scale < 1.0f) scale = 1.0f;
+   if (scale > 1.5f) scale = 1.5f;
+   playbackFontScale = scale;
+
+#define SCALE_PLAYBACK_LABEL(label) setLabelFixedRenderScale(&(label), scale, 0)
+   SCALE_PLAYBACK_LABEL(statusLabel);
+   for (int i = 0; i < STAT_LINES; i++) {
+      statLabels[i].size = playbackSubtitleFontSize(22);
+      statLabels[i].fixedRenderScale = 0.0f;
+      setLabelFixedRenderScale(&statLabels[i], 1.0f, 0);
+   }
+   SCALE_PLAYBACK_LABEL(timeLeftLabel);
+   SCALE_PLAYBACK_LABEL(timeRightLabel);
+   SCALE_PLAYBACK_LABEL(toastLabel);
+   SCALE_PLAYBACK_LABEL(askPromptPrefixLabel);
+   SCALE_PLAYBACK_LABEL(askPromptSuffixLabel);
+   SCALE_PLAYBACK_LABEL(titleLabel);
+   SCALE_PLAYBACK_LABEL(authorLabel);
+   SCALE_PLAYBACK_LABEL(nextNoticeHeadingLabel);
+   SCALE_PLAYBACK_LABEL(nextNoticeTitleLabel);
+   subtitleLabel.size = playbackSubtitleFontSize(SUBTITLE_TEXT_SIZE);
+   subtitleLabel.fixedRenderScale = 0.0f;
+   setLabelFixedRenderScale(&subtitleLabel, 1.0f, 0);
+   SCALE_PLAYBACK_LABEL(playbackInfoLabel);
+   for (int i = 0; i < MAX_CHAPTERS; i++) {
+      SCALE_PLAYBACK_LABEL(chapterLabels[i]);
+      SCALE_PLAYBACK_LABEL(chapterTimeLabels[i]);
+   }
+   for (int i = 0; i < OPTIONS_COUNT; i++) SCALE_PLAYBACK_LABEL(optionsLabels[i]);
+   for (int i = 0; i < OPTIONS_DROPDOWN_MAX; i++) SCALE_PLAYBACK_LABEL(optionsValueLabels[i]);
+   for (int i = 0; i < 3; i++) SCALE_PLAYBACK_LABEL(optionsCurrentValueLabels[i]);
+   SCALE_PLAYBACK_LABEL(playbackSettingsTitle);
+   for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
+      SCALE_PLAYBACK_LABEL(playbackSettingsLabels[i]);
+      SCALE_PLAYBACK_LABEL(playbackSettingsValues[i]);
+   }
+   for (int i = 0; i < 2; i++) SCALE_PLAYBACK_LABEL(playbackSettingsToggleLabels[i]);
+   SCALE_PLAYBACK_LABEL(playbackSponsorTitle);
+   for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++) SCALE_PLAYBACK_LABEL(playbackSponsorCategoryLabels[i]);
+   for (int i = 0; i < 3; i++) SCALE_PLAYBACK_LABEL(playbackSponsorActionLabels[i]);
+   setLabelFixedRenderScale(&volumeMeter.numberLabel, scale, 0);
+#undef SCALE_PLAYBACK_LABEL
+
+   if (state.descriptionRendered) renderDescription();
 }
 
 static void initPlay(void)
@@ -823,18 +1248,23 @@ static void initPlay(void)
    state.askPromptShown = -1;
    state.screenW = getGfxScreenWidth();
    state.screenH = getGfxScreenHeight();
-   playbackFontScale = getGfxUiScaleFactor();
+   playbackFontScale = getGfxSdUiScale();
    cropPanX = cropPanY = 0.0f;
    cropPanLastUpdateUs = sys_time_get_system_time();
    if (playbackFontScale < 1.0f) playbackFontScale = 1.0f;
 
    uiFont = openSystemFont(FONT_POP);
    initLabel(&statusLabel, &uiFont, 0, 0, state.screenW - 80, AUTO, playbackFontSize(28), activeTheme->textPrimary, TEXT_WRAP, "");
+   statsTextPadding = (int)(measureFontText(&uiFont, playbackSubtitleFontSize(22), "   ") + 0.5f);
+   if (statsTextPadding < 3) statsTextPadding = 3;
+   int statsTextMaxWidth = state.screenW - 80 - 2 * statsTextPadding;
    for (int i = 0; i < STAT_LINES; i++)
-      initLabel(&statLabels[i], &uiFont, 0, 0, state.screenW - 100, AUTO, playbackSubtitleFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");
+      initLabel(&statLabels[i], &uiFont, 0, 0, statsTextMaxWidth, AUTO, playbackSubtitleFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");
    initLabel(&timeLeftLabel,  &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabel(&timeRightLabel, &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabelRaw(&toastLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");   // raw: shows track names
+   initLabelRaw(&askPromptPrefixLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "Press");
+   initLabelRaw(&askPromptSuffixLabel, &uiFont, 0, 0, 260, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "to skip sponsor");
    initLabelRaw(&titleLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");
    initLabelRaw(&authorLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(20), activeTheme->textSecondary, TEXT_WRAP, "");
    initLabelRaw(&nextNoticeHeadingLabel, &uiFont, 0, 0, 500, AUTO, playbackFontSize(22), activeTheme->accent, TEXT_NOWRAP, "NEXT VIDEO");
@@ -845,10 +1275,55 @@ static void initPlay(void)
       initLabelRaw(&chapterLabels[i], &uiFont, 0, 0, 990, AUTO, playbackFontSize(CHAPTER_TEXT_SIZE), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
       initLabel(&chapterTimeLabels[i], &uiFont, 0, 0, 150, AUTO, playbackFontSize(CHAPTER_TEXT_SIZE), activeTheme->textSecondary, TEXT_NOWRAP, "");
    }
+   optionsVisible = optionsDropdownOpen = optionsSelected = optionsDropdownSelected = 0;
+   lastSubtitlePick = -1;
+   suppressPlaybackCrossUntilRelease = 0;
+   for (int i = 0; i < OPTIONS_COUNT; i++)
+      initLabelRaw(&optionsLabels[i], &uiFont, 0, 0, 520, AUTO, playbackFontSize(27), activeTheme->textPrimary, TEXT_NOWRAP, optionsNames[i]);
+   for (int i = 0; i < OPTIONS_DROPDOWN_MAX; i++)
+      initLabelRaw(&optionsValueLabels[i], &uiFont, 0, 0, 360, AUTO, playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabelRaw(&optionsCurrentValueLabels[0], &uiFont, 0, 0, 0, AUTO,
+                playbackFontSize(27), activeTheme->textSecondary, TEXT_NOWRAP, "");
+   initLabelRaw(&optionsCurrentValueLabels[1], &uiFont, 0, 0, 400, AUTO,
+                playbackFontSize(27), activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
+   initLabelRaw(&optionsCurrentValueLabels[2], &uiFont, 0, 0, 400, AUTO,
+                playbackFontSize(27), activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
+
+   playbackSettingsOpen = playbackSponsorOpen = 0;
+   playbackSettingsSelected = playbackSponsorSelected = 0;
+   initLabelRaw(&playbackSettingsTitle, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 48, AUTO,
+                playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "Playback Settings");
+   static const char *playbackSettingNames[PLAYBACK_SETTINGS_COUNT] = {
+      "Enable 1080p (experimental)", "UI Scaling", "Overscan", "SponsorBlock"
+   };
+   for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
+      initLabelRaw(&playbackSettingsLabels[i], &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 230, AUTO,
+                   playbackFontSize(20), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS,
+                   playbackSettingNames[i]);
+      initLabelRaw(&playbackSettingsValues[i], &uiFont, 0, 0, 150, AUTO,
+                   playbackFontSize(20), activeTheme->textPrimary, TEXT_NOWRAP, "");
+   }
+   initLabelRaw(&playbackSettingsToggleLabels[0], &uiFont, 0, 0, 60, AUTO,
+                playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP, "OFF");
+   initLabelRaw(&playbackSettingsToggleLabels[1], &uiFont, 0, 0, 60, AUTO,
+                playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP, "ON");
+   initLabelRaw(&playbackSponsorTitle, &uiFont, 0, 0, PLAYBACK_SPONSOR_PANEL_W - 48, AUTO,
+                playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "SponsorBlock");
+   for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++)
+      initLabelRaw(&playbackSponsorCategoryLabels[i], &uiFont, 0, 0, 340, AUTO,
+                   playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS,
+                   getSponsorCategoryName((SponsorCategory)i));
+   initLabelRaw(&playbackSponsorActionLabels[0], &uiFont, 0, 0, PLAYBACK_SPONSOR_OPTION_W, AUTO,
+                playbackFontSize(16), activeTheme->textPrimary, TEXT_NOWRAP, "Skip");
+   initLabelRaw(&playbackSponsorActionLabels[1], &uiFont, 0, 0, PLAYBACK_SPONSOR_OPTION_W, AUTO,
+                playbackFontSize(16), activeTheme->textPrimary, TEXT_NOWRAP, "Ask");
+   initLabelRaw(&playbackSponsorActionLabels[2], &uiFont, 0, 0, PLAYBACK_SPONSOR_OPTION_W, AUTO,
+                playbackFontSize(16), activeTheme->textPrimary, TEXT_NOWRAP, "Keep");
+
    state.subtitlePick = state.subtitleFetched = -1;   // default off (memset left them 0)
 
    initVolumeMeter(&volumeMeter, &uiFont, activeTheme->accent, volumeLevel);
-   setLabelFixedRenderScale(&volumeMeter.numberLabel, playbackFontScale, 0);
+   applyPlaybackUiLabelScale(playbackFontScale);
    layoutVolumeMeter(&volumeMeter, state.screenW, state.screenH);
 
    state.threadActive = (spawnJoinableThread(&state.workerTid, worker, 0,
@@ -913,35 +1388,94 @@ static void showToast(const char *text)
    showToastFor(text, TOAST_VISIBLE_US);
 }
 
+static void setSubtitleTrack(int trackIndex)
+{
+   if (trackIndex < -1 || trackIndex >= state.captionCount) trackIndex = -1;
+   if (trackIndex == state.subtitlePick) {
+      refreshPlaybackInfoHud();
+      return;
+   }
+   state.subtitlePick = trackIndex;
+   if (trackIndex >= 0) lastSubtitlePick = trackIndex;
+   state.subtitlesReady = 0;
+   state.subtitleScanFrom = 0;
+   if (!state.subThreadActive && trackIndex >= 0) {
+      if (state.subtitleFetched == trackIndex && state.subtitleTrack && state.subtitleTrack->count > 0)
+         state.subtitlesReady = 1;
+      else if (state.subtitleFetched != trackIndex)
+         state.subtitleFetched = -1;
+   }
+   setLabelText(&subtitleLabel, "");
+   refreshPlaybackInfoHud();
+}
+
+static void showSelectedSubtitleToast(void)
+{
+   char notice[112];
+   int trackIndex = state.subtitlePick;
+
+   if (trackIndex < 0 || trackIndex >= state.captionCount) {
+      showToast("Subtitles: OFF");
+      return;
+   }
+
+   const CaptionTrack *track = &state.captionTracks[trackIndex];
+   if (track->isAutoGenerated && !strstr(track->name, "auto-generated") &&
+       !strstr(track->name, "auto-translated")) {
+      snprintf(notice, sizeof notice, "Subtitles: %s (auto-generated)", track->name);
+   } else {
+      snprintf(notice, sizeof notice, "Subtitles: %s", track->name);
+   }
+   showToast(notice);
+}
+
+static void applyPreferredSubtitleTrack(void)
+{
+   int track = -1;
+   if (!state.isLive && subtitlesEnabled) {
+      if (lastSubtitlePick >= 0 && lastSubtitlePick < state.captionCount)
+         track = lastSubtitlePick;
+      else
+         track = findPreferredSubtitleTrack(getSubtitleLanguage());
+      if (track < 0) {
+         for (int i = 0; i < state.captionCount; i++)
+            if (!subtitleIsAutoTranslated(&state.captionTracks[i])) { track = i; break; }
+      }
+   }
+   setSubtitleTrack(track);
+}
+
 // fetches the picked caption track in the background; updatePlay reaps it and respawns on a new pick.
 static void subtitleWorker(uint64_t arg)
 {
    (void)arg;
-   fetchSubtitles(state.captionTracks[state.subtitleFetched].url, state.subtitleTrack);   // a failure leaves count 0
+   state.subtitleFetchResult = fetchSubtitles(state.captionTracks[state.subtitleFetched].url,
+                                               state.subtitleTrack);   // a failure leaves count 0
    __sync_synchronize();
    state.subWorkerDone = 1;
    exitThread();
 }
 
-// triangle: cycle off -> track 1 -> ... -> off; the pick shows in the top-right HUD badge. the fetch
-// itself is driven by updatePlay, so a mid-fetch switch just supersedes the old pick.
-static void cycleSubtitles(void)
+// Triangle only toggles subtitles. The selected track is retained while OFF.
+static void toggleSubtitles(void)
 {
-   // live captions use a rolling delivery our fetcher can't parse, so live streams count as none
    if (state.captionCount == 0 || state.isLive) { showToast("No subtitles"); return; }
-   state.subtitlePick = state.subtitlePick + 1 < state.captionCount ? state.subtitlePick + 1 : -1;
-   if (state.subtitlePick >= 0)
-      strCopy(preferredSubtitleName, sizeof preferredSubtitleName, state.captionTracks[state.subtitlePick].name);
-   else
-      preferredSubtitleName[0] = 0;
 
-   setLabelText(&subtitleLabel, "");   // clear the old track's cue; the new one repopulates once fetched
+   if (subtitlesEnabled) {
+      subtitlesEnabled = 0;
+      setSubtitleTrack(-1);
+      showToast("Subtitles: OFF");
+      return;
+   }
 
-   refreshPlaybackInfoHud();
-   char notice[96];
-   if (state.subtitlePick >= 0) snprintf(notice, sizeof notice, "Subtitles: %s", state.captionTracks[state.subtitlePick].name);
-   else strCopy(notice, sizeof notice, "Subtitles: OFF");
-   showToast(notice);
+   subtitlesEnabled = 1;
+   applyPreferredSubtitleTrack();
+   if (state.subtitlePick < 0) {
+      subtitlesEnabled = 0;
+      showToast("No subtitles available");
+      return;
+   }
+   showSelectedSubtitleToast();
 }
 
 static void audioSwitchWorker(uint64_t arg)
@@ -1046,7 +1580,7 @@ static void resolutionSwitchWorker(uint64_t arg)
 
 static int startResolutionSwitch(int target, int automaticFallback)
 {
-   if (target < 0 || target >= 3 || !state.videoAvailable[target] ||
+   if (target < 0 || target >= state.videoCount || !state.videoAvailable[target] ||
        !state.player || state.resolutionSwitchThreadActive || state.audioSwitchThreadActive ||
        state.seeking || (state.isLive && automaticFallback != 2)) return 0;
    if (strcmp(state.videoUrls[target], state.videoUrls[state.resolutionIndex]) == 0) return 0;
@@ -1121,42 +1655,30 @@ static int findLowerResolutionProfile(void)
    return -1;
 }
 
-static void cycleResolution(void)
-{
-   if (state.resolutionSwitchThreadActive || state.audioSwitchThreadActive || state.seeking) {
-      showToast("Wait for the current operation");
-      return;
-   }
-   for (int step = 1; step <= 3; step++) {
-      int target = (state.resolutionIndex + step) % 3;
-      if (target != state.resolutionIndex && state.videoAvailable[target] &&
-          strcmp(state.videoUrls[target], state.videoUrls[state.resolutionIndex]) != 0) {
-         state.audioFallbackAttempted = 0;
-         startResolutionSwitch(target, 0);
-         return;
-      }
-   }
-   showToast("No other resolution available");
-}
-
-static void cycleAudioTrack(void)
+static void startAudioTrackSwitch(int target)
 {
    if (state.seeking) {
-      logWarn("[audio-diag] L3 ignored while a seek transaction is pending\n");
+      logWarn("[audio-diag] audio selection ignored while a seek transaction is pending\n");
       showToast("Wait for seek to finish before switching audio");
       return;
    }
-   if (state.audioCount < 2 || state.isLive || !state.player || state.audioSwitchThreadActive) {
-      showToast(state.audioCount < 2 ? "No alternate audio tracks" : "Audio track busy/unavailable");
+   if (target < 0 || target >= state.audioCount) {
+      showToast("Audio track unavailable");
       return;
    }
+   if (target == state.audioPick) return;
+   if (state.isLive || !state.player || state.audioSwitchThreadActive) {
+      showToast("Audio track busy/unavailable");
+      return;
+   }
+
    state.audioSwitchPosition = getVideoPositionSeconds(state.player);
    state.audioSwitchWasPaused = isVideoPaused(state.player);
-   state.audioSwitchTarget = (state.audioPick + 1) % state.audioCount;
+   state.audioSwitchTarget = target;
    state.audioFallbackAttempted = 0;
    state.audioSwitchFallback = 0;
    setVideoPaused(state.player, 1);
-   snprintf(state.message, sizeof state.message, "Loading audio: %s", state.audioNames[state.audioSwitchTarget]);
+   snprintf(state.message, sizeof state.message, "Loading audio: %s", state.audioNames[target]);
    refreshPlaybackInfoHud();
    showControls();
    state.audioSwitchDone = 0;
@@ -1183,6 +1705,7 @@ static void nudgeSeek(float deltaSeconds, uint64_t nowUs)
 
 // left/right scrub, cross toggles pause (restarts if the video ended). only once playing.
 static void updateCropPan(void);
+static int findAskSponsorSegment(void);
 
 static void handlePlaybackInput(void)
 {
@@ -1203,7 +1726,6 @@ static void handlePlaybackInput(void)
       showToast(cropToFillEnabled ? "Crop to fill: ON" : "Crop to fill: OFF");
    }
 
-   if (isPadButtonPressed(PAD_BTN_SQUARE)) cycleResolution();
 
    if (state.isLive) {
       if (isPadButtonPressed(PAD_BTN_CROSS)) {
@@ -1235,26 +1757,21 @@ static void handlePlaybackInput(void)
       }
    }
 
-   if (isPadButtonPressed(PAD_BTN_TRIANGLE)) {
-      int askIndex = -1;
-      if (state.sbReady && state.player) {
-         float position = getVideoPositionSeconds(state.player);
-         for (int i = 0; i < state.sb.count; i++) {
-            SponsorSegment *segment = &state.sb.segments[i];
-            if (!segment->skipped && getSponsorAction((int)segment->category) == SPONSOR_ACTION_ASK &&
-                position >= segment->start && position < segment->end - 0.2f) { askIndex = i; break; }
-         }
-      }
+   if (isPadButtonPressed(PAD_BTN_SQUARE)) {
+      int askIndex = findAskSponsorSegment();
       if (askIndex >= 0) {
          SponsorSegment *segment = &state.sb.segments[askIndex];
          segment->skipped = 1;
+         state.askPromptShown = -1;
+         state.askPromptStartedUs = 0;
          seekVideoPlayerPast(state.player, segment->end);
          char notice[64];
          snprintf(notice, sizeof notice, "Skipped %s", getSponsorCategoryName(segment->category));
          showToast(notice);
-      } else cycleSubtitles();
+      }
    }
-   if (isPadButtonPressed(PAD_BTN_L3)) cycleAudioTrack();
+
+   if (isPadButtonPressed(PAD_BTN_TRIANGLE)) toggleSubtitles();
 
    if (isPadButtonPressed(PAD_BTN_L1)) {
       char previousId[12];
@@ -1348,7 +1865,7 @@ static void handlePlaybackInput(void)
    }
 }
 
-// Each category has its own action. Ask is handled by Triangle in handlePlaybackInput.
+// Each category has its own action. Ask segments can be skipped manually with Square.
 static int shouldAutoSkipSponsor(SponsorCategory category)
 {
    return getSponsorAction((int)category) == SPONSOR_ACTION_SKIP;
@@ -1412,7 +1929,7 @@ static void renderDescription(void)
             state.likeCount[0] ? state.likeCount : "Loading...",
             state.description[0] ? state.description : "No description.");
    if (descriptionTexture.tex.w) freeTextTexture(&descriptionTexture);
-   renderFontRaw(&descriptionTexture, &uiFont, playbackFontSize(DESCRIPTION_TEXT_SIZE), content,
+   renderFontRaw(&descriptionTexture, &uiFont, (int)(playbackFontSize(DESCRIPTION_TEXT_SIZE) * playbackFontScale + 0.5f), content,
                  activeTheme->textPrimary, state.screenW - 2 * DESCRIPTION_MARGIN_X, TEXT_WRAP);
    state.descriptionRendered = 1;
 }
@@ -1491,6 +2008,7 @@ static void openChapters(void)
    for (int i = 0; i < state.chapters.count; i++)
       if (state.chapters.chapters[i].start <= position) state.chapterSelected = i;
    state.chaptersVisible = 1;
+   chapterNavigateRepeat.timer = chapterNavigateRepeat.repeats = 0;
 }
 
 // while the picker is up it owns the pad: up/down move the selection, cross jumps to the chapter
@@ -1502,17 +2020,593 @@ static void handleChaptersInput(void)
 
    if (isPadButtonPressed(PAD_BTN_CROSS)) {
       state.chaptersVisible = 0;
+      suppressPlaybackCrossUntilRelease = 1; // consume the matching RELEASED event too
       state.seeking = 0;   // a pending scrub must not overwrite the jump
       seekVideoPlayer(state.player, state.chapters.chapters[state.chapterSelected].start);
       showControls();
       return;
    }
 
-   static ButtonRepeat navigateRepeat;
-   if (isRepeatDue(&navigateRepeat, getPadButtonState(PAD_BTN_DOWN)))    state.chapterSelected++;
-   else if (isRepeatDue(&navigateRepeat, getPadButtonState(PAD_BTN_UP))) state.chapterSelected--;
-   if (state.chapterSelected < 0) state.chapterSelected = 0;
-   if (state.chapterSelected >= state.chapters.count) state.chapterSelected = state.chapters.count - 1;
+   if (isRepeatDue(&chapterNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))    state.chapterSelected++;
+   else if (isRepeatDue(&chapterNavigateRepeat, getPadButtonState(PAD_BTN_UP))) state.chapterSelected--;
+   if (state.chapters.count > 0) {
+      if (state.chapterSelected < 0) state.chapterSelected = state.chapters.count - 1;
+      if (state.chapterSelected >= state.chapters.count) state.chapterSelected = 0;
+   }
+}
+
+static void openPlaybackOptions(void)
+{
+   optionsVisible = 1;
+   optionsDropdownOpen = 0;
+   optionsSelected = 0;
+   optionsDropdownSelected = 0;
+   optionsNavigateRepeat.timer = optionsNavigateRepeat.repeats = 0;
+   optionsDropdownRepeat.timer = optionsDropdownRepeat.repeats = 0;
+
+   // Prefetch chapters in the background; opening Options never opens the chapter picker.
+   if (!state.isLive && state.chapters.count == 0 && !state.chFetchTried &&
+       isBareVideoId(requestedInput)) {
+      state.chFetchTried = 1;
+      state.chWorkerDone = 0;
+      state.chThreadActive = (spawnJoinableThread(&state.chWorkerTid, chapterWorker, 0,
+                                  THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-chapters") == 0);
+   }
+}
+
+static void openPlaybackSettings(void)
+{
+   playbackSettingsOpen = 1;
+   playbackSponsorOpen = 0;
+   playbackSettingsSelected = 0;
+   playbackSettingsRepeat.timer = playbackSettingsRepeat.repeats = 0;
+}
+
+static void openPlaybackSponsorSettings(void)
+{
+   playbackSponsorOpen = 1;
+   playbackSponsorSelected = 0;
+   playbackSponsorRepeat.timer = playbackSponsorRepeat.repeats = 0;
+}
+
+static void updatePlaybackSponsorSettings(void)
+{
+   if (isPadButtonPressed(PAD_BTN_CIRCLE)) { playbackSponsorOpen = 0; return; }
+   if (isRepeatDue(&playbackSponsorRepeat, getPadButtonState(PAD_BTN_DOWN)))
+      playbackSponsorSelected = (playbackSponsorSelected + 1) % SPONSOR_CATEGORY_COUNT;
+   else if (isRepeatDue(&playbackSponsorRepeat, getPadButtonState(PAD_BTN_UP)))
+      playbackSponsorSelected = (playbackSponsorSelected + SPONSOR_CATEGORY_COUNT - 1) % SPONSOR_CATEGORY_COUNT;
+
+   int action = getSponsorAction(playbackSponsorSelected);
+   int option = action == SPONSOR_ACTION_SKIP ? 0 : action == SPONSOR_ACTION_ASK ? 1 : 2;
+   if (isPadButtonPressed(PAD_BTN_LEFT)) option = (option + 2) % 3;
+   else if (isPadButtonPressed(PAD_BTN_RIGHT) || isPadButtonPressed(PAD_BTN_CROSS)) option = (option + 1) % 3;
+   else return;
+   action = option == 0 ? SPONSOR_ACTION_SKIP : option == 1 ? SPONSOR_ACTION_ASK : SPONSOR_ACTION_KEEP;
+   if (setSponsorAction(playbackSponsorSelected, action) != 0) {
+      showToast("Could not save SponsorBlock setting");
+      return;
+   }
+   // If every category was Keep when playback began, no SponsorBlock request was
+   // started. Fetch now when the user enables an action from this playback submenu.
+   if (hasSponsorBlockActions() && !state.sbReady && !state.sbThreadActive &&
+       isBareVideoId(requestedInput)) {
+      state.sbWorkerDone = 0;
+      state.sbThreadActive = (spawnJoinableThread(&state.sbWorkerTid, sponsorWorker, 0,
+                              THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-sponsor") == 0);
+   }
+}
+
+static void setPlaybackUiScale(float scale)
+{
+   scale = scale >= 1.25f ? 1.5f : 1.0f;
+   setGfxSdUiScale(scale);
+   char value[16];
+   int length = snprintf(value, sizeof value, "%.2f\n", (double)scale);
+   if (length > 0 && writeFile(PLAYBACK_SD_SCALE_PATH, value, (uint64_t)length) != 0)
+      logWarn("[play] could not persist SD UI scale\n");
+   applyPlaybackUiLabelScale(scale);
+}
+
+static void updatePlaybackSettings(void)
+{
+   if (playbackSponsorOpen) { updatePlaybackSponsorSettings(); return; }
+   if (isPadButtonPressed(PAD_BTN_CIRCLE)) { playbackSettingsOpen = 0; return; }
+   if (isRepeatDue(&playbackSettingsRepeat, getPadButtonState(PAD_BTN_DOWN)))
+      playbackSettingsSelected = (playbackSettingsSelected + 1) % PLAYBACK_SETTINGS_COUNT;
+   else if (isRepeatDue(&playbackSettingsRepeat, getPadButtonState(PAD_BTN_UP)))
+      playbackSettingsSelected = (playbackSettingsSelected + PLAYBACK_SETTINGS_COUNT - 1) % PLAYBACK_SETTINGS_COUNT;
+
+   int left = isPadButtonPressed(PAD_BTN_LEFT);
+   int right = isPadButtonPressed(PAD_BTN_RIGHT);
+   int cross = isPadButtonPressed(PAD_BTN_CROSS);
+   if (!left && !right && !cross) return;
+
+   if (playbackSettingsSelected == 0) {
+      int enabled = getEnable1080p60();
+      if (left) enabled = 0;
+      else if (right) enabled = 1;
+      else enabled = !enabled;
+      if (setEnable1080p60(enabled) != 0) showToast("Could not save 1080p setting");
+   } else if (playbackSettingsSelected == 1) {
+      float current = playbackFontScale;
+      setPlaybackUiScale(current >= 1.25f ? 1.0f : 1.5f);
+   } else if (playbackSettingsSelected == 2) {
+      int delta = left ? -1 : 1;
+      int overscan = getOverscanPercent() + delta;
+      if (setOverscanPercent(overscan) != 0) showToast("Could not save overscan setting");
+   } else if (playbackSettingsSelected == 3 && (cross || right)) {
+      openPlaybackSponsorSettings();
+   }
+}
+
+static void handlePlaybackOptionsInput(void)
+{
+   if (playbackSettingsOpen) { updatePlaybackSettings(); return; }
+   if (optionsDropdownOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_LEFT)) {
+         optionsDropdownOpen = 0;
+         return;
+      }
+      int dropdownCount = optionsSelected == 3 ? subtitleMenuCount() : optionsValueCounts[optionsSelected];
+      if (dropdownCount > 0) {
+         if (isRepeatDue(&optionsDropdownRepeat, getPadButtonState(PAD_BTN_DOWN)))
+            optionsDropdownSelected = (optionsDropdownSelected + 1) % dropdownCount;
+         else if (isRepeatDue(&optionsDropdownRepeat, getPadButtonState(PAD_BTN_UP)))
+            optionsDropdownSelected = (optionsDropdownSelected + dropdownCount - 1) % dropdownCount;
+      }
+      if (isPadButtonPressed(PAD_BTN_CROSS)) {
+         if (optionsSelected == 0) {
+            int target = optionsQualityTargets[optionsDropdownSelected];
+            if (target < 0) {
+               preferredQualityHeight = preferredQualityFps = 0;
+               target = state.autoResolutionIndex;
+            } else {
+               preferredQualityHeight = state.videoHeights[target];
+               preferredQualityFps = state.videoFps[target];
+            }
+            if (target >= 0 && target != state.resolutionIndex) {
+               state.audioFallbackAttempted = 0;
+               if (!startResolutionSwitch(target, 0)) showToast("Could not start quality change");
+            } else if (target >= 0) {
+               showToast(preferredQualityHeight ? "Quality preference saved" : "Quality: Auto");
+            }
+         } else if (optionsSelected == 1) {
+            if (state.audioCount > 0)
+               startAudioTrackSwitch(optionsDropdownSelected);
+            else if (state.resolutionIndex >= 0 && state.resolutionIndex < state.videoCount &&
+                     state.videoHasAudio[state.resolutionIndex])
+               showToast("Original upload already active");
+            else
+               showToast("No audio tracks available");
+         } else if (optionsSelected == 3) {
+            int trackIndex = subtitleTrackAtMenuIndex(optionsDropdownSelected);
+            if (!state.isLive && trackIndex >= 0 && trackIndex < state.captionCount) {
+               CaptionTrack *track = &state.captionTracks[trackIndex];
+               if (setSubtitleLanguage(track->languageCode) == 0) {
+                  lastSubtitlePick = trackIndex;
+                  if (subtitlesEnabled) setSubtitleTrack(trackIndex);
+                  char notice[112];
+                  snprintf(notice, sizeof notice, "Subtitle: %s", track->name);
+                  showToast(notice);
+               } else {
+                  showToast("Could not save subtitle language");
+               }
+            } else {
+               showToast("No subtitle languages available");
+            }
+         }
+         optionsDropdownOpen = 0;
+      }
+      return;
+   }
+
+   if (isPadButtonPressed(PAD_BTN_START) || isPadButtonPressed(PAD_BTN_CIRCLE)) {
+      optionsVisible = 0;
+      return;
+   }
+
+   if (isRepeatDue(&optionsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
+      optionsSelected = (optionsSelected + 1) % OPTIONS_COUNT;
+   else if (isRepeatDue(&optionsNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
+      optionsSelected = (optionsSelected + OPTIONS_COUNT - 1) % OPTIONS_COUNT;
+
+   int left = isPadButtonPressed(PAD_BTN_LEFT);
+   int right = isPadButtonPressed(PAD_BTN_RIGHT);
+   int cross = isPadButtonPressed(PAD_BTN_CROSS);
+
+   if (optionsSelected == 4 && (right || cross)) {
+      openChapters();
+      if (state.chaptersVisible) optionsVisible = 0;
+      return;
+   }
+
+   if (optionsSelected == 2 && (cross || left || right)) {
+      int enabled = left ? 0 : right ? 1 : !subtitlesEnabled;
+      if (enabled != subtitlesEnabled) {
+         subtitlesEnabled = enabled;
+         if (subtitlesEnabled) {
+            applyPreferredSubtitleTrack();
+            showSelectedSubtitleToast();
+         } else {
+            setSubtitleTrack(-1);
+            showToast("Subtitles: OFF");
+         }
+      }
+      return;
+   }
+
+   if (optionsSelected == 5 && (cross || left || right)) {
+      int enabled = left ? 0 : right ? 1 : !cropToFillEnabled;
+      if (enabled != cropToFillEnabled) {
+         cropToFillEnabled = enabled;
+         cropPanX = cropPanY = 0.0f;
+         showToast(cropToFillEnabled ? "Crop to fill: ON" : "Crop to fill: OFF");
+      }
+      return;
+   }
+
+   if (optionsSelected == 6 && (cross || left || right)) {
+      int enabled = left ? 0 : right ? 1 : !getAutoplayEnabled();
+      if (enabled != getAutoplayEnabled()) {
+         setAutoplayEnabled(enabled);
+         showToast(getAutoplayEnabled() ? "Autoplay: ON" : "Autoplay: OFF");
+      }
+      return;
+   }
+
+   if (optionsSelected == 7 && (right || cross)) {
+      openPlaybackSettings();
+      return;
+   }
+
+   if ((optionsSelected == 0 || optionsSelected == 1 || optionsSelected == 3) && (right || cross)) {
+      if (optionsSelected == 0) {
+         prepareQualityOptions();
+         optionsDropdownSelected = preferredQualityHeight == 0 ? 0 : qualityDropdownIndexForCurrent();
+         if (state.isLive) optionsDropdownSelected = 0;
+      } else if (optionsSelected == 1) {
+         prepareAudioOptions();
+         optionsDropdownSelected = state.audioPick >= 0 && state.audioPick < optionsValueCounts[1] ? state.audioPick : 0;
+      } else {
+         prepareSubtitleOptions();
+         int selectedTrack = (lastSubtitlePick >= 0 && lastSubtitlePick < state.captionCount) ?
+                             lastSubtitlePick : findPreferredSubtitleTrack(getSubtitleLanguage());
+         optionsDropdownSelected = subtitleMainMenuIndexForTrack(selectedTrack);
+      }
+      optionsDropdownRepeat.timer = optionsDropdownRepeat.repeats = 0;
+      optionsDropdownOpen = 1;
+   }
+}
+
+static int playbackSettingsPanelWidth(void)
+{
+   int width = state.screenW - 48;
+   return width < PLAYBACK_SETTINGS_PANEL_W ? width : PLAYBACK_SETTINGS_PANEL_W;
+}
+
+static int playbackSponsorPanelWidth(void)
+{
+   int width = state.screenW - 48;
+   return width < PLAYBACK_SPONSOR_PANEL_W ? width : PLAYBACK_SPONSOR_PANEL_W;
+}
+
+static void drawPlaybackSettings(void)
+{
+   int panelW = playbackSettingsPanelWidth();
+   int panelH = PLAYBACK_SETTINGS_PANEL_H;
+   if (panelH > state.screenH - 48) panelH = state.screenH - 48;
+   int x = (state.screenW - panelW) / 2;
+   int y = (state.screenH - panelH) / 2;
+   fillGfxRectangleFixed(0, 0, state.screenW, state.screenH, 0x78000000);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+   refreshLabelScale(&playbackSettingsTitle);
+   drawLabelAt(&playbackSettingsTitle,
+               state.screenW / 2 - playbackSettingsTitle.tt.tex.w / 2, y + 28);
+
+   char overscanValue[16];
+   int overscan = getOverscanPercent();
+   if (overscan > 0) snprintf(overscanValue, sizeof overscanValue, "+%d%%", overscan);
+   else snprintf(overscanValue, sizeof overscanValue, "%d%%", overscan);
+   static const char *const playbackScaleNames[] = { "1.0x", "1.5x" };
+   const char *scaleValue = playbackScaleNames[playbackFontScale >= 1.25f ? 1 : 0];
+   if (strcmp(playbackSettingsValues[1].text, scaleValue) != 0)
+      setLabelText(&playbackSettingsValues[1], scaleValue);
+   setLabelText(&playbackSettingsValues[2], overscanValue);
+   setLabelText(&playbackSettingsValues[3], "Configure");
+
+   int toggleW = 132;
+   int toggleX = x + panelW - 40 - toggleW;
+   for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
+      int rowY = y + 72 + i * PLAYBACK_SETTINGS_ROW_H;
+      Label *name = &playbackSettingsLabels[i];
+      refreshLabelScale(name);
+      moveLabel(name, x + 40, getCenteredLabelY(name, rowY, PLAYBACK_SETTINGS_ROW_H));
+      drawLabel(name);
+      if (i == 0) {
+         int enabled = getEnable1080p60();
+         int selected = enabled ? 1 : 0;
+         int toggleY = rowY + (PLAYBACK_SETTINGS_ROW_H - 36) / 2;
+         int selectedX = toggleX + selected * 66;
+         fillGfxRoundedRectangleFixed(toggleX, toggleY, toggleW, 36, 8, activeTheme->surface);
+         if (i == playbackSettingsSelected)
+            fillGfxRoundedRectangleFixed(selectedX - 4, toggleY - 4, 74, 44, 10, 0x38FFFFFF);
+         fillGfxRoundedRectangleFixed(selectedX, toggleY, 66, 36, 8, activeTheme->accent);
+         for (int option = 0; option < 2; option++) {
+            Label *word = &playbackSettingsToggleLabels[option];
+            refreshLabelScale(word);
+            setLabelColor(word, option == selected ? activeTheme->appBg : activeTheme->textPrimary);
+            moveLabel(word, toggleX + option * 66 + (66 - word->tt.tex.w) / 2,
+                      getCenteredLabelY(word, toggleY, 36));
+            drawLabel(word);
+         }
+      } else {
+         Label *value = &playbackSettingsValues[i];
+         refreshLabelScale(value);
+         int valueW = value->tt.tex.w + 24;
+         if (valueW < 100) valueW = 100;
+         int valueX = x + panelW - 40 - valueW;
+         int valueY = getCenteredLabelY(value, rowY, PLAYBACK_SETTINGS_ROW_H);
+         if (i == playbackSettingsSelected)
+            fillGfxRoundedRectangleFixed(valueX, valueY - 5, valueW, value->tt.tex.h + 10,
+                                         7, activeTheme->rowHighlight);
+         setLabelColor(value, i == playbackSettingsSelected ? activeTheme->accent : activeTheme->textPrimary);
+         moveLabel(value, valueX + (valueW - value->tt.tex.w) / 2, valueY);
+         drawLabel(value);
+         if (i == 3) {
+            int tx = x + panelW - 24;
+            int ty = rowY + PLAYBACK_SETTINGS_ROW_H / 2;
+            drawGfxTriangle(tx - 7, ty - 4, activeTheme->textSecondary,
+                            tx + 7, ty - 4, activeTheme->textSecondary,
+                            tx, ty + 4, activeTheme->textSecondary);
+         }
+      }
+   }
+}
+
+static void drawPlaybackSponsorSettings(void)
+{
+   int panelW = playbackSponsorPanelWidth();
+   int panelH = PLAYBACK_SPONSOR_PANEL_H;
+   if (panelH > state.screenH - 48) panelH = state.screenH - 48;
+   int x = (state.screenW - panelW) / 2;
+   int y = (state.screenH - panelH) / 2;
+   fillGfxRectangleFixed(0, 0, state.screenW, state.screenH, 0x78000000);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+   refreshLabelScale(&playbackSponsorTitle);
+   drawLabelAt(&playbackSponsorTitle,
+               state.screenW / 2 - playbackSponsorTitle.tt.tex.w / 2, y + 28);
+
+   static const int actionValues[3] = { SPONSOR_ACTION_SKIP, SPONSOR_ACTION_ASK, SPONSOR_ACTION_KEEP };
+   int optionW = PLAYBACK_SPONSOR_OPTION_W;
+   int optionH = 32;
+   int optionGroupW = 3 * optionW + 2 * PLAYBACK_SPONSOR_OPTION_GAP;
+   int optionX = x + panelW - 32 - optionGroupW;
+   int rowTop = y + 86;
+   for (int row = 0; row < SPONSOR_CATEGORY_COUNT; row++) {
+      int rowY = rowTop + row * PLAYBACK_SPONSOR_ROW_H;
+      int focused = row == playbackSponsorSelected;
+      if (focused)
+         fillGfxRoundedRectangleFixed(x + 18, rowY, panelW - 36, PLAYBACK_SPONSOR_ROW_H - 2,
+                                      7, activeTheme->rowHighlight);
+      fillGfxCircle(x + 34, rowY + PLAYBACK_SPONSOR_ROW_H / 2, 5,
+                    getSponsorCategoryColor((SponsorCategory)row));
+      Label *name = &playbackSponsorCategoryLabels[row];
+      refreshLabelScale(name);
+      setLabelColor(name, focused ? activeTheme->textPrimary : activeTheme->textSecondary);
+      moveLabel(name, x + 52, getCenteredLabelY(name, rowY, PLAYBACK_SPONSOR_ROW_H));
+      drawLabel(name);
+
+      int chosen = getSponsorAction(row);
+      for (int option = 0; option < 3; option++) {
+         int ox = optionX + option * (optionW + PLAYBACK_SPONSOR_OPTION_GAP);
+         int selected = chosen == actionValues[option];
+         int optionY = rowY + (PLAYBACK_SPONSOR_ROW_H - optionH) / 2;
+         uint32_t bg = selected ? (focused ? activeTheme->accent : activeTheme->surface) : activeTheme->surface;
+         fillGfxRoundedRectangleFixed(ox, optionY, optionW, optionH, 7, bg);
+         Label *word = &playbackSponsorActionLabels[option];
+         refreshLabelScale(word);
+         setLabelColor(word, selected ? (focused ? activeTheme->appBg : activeTheme->textPrimary) : 0xFF888888);
+         moveLabel(word, ox + (optionW - word->tt.tex.w) / 2,
+                   getCenteredLabelY(word, optionY, optionH));
+         drawLabel(word);
+      }
+   }
+}
+
+static void setOptionsCurrentValue(Label *label, const char *value, int width)
+{
+   if (label->width != width) {
+      label->width = width;
+      label->text[0] = '\0'; // force a reraster with the new available width
+   }
+   setLabelText(label, value ? value : "Unavailable");
+   refreshLabelScale(label);
+}
+
+static void updateOptionsCurrentValues(int valueWidth)
+{
+   prepareQualityOptions();
+   int qualityIndex = 0;
+   if (preferredQualityHeight > 0) {
+      for (int i = 1; i < optionsValueCounts[0]; i++) {
+         int target = optionsQualityTargets[i];
+         if (target >= 0 && target < state.videoCount &&
+             state.videoHeights[target] == preferredQualityHeight &&
+             (preferredQualityFps <= 0 || state.videoFps[target] == preferredQualityFps)) {
+            qualityIndex = i;
+            break;
+         }
+      }
+      if (qualityIndex == 0 && state.resolutionIndex >= 0)
+         qualityIndex = qualityDropdownIndexForCurrent();
+   }
+   if (qualityIndex < 0 || qualityIndex >= optionsValueCounts[0]) qualityIndex = 0;
+   setOptionsCurrentValue(&optionsCurrentValueLabels[0], optionsQualityLabels[qualityIndex], 0);
+
+   prepareAudioOptions();
+   const char *audioValue = "Unavailable";
+   if (state.audioPick >= 0 && state.audioPick < state.audioCount &&
+       state.audioPick < optionsValueCounts[1]) {
+      audioValue = optionsAudioLabels[state.audioPick];
+   } else if (state.resolutionIndex >= 0 && state.resolutionIndex < state.videoCount &&
+              state.videoHasAudio[state.resolutionIndex]) {
+      audioValue = "Original upload";
+   } else if (state.fallbackAudioUrl[0]) {
+      audioValue = "Original upload";
+   } else if (optionsValueCounts[1] > 0 && state.audioCount > 0) {
+      audioValue = optionsAudioLabels[0];
+   }
+   setOptionsCurrentValue(&optionsCurrentValueLabels[1], audioValue, valueWidth);
+
+   int subtitleIndex = state.subtitlePick;
+   if (subtitleIndex < 0 || subtitleIndex >= state.captionCount) subtitleIndex = lastSubtitlePick;
+   if (subtitleIndex < 0 || subtitleIndex >= state.captionCount)
+      subtitleIndex = findPreferredSubtitleTrack(getSubtitleLanguage());
+   const char *subtitleValue = (subtitleIndex >= 0 && subtitleIndex < state.captionCount) ?
+                               state.captionTracks[subtitleIndex].name : "Unavailable";
+   setOptionsCurrentValue(&optionsCurrentValueLabels[2], subtitleValue, valueWidth);
+}
+
+static void drawPlaybackOptions(void)
+{
+   int panelW = 680;
+   int rowH = state.screenH < 560 ? 44 : 54;
+   int panelH = 70 + OPTIONS_COUNT * rowH;
+   int x = (state.screenW - panelW) / 2;
+   int y = (state.screenH - panelH) / 2;
+   int valueFontSize = (int)(optionsLabels[3].size * playbackFontScale + 0.5f);
+   int twoSpaceGap = (int)(measureFontText(&uiFont, valueFontSize, "  ") + 0.5f);
+   int valueX = x + 38 + optionsLabels[3].tt.tex.w + twoSpaceGap;
+   int arrowLeft = x + panelW - 44 - 7;
+   int valueRight = arrowLeft - twoSpaceGap;
+   int valueWidth = valueRight - valueX;
+   if (valueWidth < 8) valueWidth = 8;
+   updateOptionsCurrentValues(valueWidth);
+
+   // Quality is never ellipsized: right-align it immediately before the arrow.
+   // If a future quality label is unusually long, reduce only that value's font
+   // enough to keep the complete string inside the Options panel.
+   Label *qualityValue = &optionsCurrentValueLabels[0];
+   refreshLabelScale(qualityValue);
+   int qualityMaxWidth = arrowLeft - (x + 38) - 12;
+   int qualityBaseSize = playbackFontSize(27);
+   int qualityRenderSize = (int)(qualityBaseSize * playbackFontScale + 0.5f);
+   int qualityTextWidth = (int)(measureFontText(&uiFont, qualityRenderSize, qualityValue->text) + 0.5f);
+   int qualityFitSize = qualityBaseSize;
+   if (qualityTextWidth > qualityMaxWidth && qualityTextWidth > 0) {
+      qualityFitSize = (int)(qualityBaseSize * ((float)qualityMaxWidth / (float)qualityTextWidth));
+      if (qualityFitSize < 12) qualityFitSize = 12;
+   }
+   if (qualityValue->size != qualityFitSize) {
+      qualityValue->size = qualityFitSize;
+      qualityValue->fixedRenderScale = 0.0f;
+      setLabelFixedRenderScale(qualityValue, playbackFontScale, 0);
+   }
+
+   // Slightly stronger panel fill: less of the video shows through the Options window.
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 14, 0xC0101724);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+
+   for (int i = 0; i < OPTIONS_COUNT; i++) {
+      int rowY = y + 32 + i * rowH;
+      Label *name = &optionsLabels[i];
+      int nameY = getCenteredLabelY(name, rowY, rowH);
+
+      if (i == optionsSelected)
+         fillGfxRoundedRectangleFixed(x + 18, nameY - 7, panelW - 36,
+                                      name->tt.tex.h + 14, 7, 0x805A7898);
+      drawLabelAt(name, x + 38, nameY);
+
+      if (i == 0 || i == 1 || i == 3) {
+         int valueIndex = i == 0 ? 0 : i == 1 ? 1 : 2;
+         Label *value = &optionsCurrentValueLabels[valueIndex];
+         if (i == 0) {
+            int qualityX = arrowLeft - value->tt.tex.w - 12;
+            if (qualityX < x + 38) qualityX = x + 38;
+            drawLabelAt(value, qualityX, getCenteredLabelY(value, rowY, rowH));
+         } else {
+            int valueXAligned = arrowLeft - value->tt.tex.w - 12;
+            if (valueXAligned < valueX) valueXAligned = valueX;
+            drawLabelAt(value, valueXAligned, getCenteredLabelY(value, rowY, rowH));
+         }
+      }
+
+      if (i == 2 || i == 5 || i == 6) {
+         int enabled = i == 2 ? subtitlesEnabled :
+                       i == 5 ? cropToFillEnabled : getAutoplayEnabled();
+         int selected = enabled ? 1 : 0;
+         int toggleW = 132, toggleH = 34;
+         int toggleX = x + panelW - 38 - toggleW;
+         int toggleY = rowY + (rowH - toggleH) / 2;
+         int selectedX = toggleX + selected * 66;
+         fillGfxRoundedRectangleFixed(toggleX, toggleY, toggleW, toggleH, 8, activeTheme->surface);
+         if (i == optionsSelected)
+            fillGfxRoundedRectangleFixed(selectedX - 4, toggleY - 4, 74, toggleH + 8,
+                                         10, 0x38FFFFFF);
+         fillGfxRoundedRectangleFixed(selectedX, toggleY, 66, toggleH, 8, activeTheme->accent);
+         for (int option = 0; option < 2; option++) {
+            Label *word = &playbackSettingsToggleLabels[option];
+            refreshLabelScale(word);
+            setLabelColor(word, option == selected ? activeTheme->appBg : activeTheme->textPrimary);
+            moveLabel(word, toggleX + option * 66 + (66 - word->tt.tex.w) / 2,
+                      getCenteredLabelY(word, toggleY, toggleH));
+            drawLabel(word);
+         }
+      } else if (i == 0 || i == 1 || i == 3 || i == 4 || i == 7) {
+         int tx = x + panelW - 44;
+         int ty = rowY + rowH / 2;
+         drawGfxTriangle(tx - 7, ty - 4, activeTheme->textSecondary,
+                         tx + 7, ty - 4, activeTheme->textSecondary,
+                         tx, ty + 4, activeTheme->textSecondary);
+      }
+   }
+
+   if (optionsDropdownOpen) {
+      int count = optionsSelected == 3 ? subtitleMenuCount() : optionsValueCounts[optionsSelected];
+      int visibleCount = count < OPTIONS_DROPDOWN_VISIBLE_MAX ? count : OPTIONS_DROPDOWN_VISIBLE_MAX;
+      int firstItem = 0;
+      if (count > visibleCount) {
+         firstItem = optionsDropdownSelected - visibleCount / 2;
+         if (firstItem < 0) firstItem = 0;
+         if (firstItem + visibleCount > count) firstItem = count - visibleCount;
+      }
+      int dropW = 420;
+      int dropH = visibleCount * 44 + 20;
+      int dx = x + panelW - dropW - 18;
+      if (dx < x + 12) dx = x + 12;
+      if (dx + dropW > state.screenW - 16) dx = state.screenW - dropW - 16;
+      int dy = y + 32 + optionsSelected * rowH - 8;
+      if (dy + dropH > state.screenH - 16) dy = state.screenH - dropH - 16;
+      if (dy < 16) dy = 16;
+
+      // Two restrained light layers create a halo without changing the submenu fill.
+      fillGfxRoundedRectangleFixed(dx - 5, dy - 5, dropW + 10, dropH + 10,
+                                   15, 0x20B9D8F4);
+      fillGfxRoundedRectangleFixed(dx - 2, dy - 2, dropW + 4, dropH + 4,
+                                   12, 0x30B9D8F4);
+      fillGfxRoundedRectangleFixed(dx, dy, dropW, dropH, 10, 0xF0101724);
+      for (int row = 0; row < visibleCount; row++) {
+         int i = firstItem + row;
+         Label *value = &optionsValueLabels[row];
+         int subtitleTrackIndex = optionsSelected == 3 ? subtitleTrackAtMenuIndex(i) : -1;
+         const char *itemText = optionsSelected == 0 ? optionsQualityLabels[i] :
+                                optionsSelected == 1 ? optionsAudioLabels[i] :
+                                optionsSelected == 3 ? (subtitleTrackIndex >= 0 ?
+                                   state.captionTracks[subtitleTrackIndex].name : "Unavailable") :
+                                optionsValues[optionsSelected][i];
+         setLabelText(value, itemText);
+         int itemY = dy + 8 + row * 44;
+         int labelY = getCenteredLabelY(value, itemY, 36);
+         if (i == optionsDropdownSelected)
+            fillGfxRoundedRectangleFixed(dx + 10, labelY - 6,
+                                         dropW - 20, value->tt.tex.h + 12,
+                                         6, 0xA05A7898);
+         drawLabelAt(value, dx + 26, labelY);
+      }
+   }
 }
 
 static void updatePlay(void)
@@ -1521,19 +2615,19 @@ static void updatePlay(void)
 
    // an overlay owns the pad for the whole frame it was (or just became) visible, so the button that
    // closed or opened it can't leak into playback input below (e.g. cross toggling pause on the way out)
-   int overlayHadPad = state.descriptionVisible || state.chaptersVisible;
+   int overlayHadPad = state.descriptionVisible || state.chaptersVisible || optionsVisible;
    int loadingPauseInput = 0;
    if (state.descriptionVisible) handleDescriptionInput();
    else if (state.chaptersVisible) handleChaptersInput();
+   else if (optionsVisible) handlePlaybackOptionsInput();
    else {
       if (isPadButtonPressed(PAD_BTN_CIRCLE)) { popScreen(); return; }   // back to the results list
       if (state.stage == STAGE_LOADING && isPadButtonPressed(PAD_BTN_CROSS)) {
          state.pauseWhenReady = !state.pauseWhenReady;
          loadingPauseInput = 1;
       }
-      if (isPadButtonPressed(PAD_BTN_R3)) state.showStats = !state.showStats;
       if (isPadButtonPressed(PAD_BTN_SELECT) && state.stage == STAGE_PLAYING && state.player) openDescription();
-      if (isPadButtonPressed(PAD_BTN_START) && state.stage == STAGE_PLAYING && state.player) openChapters();
+      if (isPadButtonPressed(PAD_BTN_START) && state.stage == STAGE_PLAYING && state.player) openPlaybackOptions();
    }
 
    // reap the worker once it's done; adopt the player it built
@@ -1606,13 +2700,17 @@ static void updatePlay(void)
          state.pendingResolutionPlayer = NULL;
          if (state.resolutionSwitchRestored) {
             state.resolutionIndex = state.resolutionSwitchOldIndex;
+            if (preferredQualityHeight == 0)
+               state.autoResolutionIndex = state.resolutionIndex;
          } else {
             state.resolutionIndex = state.resolutionSwitchTarget;
+            if (preferredQualityHeight == 0)
+               state.autoResolutionIndex = state.resolutionIndex;
             state.vidItag = state.videoItags[state.resolutionIndex];
             state.vidW = state.videoWidths[state.resolutionIndex];
             state.vidH = state.videoHeights[state.resolutionIndex];
             state.vidFps = state.videoFps[state.resolutionIndex];
-            if (state.resolutionIndex == 2) state.audioFallbackAttempted = 0;
+            if (state.videoHeights[state.resolutionIndex] > 720) state.audioFallbackAttempted = 0;
             if (state.audioPick >= 0 && state.audioPick < state.audioCount)
                state.audItag = state.audioItags[state.audioPick];
             else if (state.fallbackAudioItag)
@@ -1712,7 +2810,7 @@ static void updatePlay(void)
       state.sbReady = 1;
    }
 
-   // Chapter fetching is on demand from openChapters(), avoiding an unnecessary API request at startup.
+   // Adopt the chapter prefetch started when Options was opened, or an on-demand fetch.
    if (state.chWorkerDone && state.chThreadActive) {
       joinThread(state.chWorkerTid);
       state.chThreadActive = 0;
@@ -1735,11 +2833,21 @@ static void updatePlay(void)
       state.subtitlesReady = (state.subtitleFetched == state.subtitlePick);
       if (!state.subtitlesReady) state.subtitleFetched = -1;   // pick moved mid-fetch: re-picking must refetch
       else if (state.subtitleTrack->count == 0) {   // fetch failed or empty track: drop to Off, visibly
+         int failedTrack = state.subtitleFetched;
+         int fetchResult = state.subtitleFetchResult;
+         int translated = failedTrack >= 0 && failedTrack < state.captionCount &&
+                          subtitleIsAutoTranslated(&state.captionTracks[failedTrack]);
          state.subtitlePick = state.subtitleFetched = -1;
+         subtitlesEnabled = 0;
+         lastSubtitlePick = -1;
          state.subtitlesReady = 0;
-         preferredSubtitleName[0] = 0;
          refreshPlaybackInfoHud();
-         showToast("Subtitles unavailable");
+         if (translated && fetchResult == -429)
+            showToast("YouTube rate-limited translation");
+         else if (translated && fetchResult == 0)
+            showToast("YouTube returned empty translation");
+         else
+            showToast("Subtitles unavailable");
       }
    }
    if (state.subtitlePick >= 0 && state.subtitlePick != state.subtitleFetched && !state.subThreadActive) {
@@ -1748,6 +2856,7 @@ static void updatePlay(void)
          state.subtitlesReady = 0;
          state.subtitleScanFrom = 0;
          state.subWorkerDone = 0;
+         state.subtitleFetchResult = 0;
          state.subtitleFetched = state.subtitlePick;
          state.subThreadActive = (spawnJoinableThread(&state.subWorkerTid, subtitleWorker, 0,
                                   THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-subs") == 0);
@@ -1759,18 +2868,26 @@ static void updatePlay(void)
    if (state.subtitlesReady && state.subtitlePick >= 0 && state.stage == STAGE_PLAYING && state.player)
       setLabelText(&subtitleLabel, getSubtitleCueText(state.subtitleTrack, getVideoPositionSeconds(state.player), &state.subtitleScanFrom));
 
-   if (state.stage == STAGE_PLAYING && state.player && !overlayHadPad && !loadingPauseInput &&
+   int playbackInputBlocked = overlayHadPad || loadingPauseInput;
+   if (suppressPlaybackCrossUntilRelease) {
+      PadButtonState crossState = getPadButtonState(PAD_BTN_CROSS);
+      playbackInputBlocked = 1;
+      if (crossState == PAD_BUTTON_STATE_RELEASED || crossState == PAD_BUTTON_STATE_UP)
+         suppressPlaybackCrossUntilRelease = 0;
+   }
+   if (state.stage == STAGE_PLAYING && state.player && !playbackInputBlocked &&
        !state.descriptionVisible && !state.chaptersVisible)
       handlePlaybackInput();
    if (state.sbReady && state.stage == STAGE_PLAYING && state.player && !isVideoPaused(state.player) && !state.seeking) {
       autoSkipSponsor();
       int askIndex = findAskSponsorSegment();
       if (askIndex >= 0 && askIndex != state.askPromptShown) {
-         char notice[64];
-         snprintf(notice, sizeof notice, "Triangle: Skip %s", getSponsorCategoryName(state.sb.segments[askIndex].category));
-         showToast(notice);
          state.askPromptShown = askIndex;
-      } else if (askIndex < 0) state.askPromptShown = -1;
+         state.askPromptStartedUs = sys_time_get_system_time();
+      } else if (askIndex < 0) {
+         state.askPromptShown = -1;
+         state.askPromptStartedUs = 0;
+      }
    }
 
    // With autoplay disabled, ending a VOD behaves like pressing Circle:
@@ -1843,18 +2960,23 @@ static void updateStatLabels(void)
 
 static void drawStatsOverlay(void)
 {
-   int x = 40, y = 44;
+   int panelX = 40, y = 44;
+   int textX = panelX + statsTextPadding;
    int lineHeight = playbackSubtitleFontSize(30);
    int totalHeight = 0;
+   int widestText = 0;
    for (int i = 0; i < STAT_LINES; i++) {
       int height = statLabels[i].tt.tex.h;
+      int width = statLabels[i].tt.tex.w;
       totalHeight += height > lineHeight ? height : lineHeight;
+      if (width > widestText) widestText = width;
       if (i + 1 < STAT_LINES) totalHeight += 4;
    }
-   fillGfxRectangle(x - 14, y - 12, state.screenW - 80, totalHeight + 24, activeTheme->badgeFill);
+   int panelWidth = widestText + 2 * statsTextPadding;
+   fillGfxRectangle(panelX, y - 12, panelWidth, totalHeight + 24, activeTheme->badgeFill);
    for (int i = 0; i < STAT_LINES; i++) {
       int height = statLabels[i].tt.tex.h;
-      drawLabelAt(&statLabels[i], x, y);
+      drawLabelAt(&statLabels[i], textX, y);
       y += (height > lineHeight ? height : lineHeight) + 4;
    }
 }
@@ -2009,6 +3131,45 @@ static void drawChapters(void)
    }
 }
 
+// A short Ask-category hint with the native PS3 Square button glyph.
+static void drawAskSponsorPrompt(void)
+{
+   if (state.askPromptShown < 0 || state.askPromptStartedUs == 0 ||
+       sys_time_get_system_time() - state.askPromptStartedUs >= ASK_PROMPT_VISIBLE_US)
+      return;
+
+   GfxTexture squareGlyph = getConsoleGlyph(GLYPH_SQUARE);
+   int textH = askPromptPrefixLabel.tt.tex.h;
+   if (askPromptSuffixLabel.tt.tex.h > textH) textH = askPromptSuffixLabel.tt.tex.h;
+   if (textH < 1) return;
+
+   int iconH = textH;
+   int iconW = squareGlyph.h > 0 ? squareGlyph.w * iconH / squareGlyph.h : iconH;
+   int gap = 8;
+   int contentW = askPromptPrefixLabel.tt.tex.w + gap + iconW + gap + askPromptSuffixLabel.tt.tex.w;
+   int boxW = contentW + 2 * BADGE_PAD_X;
+   int boxH = textH + 8;
+   int x = state.screenW - 40 - boxW;
+   int y = fullPlaybackHudVisible() && playbackInfoLabel.tt.tex.h > 0
+         ? 32 + playbackInfoLabel.tt.tex.h + 20 : 80;
+   int maxY = state.screenH - boxH - 8;
+   if (y > maxY) y = maxY;
+
+   fillGfxRectangle(x, y, boxW, boxH, activeTheme->badgeFill);
+   int textY = y + (boxH - askPromptPrefixLabel.tt.tex.h) / 2;
+   drawLabelAt(&askPromptPrefixLabel, x + BADGE_PAD_X, textY);
+
+   int iconX = x + BADGE_PAD_X + askPromptPrefixLabel.tt.tex.w + gap;
+   int iconY = y + (boxH - iconH) / 2;
+   if (squareGlyph.offset)
+      drawGfxTexture(iconX, iconY, iconW, iconH, squareGlyph, 0.0f, 0.0f, 1.0f, 1.0f,
+                     0xFFFFFFFF, GFX_FILTER_LINEAR);
+
+   int suffixX = iconX + iconW + gap;
+   int suffixY = y + (boxH - askPromptSuffixLabel.tt.tex.h) / 2;
+   drawLabelAt(&askPromptSuffixLabel, suffixX, suffixY);
+}
+
 // a brief toast in the top-right notification spot, one badge row below the subtitle-language badge.
 static void drawToast(void)
 {
@@ -2148,7 +3309,7 @@ static void drawPlay(void)
       }
       measureFps(frame);
       if (state.showStats && frame) { updateStatLabels(); drawStatsOverlay(); }
-      int overlayUp = state.chaptersVisible || state.descriptionVisible;   // a full-screen overlay hides the HUD noise
+      int overlayUp = state.chaptersVisible || state.descriptionVisible || optionsVisible;   // a full-screen overlay hides the HUD noise
       if (state.stage == STAGE_PLAYING && controlsVisible() && !overlayUp) {
          if (!state.isLive) drawSeekBar();   // live has no timeline
       }
@@ -2156,10 +3317,19 @@ static void drawPlay(void)
          drawTitle();
          drawPlaybackInfoHud();
       }
-      if (state.stage == STAGE_PLAYING && !overlayUp) { drawSubtitle(); drawToast(); drawVolumeMeter(&volumeMeter); }
+      if (state.stage == STAGE_PLAYING && !overlayUp) drawVolumeMeter(&volumeMeter);
+      // Draw captions first. All overlays, especially Options and its dropdowns,
+      // must remain visually above the active subtitle cue.
+      if (state.stage == STAGE_PLAYING && (!overlayUp || optionsVisible)) drawSubtitle();
       if (state.chaptersVisible) drawChapters();
       if (state.descriptionVisible) drawDescription();
+      if (state.stage == STAGE_PLAYING && (!overlayUp || optionsVisible)) drawToast();
+      if (state.stage == STAGE_PLAYING && (!overlayUp || optionsVisible)) drawAskSponsorPrompt();
       if (state.nextNoticeVisible) drawAutoplayNotice();
+      // Draw Options and its playback-owned settings submenus above captions and every HUD layer.
+      if (optionsVisible) drawPlaybackOptions();
+      if (playbackSettingsOpen) drawPlaybackSettings();
+      if (playbackSponsorOpen) drawPlaybackSponsorSettings();
    }
 
    // until the first frame is presented (open, then the async resume seek's reload) keep the loading
@@ -2195,6 +3365,9 @@ static void termPlay(void)
    if (state.nextThreadActive) { joinThread(state.nextWorkerTid); state.nextThreadActive = 0; }
    free(state.subtitleTrack);
    state.subtitleTrack = NULL;
+   free(state.captionTracks);
+   state.captionTracks = NULL;
+   state.captionCount = 0;
    // save the resume position on the way out; a finished video is saved as 0 so it restarts next time.
    // only once a frame has actually played: a failed open or a resume seek that never landed must not
    // clobber a good saved position with 0. storage ignores non-id keys, so typed urls no-op.
@@ -2211,6 +3384,8 @@ static void termPlay(void)
    freeLabel(&timeLeftLabel);
    freeLabel(&timeRightLabel);
    freeLabel(&toastLabel);
+   freeLabel(&askPromptPrefixLabel);
+   freeLabel(&askPromptSuffixLabel);
    freeLabel(&titleLabel);
    freeLabel(&authorLabel);
    freeLabel(&nextNoticeHeadingLabel);
@@ -2218,6 +3393,18 @@ static void termPlay(void)
    freeLabel(&subtitleLabel);
    freeLabel(&playbackInfoLabel);
    for (int i = 0; i < MAX_CHAPTERS; i++) { freeLabel(&chapterLabels[i]); freeLabel(&chapterTimeLabels[i]); }
+   for (int i = 0; i < OPTIONS_COUNT; i++) freeLabel(&optionsLabels[i]);
+   for (int i = 0; i < OPTIONS_DROPDOWN_MAX; i++) freeLabel(&optionsValueLabels[i]);
+   for (int i = 0; i < 3; i++) freeLabel(&optionsCurrentValueLabels[i]);
+   freeLabel(&playbackSettingsTitle);
+   for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
+      freeLabel(&playbackSettingsLabels[i]);
+      freeLabel(&playbackSettingsValues[i]);
+   }
+   for (int i = 0; i < 2; i++) freeLabel(&playbackSettingsToggleLabels[i]);
+   freeLabel(&playbackSponsorTitle);
+   for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++) freeLabel(&playbackSponsorCategoryLabels[i]);
+   for (int i = 0; i < 3; i++) freeLabel(&playbackSponsorActionLabels[i]);
    freeVolumeMeter(&volumeMeter);
    freeTextTexture(&descriptionTexture);
    if (state.nextThumbJpeg) { free(state.nextThumbJpeg); state.nextThumbJpeg = NULL; }

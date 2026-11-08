@@ -21,6 +21,8 @@ static const char *DEFAULT_SETTINGS =
    "# on = play the next recommendation when a video ends; off = return to the library\n"
    "enable-1080p60=off\n"
    "# on = allow experimental TEE 1080p50/60 playback; off = Sony VDEC only, up to 1080p30\n"
+   "subtitle-language=en\n"
+   "# preferred subtitle language code; the player tries creator-provided tracks before English auto-generated\n"
    "region=US\n"
    "# country used for YouTube content lists (two-letter gl code); default US\n"
    "\n"
@@ -53,6 +55,7 @@ static const char *SPONSOR_SETTING_KEYS[SPONSOR_CATEGORY_COUNT] = {
 };
 static int autoplayEnabled = 1;
 static int enable1080p60 = 0;
+static char subtitleLanguage[12] = "en";
 static int overscanPercent = 0;
 
 static const ContentRegion REGIONS[] = {
@@ -137,6 +140,32 @@ void loadSettings(void)
       enable1080p60 = 0;
       if (rewriteSettingKey(SETTINGS_PATH, "enable-1080p60", "off") != 0)
          logWarn("[settings] couldn't add enable-1080p60 default to %s\\n", SETTINGS_PATH);
+   }
+
+   const char *subtitleLang = findSettingValue(text, "subtitle-language");
+   if (!subtitleLang) {
+      snprintf(subtitleLanguage, sizeof subtitleLanguage, "en");
+      if (rewriteSettingKey(SETTINGS_PATH, "subtitle-language", "en") != 0)
+         logWarn("[settings] could not add default subtitle language\n");
+   } else {
+      int length = 0, valid = 1;
+      while (subtitleLang[length] && subtitleLang[length] != '\r' && subtitleLang[length] != '\n' &&
+             subtitleLang[length] != ' ' && subtitleLang[length] != '\t') {
+         char c = subtitleLang[length];
+         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '-')) valid = 0;
+         length++;
+         if (length >= (int)sizeof subtitleLanguage) { valid = 0; break; }
+      }
+      if (length < 2 || !valid) {
+         snprintf(subtitleLanguage, sizeof subtitleLanguage, "en");
+         logWarn("[settings] invalid subtitle-language, using en\n");
+         if (rewriteSettingKey(SETTINGS_PATH, "subtitle-language", "en") != 0)
+            logWarn("[settings] could not reset subtitle language\n");
+      } else {
+         memcpy(subtitleLanguage, subtitleLang, (size_t)length);
+         subtitleLanguage[length] = 0;
+      }
    }
 
    const char *region = findSettingValue(text, "region");
@@ -245,6 +274,30 @@ int setAutoplayEnabled(int enabled)
    }
    autoplayEnabled = enabled;
    logInfo("[settings] autoplay=%s\n", enabled ? "on" : "off");
+   return 0;
+}
+
+const char *getSubtitleLanguage(void) { return subtitleLanguage; }
+
+int setSubtitleLanguage(const char *languageCode)
+{
+   if (!languageCode) return -1;
+   int length = 0;
+   while (languageCode[length]) {
+      char c = languageCode[length];
+      if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-') || length >= (int)sizeof subtitleLanguage - 1)
+         return -1;
+      length++;
+   }
+   if (length < 2) return -1;
+   if (strcmp(subtitleLanguage, languageCode) == 0) return 0;
+   if (rewriteSettingKey(SETTINGS_PATH, "subtitle-language", languageCode) != 0) {
+      logWarn("[settings] couldn't persist subtitle-language=%s\n", languageCode);
+      return -1;
+   }
+   snprintf(subtitleLanguage, sizeof subtitleLanguage, "%s", languageCode);
+   logInfo("[settings] subtitle-language=%s\n", subtitleLanguage);
    return 0;
 }
 
