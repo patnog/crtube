@@ -8,6 +8,10 @@
 
 void initStorage(void);
 
+// PS3-local playback history: 50 newest-first video entries, persisted independently from watch/resume state.
+int  getLocalHistory(SearchResults *out);
+void recordLocalHistory(const char *videoId, const char *title, const char *author);
+
 // watch history: videoIds the user has played. Used to fade already-watched tiles in the grid.
 int  isWatched(const char *videoId);
 void markWatched(const char *videoId);

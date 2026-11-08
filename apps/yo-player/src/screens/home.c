@@ -58,9 +58,8 @@ static const char *AccountNames[ACCOUNT_FEED_COUNT] = { "Recommended", "Subscrip
 #define HOME_WATCHLATER  (TREND_COUNT + 1)
 #define HOME_ACCOUNT     (TREND_COUNT + 2)                      // first account feed; + AccountFeed
 #define HOME_CAT_COUNT   (HOME_ACCOUNT + ACCOUNT_FEED_COUNT)
-#define HOME_LOCAL_HISTORY (HOME_ACCOUNT + ACCOUNT_FEED_COUNT)  // in-memory history for this app session
+#define HOME_LOCAL_HISTORY (HOME_ACCOUNT + ACCOUNT_FEED_COUNT)  // persistent PS3-local playback history
 #define HOME_LIVE         (HOME_LOCAL_HISTORY + 1)               // entered from the sidebar; never in the home L1/R1 ring
-#define LOCAL_HISTORY_CAP 32
 #define SUBS_PER_CHANNEL 8      // latest videos pulled from each subscribed channel
 #define LIVE_MAX_AGE_US (10ULL * 60 * 1000000)
 
@@ -81,10 +80,6 @@ static int           subsRevisionSeen;         // subscriptions revision the cac
 static int           watchLaterRevisionSeen;   // watch-later revision the cached HOME_WATCHLATER feed was built at
 static int           accountRevisionSeen;      // sign-in state the category order + account caches belong to
 static uint64_t      accountFeedRefreshUs[ACCOUNT_FEED_COUNT];
-
-// Videos that reached their first decoded frame in this application run. Kept in RAM only.
-static SearchResult  localHistory[LOCAL_HISTORY_CAP];
-static int           localHistoryCount;
 
 // Account feeds refresh periodically while visible. History is deliberately excluded here: it is
 // fetched fresh every time its tab is entered, regardless of its previous cache age.
@@ -298,40 +293,9 @@ static int fetchSubscriptions(SearchResults *out)
 
 static int fetchLocalHistory(SearchResults *out)
 {
-   memset(out, 0, sizeof *out);
-   out->count = localHistoryCount;
-   if (out->count > 0)
-      memcpy(out->items, localHistory, (size_t)out->count * sizeof out->items[0]);
-   return out->count > 0 ? 0 : -1;
-}
-
-void recordLocalHistory(const char *videoId, const char *title, const char *author)
-{
-   if (!videoId || !videoId[0]) return;
-
-   // Re-watching a video moves it to the top instead of creating a duplicate.
-   for (int i = 0; i < localHistoryCount; i++) {
-      if (strcmp(localHistory[i].videoId, videoId) == 0) {
-         if (i + 1 < localHistoryCount)
-            memmove(&localHistory[i], &localHistory[i + 1],
-                    (size_t)(localHistoryCount - i - 1) * sizeof localHistory[0]);
-         localHistoryCount--;
-         break;
-      }
-   }
-
-   if (localHistoryCount == LOCAL_HISTORY_CAP) localHistoryCount--;
-   if (localHistoryCount > 0)
-      memmove(localHistory + 1, localHistory,
-              (size_t)localHistoryCount * sizeof localHistory[0]);
-
-   memset(&localHistory[0], 0, sizeof localHistory[0]);
-   strCopy(localHistory[0].videoId, sizeof localHistory[0].videoId, videoId);
-   strCopy(localHistory[0].title, sizeof localHistory[0].title,
-           title && title[0] ? title : "Untitled video");
-   strCopy(localHistory[0].author, sizeof localHistory[0].author, author ? author : "");
-   strCopy(localHistory[0].published, sizeof localHistory[0].published, "This session");
-   localHistoryCount++;
+   // Return the persisted video IDs unchanged. VideoGrid uses the same lazy
+   // thumbnail worker as every other tab (i.ytimg.com/vi/<videoId>/mqdefault.jpg).
+   return getLocalHistory(out) > 0 ? 0 : -1;
 }
 
 static int homeLiveFetchStopped(void)

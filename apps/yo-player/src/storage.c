@@ -10,6 +10,7 @@
 
 #define DATA_DIR        CRTUBE_DATA_DIR
 #define HISTORY_PATH    DATA_DIR "/history.txt"
+#define LOCAL_HISTORY_PATH DATA_DIR "/local-history.txt"
 #define SUBS_PATH       DATA_DIR "/subscriptions.txt"
 #define WATCHLATER_PATH DATA_DIR "/watchlater.txt"
 
@@ -21,6 +22,9 @@
 #define VIDEO_ID_LEN   12       // 11 chars + NUL
 #define ENTRY_LINE_MAX 24       // "videoId seconds\n"
 #define HISTORY_BUFFER_BYTES (HISTORY_CAP * ENTRY_LINE_MAX + 16)   // whole-file load/save buffer
+#define LOCAL_HISTORY_CAP          50
+#define LOCAL_HISTORY_LINE_MAX     240
+#define LOCAL_HISTORY_BUFFER_BYTES (LOCAL_HISTORY_CAP * LOCAL_HISTORY_LINE_MAX + 16)
 
 // watch history held in memory; the file is the durable copy. a plain ring: once full, the oldest slot is
 // overwritten (rare - 1000 videos), and the file is rewritten from the live set. each entry also carries the
@@ -29,6 +33,11 @@ typedef struct { char id[VIDEO_ID_LEN]; int position; } WatchEntry;
 static WatchEntry watched[HISTORY_CAP];
 static int        watchedCount;
 static int        watchedNext;  // next slot to write when the ring is full
+
+// PS3-local history is distinct from the watched/resume database above. It keeps display metadata
+// so the History page can render after a restart without requesting account history from YouTube.
+static SearchResult localHistory[LOCAL_HISTORY_CAP];
+static int          localHistoryCount;
 
 static void loadHistory(void)
 {
@@ -47,6 +56,124 @@ static void loadHistory(void)
       }
    }
    free(buffer);
+}
+
+
+static int isLocalHistoryId(const char *id)
+{
+   if (!id || strlen(id) != 11) return 0;
+   for (int i = 0; i < 11; i++) {
+      char c = id[i];
+      if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-')) return 0;
+   }
+   return 1;
+}
+
+static void copyHistoryText(char *out, size_t capacity, const char *input)
+{
+   size_t n = 0;
+   if (!capacity) return;
+   if (input) {
+      while (*input && n + 1 < capacity) {
+         char c = *input++;
+         out[n++] = (c == '\t' || c == '\r' || c == '\n') ? ' ' : c;
+      }
+   }
+   out[n] = 0;
+}
+
+static void loadLocalHistory(void)
+{
+   char *buffer = malloc(LOCAL_HISTORY_BUFFER_BYTES);
+   if (!buffer) return;
+   int length = readFile(LOCAL_HISTORY_PATH, buffer, LOCAL_HISTORY_BUFFER_BYTES - 1);
+   if (length > 0) {
+      buffer[length] = 0;
+      for (char *line = strtok(buffer, "\r\n"); line && localHistoryCount < LOCAL_HISTORY_CAP;
+           line = strtok(NULL, "\r\n")) {
+         char *title = strchr(line, '\t');
+         if (!title) continue;
+         *title++ = 0;
+         char *author = strchr(title, '\t');
+         if (!author) continue;
+         *author++ = 0;
+         if (!isLocalHistoryId(line)) continue;
+
+         int duplicate = 0;
+         for (int i = 0; i < localHistoryCount; i++)
+            if (strcmp(localHistory[i].videoId, line) == 0) { duplicate = 1; break; }
+         if (duplicate) continue;
+
+         SearchResult *item = &localHistory[localHistoryCount++];
+         memset(item, 0, sizeof *item);
+         strCopy(item->videoId, sizeof item->videoId, line);
+         strCopy(item->title, sizeof item->title, title[0] ? title : "Untitled video");
+         strCopy(item->author, sizeof item->author, author);
+         strCopy(item->published, sizeof item->published, "On PS3");
+      }
+   }
+   free(buffer);
+}
+
+static void saveLocalHistory(void)
+{
+   char *buffer = malloc(LOCAL_HISTORY_BUFFER_BYTES);
+   if (!buffer) return;
+   int length = 0;
+   for (int i = 0; i < localHistoryCount; i++) {
+      char title[sizeof localHistory[i].title];
+      char author[sizeof localHistory[i].author];
+      copyHistoryText(title, sizeof title, localHistory[i].title);
+      copyHistoryText(author, sizeof author, localHistory[i].author);
+      int remaining = LOCAL_HISTORY_BUFFER_BYTES - length;
+      int written = snprintf(buffer + length, (size_t)remaining, "%s\t%s\t%s\n",
+                             localHistory[i].videoId, title, author);
+      if (written < 0 || written >= remaining) break;
+      length += written;
+   }
+   writeFile(LOCAL_HISTORY_PATH, buffer, (uint64_t)length);
+   free(buffer);
+}
+
+int getLocalHistory(SearchResults *out)
+{
+   if (!out) return 0;
+   memset(out, 0, sizeof *out);
+   out->count = localHistoryCount;
+   if (out->count > 0)
+      memcpy(out->items, localHistory, (size_t)out->count * sizeof out->items[0]);
+   return out->count;
+}
+
+void recordLocalHistory(const char *videoId, const char *title, const char *author)
+{
+   if (!isLocalHistoryId(videoId)) return;
+
+   // Re-watching moves the existing entry to the newest position; no duplicate IDs are retained.
+   for (int i = 0; i < localHistoryCount; i++) {
+      if (strcmp(localHistory[i].videoId, videoId) == 0) {
+         if (i + 1 < localHistoryCount)
+            memmove(&localHistory[i], &localHistory[i + 1],
+                    (size_t)(localHistoryCount - i - 1) * sizeof localHistory[0]);
+         localHistoryCount--;
+         break;
+      }
+   }
+
+   if (localHistoryCount == LOCAL_HISTORY_CAP) localHistoryCount--;
+   if (localHistoryCount > 0)
+      memmove(localHistory + 1, localHistory,
+              (size_t)localHistoryCount * sizeof localHistory[0]);
+
+   memset(&localHistory[0], 0, sizeof localHistory[0]);
+   strCopy(localHistory[0].videoId, sizeof localHistory[0].videoId, videoId);
+   strCopy(localHistory[0].title, sizeof localHistory[0].title,
+           title && title[0] ? title : "Untitled video");
+   strCopy(localHistory[0].author, sizeof localHistory[0].author, author ? author : "");
+   strCopy(localHistory[0].published, sizeof localHistory[0].published, "On PS3");
+   localHistoryCount++;
+   saveLocalHistory();
 }
 
 // a resumable key is a bare videoId; a typed url (carries '/' or ':') never enters history.
@@ -177,6 +304,7 @@ void initStorage(void)
 {
    makeDir(DATA_DIR);
    loadHistory();
+   loadLocalHistory();
    seedSubscriptions();
    loadWatchLater();
 }

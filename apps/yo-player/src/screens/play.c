@@ -2626,6 +2626,7 @@ static void updatePlay(void)
          state.pauseWhenReady = !state.pauseWhenReady;
          loadingPauseInput = 1;
       }
+      if (isPadButtonPressed(PAD_BTN_R3)) state.showStats = !state.showStats;
       if (isPadButtonPressed(PAD_BTN_SELECT) && state.stage == STAGE_PLAYING && state.player) openDescription();
       if (isPadButtonPressed(PAD_BTN_START) && state.stage == STAGE_PLAYING && state.player) openPlaybackOptions();
    }

@@ -79,6 +79,7 @@ static struct {
    Icon mainIcons[SIDEBAR_MAX_ROWS];
    Icon edgeOpen;
    Icon edgeClose;
+   Icon exitArrow;
 } side;
 
 static float easeOut(float t)
@@ -186,6 +187,7 @@ void initSidebar(Font *font, int screenW, int screenH)
    }
    initIcon(&side.edgeOpen, ICON_LEFT_BIG, 27);
    initIcon(&side.edgeClose, ICON_LEFT_BIG, 27);
+   initIcon(&side.exitArrow, ICON_RIGHT_BIG, SIDEBAR_ICON_SIZE);
    keepSelectionVisible();
    updateSelectedColors();
 }
@@ -199,6 +201,7 @@ void termSidebar(void)
    }
    freeIcon(&side.edgeOpen);
    freeIcon(&side.edgeClose);
+   freeIcon(&side.exitArrow);
    memset(&side, 0, sizeof side);
 }
 
@@ -311,6 +314,17 @@ static void drawSidebarRowIcon(Icon *icon, int x, int y, uint32_t color)
                                0.0f, 0.0f, 1.0f, 1.0f, color, GFX_FILTER_LINEAR);
 }
 
+static void drawExitDoorIcon(int x, int y, uint32_t color)
+{
+   int iconSize = (int)(SIDEBAR_ICON_SIZE * (side.uiScale >= 1.25f ? 1.25f : 1.0f) + 0.5f);
+   int line = iconSize >= 30 ? 3 : 2;
+   int width = iconSize * 70 / 100;
+   fillGfxRectangleFixed(x + 2, y, line, iconSize, color);
+   fillGfxRectangleFixed(x + 2, y, width, line, color);
+   fillGfxRectangleFixed(x + 2, y + iconSize - line, width, line, color);
+   drawSidebarRowIcon(&side.exitArrow, x + 5, y, color);
+}
+
 static void drawEdge(int panelX)
 {
    int edgeX = panelX + side.panelW - SIDEBAR_EDGE_WIDTH;
@@ -361,8 +375,11 @@ static void drawMainRows(int panelX)
       int iconSize = (int)(SIDEBAR_ICON_SIZE * (side.uiScale >= 1.25f ? 1.25f : 1.0f) + 0.5f);
       int iconY = rowY + (SIDEBAR_ROW_HEIGHT - iconSize) / 2;
       int contentOffset = side.screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
-      drawSidebarRowIcon(&side.mainIcons[i], panelX + SIDEBAR_CONTENT_LEFT + contentOffset, iconY,
-                         i == side.selected ? activeTheme->accent : activeTheme->textSecondary);
+      uint32_t iconColor = i == side.selected ? activeTheme->accent : activeTheme->textSecondary;
+      if (i == 14)
+         drawExitDoorIcon(panelX + SIDEBAR_CONTENT_LEFT + contentOffset, iconY, iconColor);
+      else
+         drawSidebarRowIcon(&side.mainIcons[i], panelX + SIDEBAR_CONTENT_LEFT + contentOffset, iconY, iconColor);
       refreshLabelScale(&side.mainNames[i]);
       moveLabel(&side.mainNames[i], panelX + SIDEBAR_TEXT_LEFT + contentOffset,
                 getCenteredLabelY(&side.mainNames[i], rowY, SIDEBAR_ROW_HEIGHT));

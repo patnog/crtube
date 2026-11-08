@@ -12,6 +12,7 @@
 #include "downloads.h"
 #include "ui/button-hints.h"
 #include "ui/console-glyphs.h"
+#include "ui/icon-font.h"
 
 #include "gfx.h"
 #include "theme.h"
@@ -37,7 +38,7 @@
 #define SD_MAX_SCALE 1.5f
 #define TRIANGLE_HINT 3         // Triangle's slot in the hint row (see initSearch): retitled per mode
 
-static const char *SortNames[SORT_COUNT]                = { "Relevance", "Views" };
+static const char *SortNames[SORT_COUNT]                = { "Sort: Relevance", "Sort: Views" };
 static const char *ChannelSortNames[CHANNEL_SORT_COUNT] = { "Latest", "Popular", "Oldest" };
 
 // how the next push opens (set by openSearchQuery / openChannelFor before pushScreen).
@@ -58,6 +59,7 @@ static struct {
 
 static Font        uiFont;
 static Label       titleLabel, sortLabel, statusLabel;
+static Icon        sortModeIcon;
 static ButtonHints hints, hintsSecondRow;
 static int sdHintsTwoRows;
 static int sortL1Hint = -1, sortR1Hint = -1;
@@ -95,6 +97,8 @@ static void setHeading(void)
    if (search.channelId[0]) { snprintf(heading, sizeof heading, "%s", search.channelName); setLabelText(&sortLabel, ChannelSortNames[search.channelSort]); }
    else                     { snprintf(heading, sizeof heading, "Search: %s", search.query); setLabelText(&sortLabel, SortNames[search.sort]); }
    setLabelText(&titleLabel, heading);
+   if (!search.channelId[0])
+      initIcon(&sortModeIcon, search.sort == SORT_RELEVANCE ? ICON_STAR : ICON_SORT_DOWN, 36);
    updateTriangleHint();
    ButtonHints *sortHints = sdHintsTwoRows ? &hintsSecondRow : &hints;
    setButtonHintShown(sortHints, sortL1Hint, !search.channelId[0]);
@@ -165,6 +169,7 @@ static void initSearch(void)
    initLabel(&titleLabel,  &uiFont, MARGIN_X, HEADER_Y, search.screenW - 300, AUTO, TITLE_SIZE, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
    setLabelScaleWithUi(&titleLabel, 1);
    initLabel(&sortLabel,   &uiFont, 0, HEADER_Y, AUTO, AUTO, TITLE_SIZE, activeTheme->textSecondary, TEXT_NOWRAP, "");
+   setLabelScaleWithUi(&sortLabel, 1);
    initLabel(&statusLabel, &uiFont, MARGIN_X, GRID_TOP, search.screenW - 2 * MARGIN_X, AUTO, 21, activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
 
    sdHintsTwoRows = isGfxSdVideoOutput();
@@ -297,9 +302,21 @@ static void updateSearch(void)
 static void drawSearch(void)
 {
    refreshLabelScale(&titleLabel);
+   refreshLabelScale(&sortLabel);
    fillGfxRectangle(0, 0, search.screenW, search.screenH, activeTheme->appBg);
    drawLabel(&titleLabel);
-   moveLabel(&sortLabel, search.screenW - MARGIN_X - sortLabel.tt.tex.w, HEADER_Y);   // right-aligned
+   int sortRight = search.screenW - MARGIN_X;
+   if (!search.channelId[0]) {
+      int iconX = sortRight - 36;
+      moveLabel(&sortLabel, iconX - 14 - sortLabel.tt.tex.w, HEADER_Y);
+      if (sortModeIcon.tex && sortModeIcon.tex->w > 0 && sortModeIcon.tex->h > 0)
+         drawGfxTextureFixedPosition(iconX + sortModeIcon.offsetX,
+                                     HEADER_Y + (TITLE_SIZE - sortModeIcon.size) / 2 + sortModeIcon.offsetY,
+                                     sortModeIcon.tex->w, sortModeIcon.tex->h, *sortModeIcon.tex,
+                                     0.0f, 0.0f, 1.0f, 1.0f, activeTheme->textSecondary, GFX_FILTER_LINEAR);
+   } else {
+      moveLabel(&sortLabel, sortRight - sortLabel.tt.tex.w, HEADER_Y);
+   }
    drawLabel(&sortLabel);
 
    if (gridStage(&search.grid) == GRID_READY) {
@@ -312,7 +329,7 @@ static void drawSearch(void)
    drawButtonHints(&hints, search.screenW);
    if (sdHintsTwoRows) drawButtonHints(&hintsSecondRow, search.screenW);
    drawDownloadOverlay(search.screenW);
-   if (search.channelId[0]) drawSidebar();
+   drawSidebar();
 }
 
 static void termSearch(void)
@@ -323,6 +340,7 @@ static void termSearch(void)
    freeLabel(&titleLabel);
    freeLabel(&sortLabel);
    freeLabel(&statusLabel);
+   freeIcon(&sortModeIcon);
    closeFont(&uiFont);
 }
 

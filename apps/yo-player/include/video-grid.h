@@ -14,7 +14,7 @@
 #include "thread.h"             // sys_ppu_thread_t
 #include <stdint.h>
 
-#define GRID_COLS_WIDE 4
+#define GRID_COLS_WIDE 3
 #define GRID_THREADS  1         // serialize TLS/JPEG network pressure on PS3
 
 typedef enum { GRID_RUNNING, GRID_READY, GRID_EMPTY } GridStage;
