@@ -18,6 +18,13 @@ typedef enum {
    SPONSOR_CATEGORY_COUNT
 } SponsorCategory;
 
+// Per-category behaviour, matching SponsorBlock's Skip / Ask / Keep choices.
+enum {
+   SPONSOR_ACTION_KEEP = 0,
+   SPONSOR_ACTION_ASK  = 1,
+   SPONSOR_ACTION_SKIP = 2
+};
+
 typedef struct {
    float           start, end;   // seconds
    SponsorCategory category;

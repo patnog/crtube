@@ -13,7 +13,12 @@ typedef enum {
 
 void loadSettings(void);   // reads settings.txt, creating it with defaults when missing
 
-SponsorblockMode getSponsorblockMode(void);
+SponsorblockMode getSponsorblockMode(void); // legacy global mode, retained for settings-file migration
+
+// Per-category SponsorBlock action: SPONSOR_ACTION_SKIP / ASK / KEEP.
+int getSponsorAction(int category);
+int setSponsorAction(int category, int action);
+int hasSponsorBlockActions(void); // true when at least one category is Skip or Ask
 
 // Automatic recommendation playback after a VOD ends. Defaults to enabled.
 int getAutoplayEnabled(void);

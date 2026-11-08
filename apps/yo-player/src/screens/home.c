@@ -11,6 +11,7 @@
 #include "account.h"
 #include "downloads.h"
 #include "settings.h"
+#include "sponsorblock.h"
 #include "sidebar.h"
 #include "ui/button-hints.h"
 #include "ui/console-glyphs.h"
@@ -101,6 +102,8 @@ static struct {
    int       settingsSelected;
    int       regionOpen;
    int       regionSelected;
+   int       sponsorblockOpen;
+   int       sponsorblockSelected;
    int       regionTop;
    int       regionVisible;
    int       pendingAccountCategory; // account feed selected before signing in, or -1
@@ -177,6 +180,17 @@ static int         panelConfirmHint, panelBackHint;
 static Label settingsTitle, settingsLabels[SETTINGS_ROW_COUNT], settingsValues[SETTINGS_ROW_COUNT];
 static ButtonHints settingsHints;
 static Label settingsAutoplayOptions[2];
+#define SPONSOR_PANEL_W 760
+#define SPONSOR_PANEL_H 520
+#define SPONSOR_ROW_H 38
+#define SPONSOR_FOOTER_H 52
+#define SPONSOR_OPTION_W 76
+#define SPONSOR_OPTION_H 30
+#define SPONSOR_OPTION_GAP 4
+static Label sponsorTitle, sponsorDescription, sponsorCategoryLabels[SPONSOR_CATEGORY_COUNT];
+static Label sponsorActionLabels[3];
+static ButtonHints sponsorHints;
+static ButtonRepeat sponsorNavigateRepeat;
 #define REGION_MAX_ROWS 40
 #define REGION_PANEL_W 620
 #define REGION_PANEL_H 440
@@ -553,6 +567,31 @@ static void drawAccountPanel(void)
    drawButtonHints(&panelHints, home.screenW);
 }
 
+static int isLargeUiScale(void)
+{
+   return getGfxUiScaleFactor() >= 1.25f;
+}
+
+static int getRegionRowHeight(void)
+{
+   return isLargeUiScale() ? 42 : REGION_ROW_H;
+}
+
+static int getSponsorRowHeight(void)
+{
+   return isLargeUiScale() ? 40 : SPONSOR_ROW_H;
+}
+
+static int getSponsorOptionWidth(void)
+{
+   return isLargeUiScale() ? 84 : SPONSOR_OPTION_W;
+}
+
+static int getSponsorOptionHeight(void)
+{
+   return isLargeUiScale() ? 34 : SPONSOR_OPTION_H;
+}
+
 static int getRegionPanelWidth(void)
 {
    int width = home.screenW - 48;
@@ -589,7 +628,7 @@ static void openRegionPicker(void)
    home.regionSelected = getContentRegionIndex();
    int panelH = getRegionPanelHeight();
    int available = panelH - REGION_LIST_TOP - REGION_FOOTER_H;
-   home.regionVisible = available / REGION_ROW_H;
+   home.regionVisible = available / getRegionRowHeight();
    if (home.regionVisible < 1) home.regionVisible = 1;
    if (home.regionVisible > count) home.regionVisible = count;
    home.regionTop = home.regionSelected - home.regionVisible / 2;
@@ -635,11 +674,12 @@ static void drawRegionPicker(void)
    int x = (home.screenW - panelW) / 2, y = (home.screenH - panelH) / 2;
    int count = getContentRegionCount();
    int current = getContentRegionIndex();
+   int rowHeight = getRegionRowHeight();
    char position[24];
 
-   fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
-   fillGfxRoundedRectangle(x, y, panelW, panelH, 12, activeTheme->appBg);
-   fillGfxRoundedRectangle(x, y, panelW, 4, 2, activeTheme->accent);
+   fillGfxRectangleFixed(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
 
    refreshLabelScale(&regionTitle);
    refreshLabelScale(&regionDescription);
@@ -657,28 +697,121 @@ static void drawRegionPicker(void)
    int end = home.regionTop + home.regionVisible;
    if (end > count) end = count;
    for (int row = home.regionTop; row < end; row++) {
-      int rowY = y + REGION_LIST_TOP + (row - home.regionTop) * REGION_ROW_H;
+      int rowY = y + REGION_LIST_TOP + (row - home.regionTop) * rowHeight;
       int selected = row == home.regionSelected;
       int inUse = row == current;
       refreshLabelScale(&regionNames[row]);
       refreshLabelScale(&regionCodes[row]);
-      int labelY = getCenteredLabelY(&regionNames[row], rowY, REGION_ROW_H - 3);
+      int labelY = getCenteredLabelY(&regionNames[row], rowY, rowHeight - 3);
       if (selected)
-         fillGfxRoundedRectangle(x + 18, labelY - 5, panelW - 36,
-                                 regionNames[row].tt.tex.h + 10, 7, activeTheme->rowHighlight);
+         fillGfxRoundedRectangleFixed(x + 18, labelY - 5, panelW - 36,
+                                      regionNames[row].tt.tex.h + 10, 7, activeTheme->rowHighlight);
       if (inUse)
-         fillGfxRoundedRectangle(x + 28, rowY + 7, 3, REGION_ROW_H - 17, 2, activeTheme->accent);
+         fillGfxRoundedRectangleFixed(x + 28, rowY + 7, 3, rowHeight - 17, 2, activeTheme->accent);
       setLabelColor(&regionNames[row], inUse ? activeTheme->accent :
                     (selected ? activeTheme->textPrimary : activeTheme->textSecondary));
       setLabelColor(&regionCodes[row], selected ? activeTheme->textPrimary : activeTheme->textSecondary);
       moveLabel(&regionNames[row], x + 44, labelY);
       moveLabel(&regionCodes[row], x + panelW - 42 - regionCodes[row].tt.tex.w,
-                getCenteredLabelY(&regionCodes[row], rowY, REGION_ROW_H - 3));
+                getCenteredLabelY(&regionCodes[row], rowY, rowHeight - 3));
       drawLabel(&regionNames[row]);
       drawLabel(&regionCodes[row]);
    }
    regionHints.y = y + panelH - 40;
    drawButtonHints(&regionHints, home.screenW);
+}
+
+static int getSponsorPanelWidth(void)
+{
+   int width = home.screenW - 48;
+   return width < SPONSOR_PANEL_W ? width : SPONSOR_PANEL_W;
+}
+
+static int getSponsorPanelHeight(void)
+{
+   int height = home.screenH - 48;
+   return height < SPONSOR_PANEL_H ? height : SPONSOR_PANEL_H;
+}
+
+static void openSponsorBlockPanel(void)
+{
+   home.sponsorblockOpen = 1;
+   home.sponsorblockSelected = 0;
+   uint64_t now = sys_time_get_system_time();
+   sponsorNavigateRepeat.timer = now;
+   sponsorNavigateRepeat.repeats = 0;
+}
+
+static void updateSponsorBlockPanel(void)
+{
+   if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.sponsorblockOpen = 0; return; }
+   if (isRepeatDue(&sponsorNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
+      home.sponsorblockSelected = (home.sponsorblockSelected + 1) % SPONSOR_CATEGORY_COUNT;
+   else if (isRepeatDue(&sponsorNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
+      home.sponsorblockSelected = (home.sponsorblockSelected + SPONSOR_CATEGORY_COUNT - 1) % SPONSOR_CATEGORY_COUNT;
+
+   int action = getSponsorAction(home.sponsorblockSelected);
+   int option = action == SPONSOR_ACTION_SKIP ? 0 : action == SPONSOR_ACTION_ASK ? 1 : 2;
+   if (isPadButtonPressed(PAD_BTN_LEFT)) option = (option + 2) % 3;
+   else if (isPadButtonPressed(PAD_BTN_RIGHT) || isPadButtonPressed(PAD_BTN_CROSS)) option = (option + 1) % 3;
+   else return;
+   action = option == 0 ? SPONSOR_ACTION_SKIP : option == 1 ? SPONSOR_ACTION_ASK : SPONSOR_ACTION_KEEP;
+   setSponsorAction(home.sponsorblockSelected, action);
+}
+
+static void drawSponsorBlockPanel(void)
+{
+   int panelW = getSponsorPanelWidth(), panelH = getSponsorPanelHeight();
+   int rowHeight = getSponsorRowHeight();
+   int optionWidth = getSponsorOptionWidth();
+   int optionHeight = getSponsorOptionHeight();
+   int x = (home.screenW - panelW) / 2, y = (home.screenH - panelH) / 2;
+   static const int actionValues[3] = { SPONSOR_ACTION_SKIP, SPONSOR_ACTION_ASK, SPONSOR_ACTION_KEEP };
+   fillGfxRectangleFixed(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+
+   refreshLabelScale(&sponsorTitle);
+   drawLabelCentered(&sponsorTitle, home.screenW / 2, y + 27);
+   refreshLabelScale(&sponsorDescription);
+   setLabelColor(&sponsorDescription, activeTheme->textSecondary);
+   moveLabel(&sponsorDescription, x + 28, y + 56);
+   drawLabel(&sponsorDescription);
+
+   int rowTop = y + (panelH >= 480 ? (isLargeUiScale() ? 148 : 160) :
+                     panelH - SPONSOR_FOOTER_H - SPONSOR_CATEGORY_COUNT * rowHeight - 12);
+   int optionGroupW = 3 * optionWidth + 2 * SPONSOR_OPTION_GAP;
+   int optionX = x + panelW - 28 - optionGroupW;
+   for (int row = 0; row < SPONSOR_CATEGORY_COUNT; row++) {
+      int rowY = rowTop + row * rowHeight;
+      int focused = row == home.sponsorblockSelected;
+      if (focused)
+         fillGfxRoundedRectangleFixed(x + 18, rowY, panelW - 36, rowHeight - 2, 7, activeTheme->rowHighlight);
+      fillGfxRoundedRectangleFixed(x + 29, rowY + rowHeight / 2 - 6, 10, 10, 5,
+                                    getSponsorCategoryColor((SponsorCategory)row));
+      Label *name = &sponsorCategoryLabels[row];
+      refreshLabelScale(name);
+      setLabelColor(name, focused ? activeTheme->textPrimary : activeTheme->textSecondary);
+      moveLabel(name, x + 52, getCenteredLabelY(name, rowY, rowHeight - 2));
+      drawLabel(name);
+
+      int chosen = getSponsorAction(row);
+      for (int option = 0; option < 3; option++) {
+         int ox = optionX + option * (optionWidth + SPONSOR_OPTION_GAP);
+         int selected = chosen == actionValues[option];
+         uint32_t bg = selected ? (focused ? activeTheme->accent : activeTheme->surface) : activeTheme->surface;
+         int optionY = rowY + (rowHeight - optionHeight) / 2;
+         fillGfxRoundedRectangleFixed(ox, optionY, optionWidth, optionHeight, 7, bg);
+         Label *word = &sponsorActionLabels[option];
+         refreshLabelScale(word);
+         setLabelColor(word, selected ? (focused ? activeTheme->appBg : activeTheme->textPrimary) : 0xFF888888);
+         moveLabel(word, ox + (optionWidth - word->tt.tex.w) / 2,
+                   getCenteredLabelY(word, optionY, optionHeight));
+         drawLabel(word);
+      }
+   }
+   sponsorHints.y = y + panelH - 40;
+   drawButtonHints(&sponsorHints, home.screenW);
 }
 
 static void openSettingsPanel(void)
@@ -690,6 +823,7 @@ static void openSettingsPanel(void)
 static void updateSettingsPanel(void)
 {
    if (home.regionOpen) { updateRegionPicker(); return; }
+   if (home.sponsorblockOpen) { updateSponsorBlockPanel(); return; }
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.settingsOpen = 0; return; }
    if (isPadButtonPressed(PAD_BTN_UP))
       home.settingsSelected = (home.settingsSelected + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
@@ -710,6 +844,8 @@ static void updateSettingsPanel(void)
          setOverscanPercent(getOverscanPercent() + delta);
       } else if (home.settingsSelected == 3 && isPadButtonPressed(PAD_BTN_CROSS)) {
          openRegionPicker();
+      } else if (home.settingsSelected == 4 && isPadButtonPressed(PAD_BTN_CROSS)) {
+         openSponsorBlockPanel();
       }
    }
 }
@@ -728,7 +864,7 @@ static void drawSettingsPanel(void)
    setLabelIfChanged(&settingsValues[2], overscanValue);
    const ContentRegion *region = getContentRegionAt(getContentRegionIndex());
    setLabelIfChanged(&settingsValues[3], region ? region->name : getContentRegionCode());
-   setLabelIfChanged(&settingsValues[4], "Coming soon");
+   setLabelIfChanged(&settingsValues[4], "Configure");
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
    int x = (home.screenW - panelW) / 2;
@@ -897,6 +1033,8 @@ static void initHome(void)
    home.settingsOpen = 0;
    home.settingsSelected = 0;
    home.regionOpen = 0;
+   home.sponsorblockOpen = 0;
+   home.sponsorblockSelected = 0;
    regionRevisionSeen = getContentRegionRevision();
    loadSdScale();
    home.screenW = getGfxScreenWidth();
@@ -988,6 +1126,30 @@ static void initHome(void)
       setLabelScaleWithUi(&regionNames[i], 1);
       setLabelScaleWithUi(&regionCodes[i], 1);
    }
+   initLabel(&sponsorTitle, &uiFont, 0, 0, getSponsorPanelWidth() - 48, AUTO, 24,
+             activeTheme->textPrimary, TEXT_NOWRAP, "SponsorBlock");
+   initLabel(&sponsorDescription, &uiFont, 0, 0, getSponsorPanelWidth() - 56, AUTO, 15,
+             activeTheme->textSecondary, TEXT_WRAP,
+             "Skip: automatically skip the segment.  Ask: press Triangle to skip it.  Keep: play it normally.");
+   for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++) {
+      initLabel(&sponsorCategoryLabels[i], &uiFont, 0, 0, 250, AUTO, 18,
+                activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, getSponsorCategoryName((SponsorCategory)i));
+      setLabelScaleWithUi(&sponsorCategoryLabels[i], 1);
+   }
+   initLabel(&sponsorActionLabels[0], &uiFont, 0, 0, SPONSOR_OPTION_W, AUTO, 16,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Skip");
+   initLabel(&sponsorActionLabels[1], &uiFont, 0, 0, SPONSOR_OPTION_W, AUTO, 16,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Ask");
+   initLabel(&sponsorActionLabels[2], &uiFont, 0, 0, SPONSOR_OPTION_W, AUTO, 16,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Keep");
+   for (int i = 0; i < 3; i++) setLabelScaleWithUi(&sponsorActionLabels[i], 1);
+   initButtonHints(&sponsorHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
+   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_DPAD_UP), "Move");
+   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_DPAD_LEFT), "Change");
+   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Change");
+   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_CROSS), "Cycle");
+   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
+
    initButtonHints(&regionHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
    addButtonHint(&regionHints, getConsoleGlyph(GLYPH_CROSS), "Choose");
    addButtonHint(&regionHints, getConsoleGlyph(GLYPH_DPAD_UP), "");
@@ -1154,7 +1316,11 @@ static void drawHome(void)
    drawDownloadOverlay(home.screenW);
    if (!home.accountOpen && !home.settingsOpen) drawSidebar();
    if (home.accountOpen) drawAccountPanel();
-   if (home.settingsOpen) { drawSettingsPanel(); if (home.regionOpen) drawRegionPicker(); }
+   if (home.settingsOpen) {
+      drawSettingsPanel();
+      if (home.regionOpen) drawRegionPicker();
+      else if (home.sponsorblockOpen) drawSponsorBlockPanel();
+   }
 }
 
 static void suspendHome(void) { stopVideoGrid(&home.grid); }   // free the http pools for the pushed screen

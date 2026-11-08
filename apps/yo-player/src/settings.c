@@ -3,6 +3,7 @@
 
 #include "app-config.h"
 #include "settings.h"
+#include "sponsorblock.h"
 #include "settings-file.h"
 #include "gfx.h"
 #include "dbg.h"
@@ -22,8 +23,15 @@ static const char *DEFAULT_SETTINGS =
    "# country used for YouTube content lists (two-letter gl code); default US\n"
    "\n"
    "sponsorblock-mode=ads\n"
-   "# off = never skip anything, ads = skip paid promotions only (sponsors, self-promo,\n"
-   "# like/subscribe reminders), all = also skip intros, outros, filler and non-music sections\n"
+   "# Legacy global mode, used only to migrate older installations. Per-category actions below take precedence.\n"
+   "sponsorblock-sponsor=skip\n"
+   "sponsorblock-selfpromo=skip\n"
+   "sponsorblock-interaction=skip\n"
+   "sponsorblock-intro=keep\n"
+   "sponsorblock-outro=keep\n"
+   "sponsorblock-music-offtopic=keep\n"
+   "sponsorblock-filler=keep\n"
+   "# Each category accepts skip, ask, or keep.\n"
    "\n"
    "overscan=0\n"
    "# output zoom in percent (-10 to +10); 0 keeps the original framing\n"
@@ -33,6 +41,14 @@ static const char *DEFAULT_SETTINGS =
    "# spaces become hyphens). the shipped one is youtube.\n";
 
 static SponsorblockMode sponsorblockMode = SPONSORBLOCK_ADS;
+static int sponsorActions[SPONSOR_CATEGORY_COUNT] = {
+   SPONSOR_ACTION_SKIP, SPONSOR_ACTION_SKIP, SPONSOR_ACTION_SKIP,
+   SPONSOR_ACTION_KEEP, SPONSOR_ACTION_KEEP, SPONSOR_ACTION_KEEP, SPONSOR_ACTION_KEEP
+};
+static const char *SPONSOR_SETTING_KEYS[SPONSOR_CATEGORY_COUNT] = {
+   "sponsorblock-sponsor", "sponsorblock-selfpromo", "sponsorblock-interaction",
+   "sponsorblock-intro", "sponsorblock-outro", "sponsorblock-music-offtopic", "sponsorblock-filler"
+};
 static int autoplayEnabled = 1;
 static int overscanPercent = 0;
 
@@ -126,6 +142,28 @@ void loadSettings(void)
       else logWarn("[settings] unknown sponsorblock-mode value, using ads\n");
    }
 
+   // Migrate the old global mode into independent category actions once. Existing explicit per-category
+   // values always win; missing values inherit the old mode (ads = the three paid-promotion categories).
+   for (int category = 0; category < SPONSOR_CATEGORY_COUNT; category++) {
+      const char *value = findSettingValue(text, SPONSOR_SETTING_KEYS[category]);
+      int fallback = SPONSOR_ACTION_KEEP;
+      if (sponsorblockMode == SPONSORBLOCK_ALL) fallback = SPONSOR_ACTION_SKIP;
+      else if (sponsorblockMode == SPONSORBLOCK_ADS && category <= SPONSOR_INTERACTION)
+         fallback = SPONSOR_ACTION_SKIP;
+      if (!value) {
+         sponsorActions[category] = fallback;
+         const char *seed = fallback == SPONSOR_ACTION_SKIP ? "skip" : "keep";
+         if (rewriteSettingKey(SETTINGS_PATH, SPONSOR_SETTING_KEYS[category], seed) != 0)
+            logWarn("[settings] could not seed %s\n", SPONSOR_SETTING_KEYS[category]);
+      } else if (settingValueEquals(value, "skip")) sponsorActions[category] = SPONSOR_ACTION_SKIP;
+      else if (settingValueEquals(value, "ask")) sponsorActions[category] = SPONSOR_ACTION_ASK;
+      else if (settingValueEquals(value, "keep")) sponsorActions[category] = SPONSOR_ACTION_KEEP;
+      else {
+         sponsorActions[category] = fallback;
+         logWarn("[settings] invalid %s value, using migrated default\n", SPONSOR_SETTING_KEYS[category]);
+      }
+   }
+
    const char *overscan = findSettingValue(text, "overscan");
    if (!overscan) {
       // Add the new key to existing installations without disturbing their other settings/comments.
@@ -148,6 +186,35 @@ void loadSettings(void)
 }
 
 SponsorblockMode getSponsorblockMode(void) { return sponsorblockMode; }
+
+int getSponsorAction(int category)
+{
+   if (category < 0 || category >= SPONSOR_CATEGORY_COUNT) return SPONSOR_ACTION_KEEP;
+   return sponsorActions[category];
+}
+
+int setSponsorAction(int category, int action)
+{
+   if (category < 0 || category >= SPONSOR_CATEGORY_COUNT) return -1;
+   if (action != SPONSOR_ACTION_SKIP && action != SPONSOR_ACTION_ASK && action != SPONSOR_ACTION_KEEP) return -1;
+   if (sponsorActions[category] == action) return 0;
+   const char *value = action == SPONSOR_ACTION_SKIP ? "skip" :
+                       action == SPONSOR_ACTION_ASK ? "ask" : "keep";
+   if (rewriteSettingKey(SETTINGS_PATH, SPONSOR_SETTING_KEYS[category], value) != 0) {
+      logWarn("[settings] could not persist %s=%s\n", SPONSOR_SETTING_KEYS[category], value);
+      return -1;
+   }
+   sponsorActions[category] = action;
+   logInfo("[settings] %s=%s\n", SPONSOR_SETTING_KEYS[category], value);
+   return 0;
+}
+
+int hasSponsorBlockActions(void)
+{
+   for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++)
+      if (sponsorActions[i] != SPONSOR_ACTION_KEEP) return 1;
+   return 0;
+}
 
 int getAutoplayEnabled(void) { return autoplayEnabled; }
 

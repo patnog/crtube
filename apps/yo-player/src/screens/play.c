@@ -31,7 +31,7 @@
 #include "http.h"               // cancel network I/O before joining playback workers
 #include "image-loader.h"       // decode the autoplay thumbnail without blocking the render thread
 #include "storage.h"            // resume position (get/setWatchedPosition)
-#include "settings.h"           // sponsorblock-mode (which segment categories auto-skip)
+#include "settings.h"           // per-category SponsorBlock actions
 #include "sponsorblock.h"       // skip segments (auto-skip + seek-bar marks)
 #include "subtitles.h"          // fetch + parse a caption track; cue lookup during playback
 #include "chapters.h"           // description timestamp lines -> chapter list
@@ -296,6 +296,7 @@ static struct {
    SponsorSegments  sb;
    volatile int     sbWorkerDone;
    int              sbThreadActive, sbReady;
+   int              askPromptShown;  // current Ask segment already announced; -1 when outside one
    sys_ppu_thread_t sbWorkerTid;
    uint64_t         toastShownUs;      // brief toast timer (0 = hidden)
    uint64_t         toastDurationUs;   // per-toast lifetime; defaults to TOAST_VISIBLE_US
@@ -818,6 +819,7 @@ static void initPlay(void)
 {
    setHttpRequestsCancelled(0);
    memset(&state, 0, sizeof state);
+   state.askPromptShown = -1;
    state.screenW = getGfxScreenWidth();
    state.screenH = getGfxScreenHeight();
    playbackFontScale = getGfxUiScaleFactor();
@@ -852,7 +854,7 @@ static void initPlay(void)
                          THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-play") == 0);
    if (!state.threadActive) fail("couldn't start worker");
 
-   if (getSponsorblockMode() != SPONSORBLOCK_OFF && isBareVideoId(requestedInput))
+   if (hasSponsorBlockActions() && isBareVideoId(requestedInput))
       state.sbThreadActive = (spawnJoinableThread(&state.sbWorkerTid, sponsorWorker, 0,
                               THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-sponsor") == 0);
 }
@@ -1209,7 +1211,25 @@ static void handlePlaybackInput(void)
       }
    }
 
-   if (isPadButtonPressed(PAD_BTN_TRIANGLE)) cycleSubtitles();
+   if (isPadButtonPressed(PAD_BTN_TRIANGLE)) {
+      int askIndex = -1;
+      if (state.sbReady && state.player) {
+         float position = getVideoPositionSeconds(state.player);
+         for (int i = 0; i < state.sb.count; i++) {
+            SponsorSegment *segment = &state.sb.segments[i];
+            if (!segment->skipped && getSponsorAction((int)segment->category) == SPONSOR_ACTION_ASK &&
+                position >= segment->start && position < segment->end - 0.2f) { askIndex = i; break; }
+         }
+      }
+      if (askIndex >= 0) {
+         SponsorSegment *segment = &state.sb.segments[askIndex];
+         segment->skipped = 1;
+         seekVideoPlayerPast(state.player, segment->end);
+         char notice[64];
+         snprintf(notice, sizeof notice, "Skipped %s", getSponsorCategoryName(segment->category));
+         showToast(notice);
+      } else cycleSubtitles();
+   }
    if (isPadButtonPressed(PAD_BTN_L3)) cycleAudioTrack();
 
    if (isPadButtonPressed(PAD_BTN_L1)) {
@@ -1304,14 +1324,22 @@ static void handlePlaybackInput(void)
    }
 }
 
-// which categories the sponsorblock-mode setting auto-skips: ads = paid-promotion categories only.
-// (every fetched segment still gets marked on the seek bar, whatever the mode.)
+// Each category has its own action. Ask is handled by Triangle in handlePlaybackInput.
 static int shouldAutoSkipSponsor(SponsorCategory category)
 {
-   SponsorblockMode mode = getSponsorblockMode();
-   if (mode == SPONSORBLOCK_ALL) return 1;
-   return mode == SPONSORBLOCK_ADS &&
-          (category == SPONSOR_SPONSOR || category == SPONSOR_SELFPROMO || category == SPONSOR_INTERACTION);
+   return getSponsorAction((int)category) == SPONSOR_ACTION_SKIP;
+}
+
+static int findAskSponsorSegment(void)
+{
+   if (!state.sbReady || !state.player) return -1;
+   float position = getVideoPositionSeconds(state.player);
+   for (int i = 0; i < state.sb.count; i++) {
+      SponsorSegment *segment = &state.sb.segments[i];
+      if (!segment->skipped && getSponsorAction((int)segment->category) == SPONSOR_ACTION_ASK &&
+          position >= segment->start && position < segment->end - 0.2f) return i;
+   }
+   return -1;
 }
 
 // jump past the first not-yet-skipped sponsor segment the playhead has entered. one-shot per segment so a
@@ -1685,8 +1713,16 @@ static void updatePlay(void)
    if (state.stage == STAGE_PLAYING && state.player && !overlayHadPad && !loadingPauseInput &&
        !state.descriptionVisible && !state.chaptersVisible)
       handlePlaybackInput();
-   if (state.sbReady && state.stage == STAGE_PLAYING && state.player && !isVideoPaused(state.player) && !state.seeking)
+   if (state.sbReady && state.stage == STAGE_PLAYING && state.player && !isVideoPaused(state.player) && !state.seeking) {
       autoSkipSponsor();
+      int askIndex = findAskSponsorSegment();
+      if (askIndex >= 0 && askIndex != state.askPromptShown) {
+         char notice[64];
+         snprintf(notice, sizeof notice, "Triangle: Skip %s", getSponsorCategoryName(state.sb.segments[askIndex].category));
+         showToast(notice);
+         state.askPromptShown = askIndex;
+      } else if (askIndex < 0) state.askPromptShown = -1;
+   }
 
    // With autoplay disabled, ending a VOD behaves like pressing Circle:
    // return to the screen that launched this video instead of requesting /next.
