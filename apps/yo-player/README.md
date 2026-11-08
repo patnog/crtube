@@ -161,9 +161,10 @@ the name you actually see comes from the title passed to the export.
 
 ## Settings
 
-User settings live in `/dev_hdd0/tmp/yo-player/settings.txt`, created with defaults on first launch. It's a
-plain `key=value` text file you can edit over FTP; changes apply on the next launch, and a bad value quietly
-falls back to its default.
+User settings live in `settings.txt` under the build's `CRTUBE_DATA_DIR` (PSL1GHT: `/dev_hdd0/tmp/crtube/`;
+official SDK: `/dev_hdd0/tmp/crtube_sdk/`), created with defaults on first launch. It's a plain `key=value`
+text file you can edit over FTP; file edits apply on the next launch, while Settings-panel changes such as
+overscan are saved immediately. A bad value quietly falls back to its default.
 
 - **`sponsorblock-mode`** — how much SponsorBlock skips:
   - `off` — never skip anything (segments aren't even fetched).
@@ -171,6 +172,8 @@ falls back to its default.
   - `all` — also skip intros, outros, filler and non-music sections.
 - **`theme`** — which colour theme to start in, naming one of the blocks in `themes.txt` (see below).
   Defaults to `youtube`.
+- **`overscan`** — uniform output zoom from `-10` to `+10` percent (default `0`). The Settings panel
+  saves changes immediately; the same transform applies to navigation and playback after video crop.
 
 ## Themes
 

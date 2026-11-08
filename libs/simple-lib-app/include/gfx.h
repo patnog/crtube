@@ -39,6 +39,10 @@ int   isGfxSdVideoOutput(void);
 float getGfxSdUiScale(void);
 float getGfxUiScaleFactor(void); // selected factor on SD output, otherwise 1.0
 void  setGfxSdUiScale(float scale);
+// Uniform output zoom applied by the display viewport after all drawing and video crop calculations.
+// Range: -10..+10 percent; zero leaves the original output unchanged. Offscreen targets are unaffected.
+int   getGfxOverscan(void);
+void  setGfxOverscan(int percent);
 
 // changes how a finished frame reaches the screen, at any time. GFX_VSYNC_ON waits for the display's
 // next refresh (smooth, but holds the frame back by up to one refresh); GFX_VSYNC_OFF shows it at the
@@ -91,6 +95,8 @@ void fillGfxRectangleFixed(int x, int y, int w, int h, uint32_t argb);
 void strokeGfxRectangle(int x, int y, int w, int h, int thickness, uint32_t argb);
 void drawGfxBox(int x, int y, int w, int h, int thickness, uint32_t fill, uint32_t border);
 void fillGfxCircle(int cx, int cy, int radius, uint32_t argb);
+void fillGfxRoundedRectangle(int x, int y, int w, int h, int radius, uint32_t argb);
+void fillGfxRoundedRectangleFixed(int x, int y, int w, int h, int radius, uint32_t argb);
 void drawGfxTriangle(float x0, float y0, uint32_t c0, float x1, float y1, uint32_t c1, float x2, float y2, uint32_t c2);
 void drawGfxLine(int x0, int y0, int x1, int y1, int thickness, uint32_t argb);
 void drawGfxTexture(int x, int y, int w, int h, GfxTexture tex, float u0, float v0, float u1, float v1, uint32_t tint, GfxFilter filter);

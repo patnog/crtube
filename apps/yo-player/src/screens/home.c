@@ -10,6 +10,7 @@
 #include "vfs.h"
 #include "account.h"
 #include "downloads.h"
+#include "settings.h"
 #include "sidebar.h"
 #include "ui/button-hints.h"
 #include "ui/console-glyphs.h"
@@ -172,11 +173,11 @@ static int         panelConfirmHint, panelBackHint;
 // Compact settings shell. The selected value is highlighted independently of
 // its row label; font scaling never changes the panel's physical geometry.
 #define SETTINGS_PANEL_W 620
-#define SETTINGS_PANEL_H 380
-#define SETTINGS_ROW_HEIGHT 54
-#define SETTINGS_ROW_TOP 98
-#define SETTINGS_ROW_STEP 82
-static Label settingsTitle, settingsLabels[3], settingsValues[3], settingsFooter;
+#define SETTINGS_PANEL_H 440
+#define SETTINGS_ROW_HEIGHT 50
+#define SETTINGS_ROW_TOP 88
+#define SETTINGS_ROW_STEP 68
+static Label settingsTitle, settingsLabels[4], settingsValues[4], settingsFooter;
 
 // Trending's feeds remain separate pages, presented as one page with three
 // persistent category chips in the header (matching TEE Vanced's layout).
@@ -551,12 +552,17 @@ static void openSettingsPanel(void)
 static void updateSettingsPanel(void)
 {
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.settingsOpen = 0; return; }
-   if (isPadButtonPressed(PAD_BTN_UP)) home.settingsSelected = (home.settingsSelected + 2) % 3;
-   if (isPadButtonPressed(PAD_BTN_DOWN)) home.settingsSelected = (home.settingsSelected + 1) % 3;
-   if ((isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
-        isPadButtonPressed(PAD_BTN_RIGHT)) && home.settingsSelected == 0) {
-      cycleSdScale();
-      refreshScaleHint();
+   if (isPadButtonPressed(PAD_BTN_UP)) home.settingsSelected = (home.settingsSelected + 3) % 4;
+   if (isPadButtonPressed(PAD_BTN_DOWN)) home.settingsSelected = (home.settingsSelected + 1) % 4;
+   if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
+       isPadButtonPressed(PAD_BTN_RIGHT)) {
+      if (home.settingsSelected == 0) {
+         cycleSdScale();
+         refreshScaleHint();
+      } else if (home.settingsSelected == 1) {
+         int delta = isPadButtonPressed(PAD_BTN_LEFT) ? -1 : 1;
+         setOverscanPercent(getOverscanPercent() + delta);
+      }
    }
 }
 
@@ -566,20 +572,25 @@ static void drawSettingsPanel(void)
    // without float printf support, which can leave only the trailing "x".
    const char *scaleValue = !isGfxSdVideoOutput() ? "Unavailable" :
                             (getGfxUiScaleFactor() >= 1.25f ? "1.5x" : "1.0x");
+   char overscanValue[16];
+   int overscan = getOverscanPercent();
+   if (overscan > 0) snprintf(overscanValue, sizeof overscanValue, "+%d%%", overscan);
+   else              snprintf(overscanValue, sizeof overscanValue, "%d%%", overscan);
    setLabelIfChanged(&settingsValues[0], scaleValue);
-   setLabelIfChanged(&settingsValues[1], "Coming soon");
+   setLabelIfChanged(&settingsValues[1], overscanValue);
    setLabelIfChanged(&settingsValues[2], "Coming soon");
+   setLabelIfChanged(&settingsValues[3], "Coming soon");
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
    int x = (home.screenW - panelW) / 2;
    int y = (home.screenH - panelH) / 2;
    fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
-   fillGfxRectangle(x, y, panelW, panelH, activeTheme->appBg);
-   fillGfxRectangle(x, y, panelW, 4, activeTheme->accent);
+   fillGfxRoundedRectangle(x, y, panelW, panelH, 10, activeTheme->appBg);
+   fillGfxRoundedRectangle(x, y, panelW, 4, 2, activeTheme->accent);
    refreshLabelScale(&settingsTitle);
    drawLabelCentered(&settingsTitle, home.screenW / 2, y + 28);
 
-   for (int i = 0; i < 3; i++) {
+   for (int i = 0; i < 4; i++) {
       Label *name = &settingsLabels[i];
       Label *value = &settingsValues[i];
       int rowY = y + SETTINGS_ROW_TOP + i * SETTINGS_ROW_STEP;
@@ -597,7 +608,8 @@ static void drawSettingsPanel(void)
       // The focus chip hugs only the value being edited. Its vertical bounds
       // follow the actual rasterized glyph height, not the row's line box.
       if (i == home.settingsSelected)
-         fillGfxRectangle(valueX, valueY - 5, valueW, valueH, activeTheme->rowHighlight);
+         fillGfxRoundedRectangle(valueX, valueY - 5, valueW, valueH, 7,
+                                 activeTheme->rowHighlight);
 
       setLabelColor(name, activeTheme->textPrimary);
       setLabelColor(value, i == home.settingsSelected ? activeTheme->accent : activeTheme->textPrimary);
@@ -682,7 +694,10 @@ static void initHome(void)
 
    uiFont = openSystemFont(FONT_POP);
    initSidebar(&uiFont, home.screenW, home.screenH);
-   initLabel(&titleLabel,  &uiFont, MARGIN_X, headerY, home.screenW - 2 * MARGIN_X, AUTO, TITLE_SIZE, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
+   int categoryTitleOffset = home.screenW * 3 / 100;
+   initLabel(&titleLabel,  &uiFont, MARGIN_X + categoryTitleOffset, headerY,
+             home.screenW - 2 * MARGIN_X - categoryTitleOffset, AUTO, TITLE_SIZE,
+             activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabel(&statusLabel, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, AUTO, 21, activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
    // Home heading/status grow by rerasterising their font, while retaining their
    // original anchors instead of being pushed off the 4:3 safe area.
@@ -732,8 +747,8 @@ static void initHome(void)
    initLabel(&panelCode,   &uiFont, 0, 0, accountTextW, AUTO, 56, activeTheme->textPrimary,   TEXT_NOWRAP, "");
    initLabel(&panelFooter, &uiFont, 0, 0, accountTextW, AUTO, 20, activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabel(&settingsTitle, &uiFont, 0, 0, settingsTextW - 48, AUTO, 24, activeTheme->textPrimary, TEXT_NOWRAP, "Settings");
-   static const char *settingNames[3] = { "UI Scaling", "Content Region", "SponsorBlock" };
-   for (int i = 0; i < 3; i++) {
+   static const char *settingNames[4] = { "UI Scaling", "Overscan", "Content Region", "SponsorBlock" };
+   for (int i = 0; i < 4; i++) {
       initLabel(&settingsLabels[i], &uiFont, 0, 0, settingsTextW - 220, AUTO, 20,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, settingNames[i]);
       initLabel(&settingsValues[i], &uiFont, 0, 0, 160, AUTO, 22,
@@ -974,7 +989,7 @@ static void termHome(void)
    freeLabel(&panelCode);
    freeLabel(&panelFooter);
    freeLabel(&settingsTitle);
-   for (int i = 0; i < 3; i++) {
+   for (int i = 0; i < 4; i++) {
       freeLabel(&settingsLabels[i]);
       freeLabel(&settingsValues[i]);
    }

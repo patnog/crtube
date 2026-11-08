@@ -73,10 +73,12 @@ static int       surfaceH = 0;
 static int       targetIsDisplay = 0;   // drawing to the screen buffer (vs an offscreen target)
 
 // One tuning knob for SD output (480i and 480p). Keep at 1.0 to disable.
-// The transform is applied to display-target UI drawing, not offscreen text
-// rasterisation or video frames. Video-grid thumbnail images explicitly bypass it.
+// This CPU-side transform affects display-target UI geometry only; video frames
+// and offscreen rasterisation stay at 1.0. Global overscan is separate and is
+// applied later by the display viewport to all output, including video frames.
 static float     sdUiScale = 1.15f;
 static int       sdVideoOutput = 0;
+static int       gfxOverscanPercent = 0;
 
 int isGfxSdVideoOutput(void)
 {
@@ -92,6 +94,18 @@ void setGfxSdUiScale(float scale)
 {
    // 1.0 means normal size. Restrict the range to avoid accidental clipping.
    if (scale >= 1.0f && scale <= 1.5f) sdUiScale = scale;
+}
+
+int getGfxOverscan(void)
+{
+   return gfxOverscanPercent;
+}
+
+void setGfxOverscan(int percent)
+{
+   if (percent < -10) percent = -10;
+   if (percent > 10) percent = 10;
+   gfxOverscanPercent = percent;
 }
 
 static float uiScale(void)
@@ -310,7 +324,7 @@ uint64_t getGfxFlipWaitUs(void)
 // the viewport + scissor to its real w*h. logicalW/logicalH is the coordinate space draw
 // calls use on it: the virtual canvas for the display buffer, its own w*h for an offscreen
 // texture (offset/pitch 64-byte aligned).
-static void setSurface(uint32_t offset, uint32_t pitch, int w, int h, int logicalW, int logicalH)
+static void setSurface(uint32_t offset, uint32_t pitch, int w, int h, int logicalW, int logicalH, int displayTarget)
 {
    CellGcmSurface sf;
    memset(&sf, 0, sizeof(sf));
@@ -349,15 +363,20 @@ static void setSurface(uint32_t offset, uint32_t pitch, int w, int h, int logica
    surfaceW = w;
    surfaceH = h;
 
-   float scale[4]  = { w * 0.5f,  h * -0.5f, 0.5f, 0.0f };
-   float offs[4]   = { w * 0.5f,  h *  0.5f, 0.5f, 0.0f };
+   // Apply overscan as the final output-space transform. Both axes use the same
+   // factor and keep the viewport centre fixed, preserving 4:3 / 16:9 geometry.
+   // It is enabled only for the real display surface: offscreen render targets
+   // remain untouched and are transformed once when their texture reaches screen.
+   float outputScale = displayTarget ? 1.0f + (float)gfxOverscanPercent * 0.01f : 1.0f;
+   float scale[4]  = { w * 0.5f * outputScale, h * -0.5f * outputScale, 0.5f, 0.0f };
+   float offs[4]   = { w * 0.5f,               h *  0.5f,               0.5f, 0.0f };
    cellGcmSetViewport(CTX, 0, 0, w, h, 0.0f, 1.0f, scale, offs);
    cellGcmSetScissor(CTX, 0, 0, w, h);
 }
 
 static void setRenderTarget(void)
 {
-   setSurface(frameOffset[backBuffer], framePitch, screenW, screenH, virtualW, VIRTUAL_H);
+   setSurface(frameOffset[backBuffer], framePitch, screenW, screenH, virtualW, VIRTUAL_H, 1);
    targetIsDisplay = 1;
 }
 
@@ -805,14 +824,16 @@ static int getCircleSegments(int radius)
    return radius;
 }
 
-void fillGfxCircle(int cx, int cy, int r, uint32_t argb)
+static void fillGfxCircleInternal(int cx, int cy, int r, uint32_t argb, int applyScale)
 {
    if (!initialized || r <= 0) return;
-   float sx0 = scaleUiX((float)(cx - r)), sx1 = scaleUiX((float)(cx + r));
-   float sy0 = scaleUiY((float)(cy - r)), sy1 = scaleUiY((float)(cy + r));
-   cx = (int)floorf((sx0 + sx1) * 0.5f + 0.5f);
-   cy = (int)floorf((sy0 + sy1) * 0.5f + 0.5f);
-   r = (int)floorf((sx1 - sx0) * 0.5f + 0.5f);
+   if (applyScale) {
+      float sx0 = scaleUiX((float)(cx - r)), sx1 = scaleUiX((float)(cx + r));
+      float sy0 = scaleUiY((float)(cy - r)), sy1 = scaleUiY((float)(cy + r));
+      cx = (int)floorf((sx0 + sx1) * 0.5f + 0.5f);
+      cy = (int)floorf((sy0 + sy1) * 0.5f + 0.5f);
+      r = (int)floorf((sx1 - sx0) * 0.5f + 0.5f);
+   }
    ensureWhiteTex();
    int segments = getCircleSegments(r);
    if (batchWouldOverflow(segments * VERTS_PER_TRIANGLE)) return;
@@ -837,6 +858,97 @@ void fillGfxCircle(int cx, int cy, int r, uint32_t argb)
       prevY = ny;
    }
    batchVertCount += segments * VERTS_PER_TRIANGLE;
+}
+
+void fillGfxCircle(int cx, int cy, int r, uint32_t argb)
+{
+   fillGfxCircleInternal(cx, cy, r, argb, 1);
+}
+
+// Draw one quarter-circle as a non-overlapping triangle fan. Rounded
+// rectangles use these corner sectors instead of four full circles, which
+// previously overlapped the center rectangles and blended translucent colors
+// more than once at the joins.
+static void fillGfxQuarterCircleInternal(int cx, int cy, int radius,
+                                         float startAngle, uint32_t argb)
+{
+   if (radius <= 0) return;
+   int segments = radius;
+   if (segments < 4) segments = 4;
+   if (segments > 12) segments = 12;
+   if (batchWouldOverflow(segments * VERTS_PER_TRIANGLE)) return;
+
+   ensureWhiteTex();
+   uint32_t rgba = argbToRgba(argb);
+   float centerX = toClipX(cx);
+   float centerY = toClipY(cy);
+   float step = 1.57079632679f / (float)segments;
+   float prevX = toClipX(cx + (int)(cosf(startAngle) * (float)radius));
+   float prevY = toClipY(cy + (int)(sinf(startAngle) * (float)radius));
+   GfxVertex *v = &batchVerts[backBuffer][batchVertCount];
+
+   for (int i = 1; i <= segments; ++i) {
+      float angle = startAngle + step * (float)i;
+      float nextX = toClipX(cx + (int)(cosf(angle) * (float)radius));
+      float nextY = toClipY(cy + (int)(sinf(angle) * (float)radius));
+      v[0] = (GfxVertex){ centerX, centerY, 0.0f, rgba, 0.0f, 0.0f };
+      v[1] = (GfxVertex){ prevX, prevY, 0.0f, rgba, 0.0f, 0.0f };
+      v[2] = (GfxVertex){ nextX, nextY, 0.0f, rgba, 0.0f, 0.0f };
+      v += 3;
+      prevX = nextX;
+      prevY = nextY;
+   }
+   batchVertCount += segments * VERTS_PER_TRIANGLE;
+}
+
+static void fillGfxRoundedRectangleInternal(int x, int y, int w, int h,
+                                            int radius, uint32_t argb,
+                                            int applyScale)
+{
+   if (!initialized || w <= 0 || h <= 0) return;
+   if (applyScale) {
+      float sx0 = scaleUiX((float)x);
+      float sx1 = scaleUiX((float)(x + w));
+      float sy0 = scaleUiY((float)y);
+      float sy1 = scaleUiY((float)(y + h));
+      float sr = scaleUiX((float)(x + radius)) - scaleUiX((float)x);
+      x = (int)floorf(sx0 + 0.5f);
+      y = (int)floorf(sy0 + 0.5f);
+      w = (int)floorf(sx1 + 0.5f) - x;
+      h = (int)floorf(sy1 + 0.5f) - y;
+      radius = (int)floorf(sr + 0.5f);
+   }
+   if (radius <= 0) {
+      fillGfxRectangleInternal(x, y, w, h, argb, 0);
+      return;
+   }
+   if (radius * 2 > w) radius = w / 2;
+   if (radius * 2 > h) radius = h / 2;
+
+   // These three rectangles and four quarter-circle sectors tile the rounded
+   // shape without overlapping, so alpha is composited exactly once per pixel.
+   fillGfxRectangleInternal(x + radius, y, w - radius * 2, h, argb, 0);
+   fillGfxRectangleInternal(x, y + radius, radius, h - radius * 2, argb, 0);
+   fillGfxRectangleInternal(x + w - radius, y + radius, radius,
+                            h - radius * 2, argb, 0);
+   fillGfxQuarterCircleInternal(x + radius, y + radius, radius,
+                                3.14159265359f, argb);
+   fillGfxQuarterCircleInternal(x + w - radius, y + radius, radius,
+                                4.71238898038f, argb);
+   fillGfxQuarterCircleInternal(x + w - radius, y + h - radius, radius,
+                                0.0f, argb);
+   fillGfxQuarterCircleInternal(x + radius, y + h - radius, radius,
+                                1.57079632679f, argb);
+}
+
+void fillGfxRoundedRectangle(int x, int y, int w, int h, int radius, uint32_t argb)
+{
+   fillGfxRoundedRectangleInternal(x, y, w, h, radius, argb, 1);
+}
+
+void fillGfxRoundedRectangleFixed(int x, int y, int w, int h, int radius, uint32_t argb)
+{
+   fillGfxRoundedRectangleInternal(x, y, w, h, radius, argb, 0);
 }
 
 static void flushBatch(void)
@@ -1196,7 +1308,7 @@ void beginGfxRenderTarget(GfxRenderTarget *rt)
 {
    if (!initialized || !rt || rt->tex.offset == 0) return;
    flushBatch();   // anything still queued belongs to the previous target
-   setSurface(rt->tex.offset, (uint32_t)rt->tex.pitch, rt->tex.w, rt->tex.h, rt->tex.w, rt->tex.h);
+   setSurface(rt->tex.offset, (uint32_t)rt->tex.pitch, rt->tex.w, rt->tex.h, rt->tex.w, rt->tex.h, 0);
    targetIsDisplay = 0;
 }
 

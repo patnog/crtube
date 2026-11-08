@@ -4,27 +4,35 @@
 #include "app-config.h"
 #include "settings.h"
 #include "settings-file.h"
+#include "gfx.h"
 #include "dbg.h"
+#include <stdlib.h>
+#include <stdio.h>
 
 #define SETTINGS_PATH CRTUBE_DATA_DIR "/settings.txt"
 
 // the file written on first launch: each setting at its default, with a comment explaining the values.
 static const char *DEFAULT_SETTINGS =
-   "# yo-player settings - edit over FTP; changes apply on the next launch\n"
+   "# yo-player settings - edit over FTP; file edits apply on the next launch\n"
    "\n"
    "sponsorblock-mode=ads\n"
    "# off = never skip anything, ads = skip paid promotions only (sponsors, self-promo,\n"
    "# like/subscribe reminders), all = also skip intros, outros, filler and non-music sections\n"
+   "\n"
+   "overscan=0\n"
+   "# output zoom in percent (-10 to +10); 0 keeps the original framing\n"
    "\n"
    "theme=youtube\n"
    "# which colour theme to start in - one of the [Name] blocks in themes.txt (lower case,\n"
    "# spaces become hyphens). the shipped one is youtube.\n";
 
 static SponsorblockMode sponsorblockMode = SPONSORBLOCK_ADS;
+static int overscanPercent = 0;
 
 void loadSettings(void)
 {
    char text[2048];
+   overscanPercent = 0;
    if (loadSettingsFile(SETTINGS_PATH, DEFAULT_SETTINGS, text, sizeof text) == 1)
       logInfo("[settings] created %s with defaults\n", SETTINGS_PATH);
 
@@ -35,6 +43,48 @@ void loadSettings(void)
       else if (settingValueEquals(mode, "all")) sponsorblockMode = SPONSORBLOCK_ALL;
       else logWarn("[settings] unknown sponsorblock-mode value, using ads\n");
    }
+
+   const char *overscan = findSettingValue(text, "overscan");
+   if (!overscan) {
+      // Add the new key to existing installations without disturbing their other settings/comments.
+      if (rewriteSettingKey(SETTINGS_PATH, "overscan", "0") != 0)
+         logWarn("[settings] could not add default overscan key\n");
+   }
+   if (overscan) {
+      char *end = NULL;
+      long parsed = strtol(overscan, &end, 10);
+      if (end != overscan && (*end == 0 || *end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) {
+         if (parsed < -10) parsed = -10;
+         if (parsed > 10) parsed = 10;
+         overscanPercent = (int)parsed;
+      } else {
+         logWarn("[settings] invalid overscan value, using 0\n");
+         overscanPercent = 0;
+      }
+   }
+   setGfxOverscan(overscanPercent);
 }
 
 SponsorblockMode getSponsorblockMode(void) { return sponsorblockMode; }
+
+int getOverscanPercent(void) { return overscanPercent; }
+
+int setOverscanPercent(int percent)
+{
+   if (percent < -10) percent = -10;
+   if (percent > 10) percent = 10;
+   if (percent == overscanPercent) return 0;
+
+   char value[8];
+   int length = snprintf(value, sizeof value, "%d", percent);
+   if (length <= 0 || length >= (int)sizeof value ||
+       rewriteSettingKey(SETTINGS_PATH, "overscan", value) != 0) {
+      logWarn("[settings] could not persist overscan=%d\n", percent);
+      return -1;
+   }
+
+   overscanPercent = percent;
+   setGfxOverscan(overscanPercent);
+   logInfo("[settings] overscan set to %d%%\n", overscanPercent);
+   return 0;
+}

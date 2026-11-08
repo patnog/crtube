@@ -2030,7 +2030,7 @@ static void drawPlay(void)
    float selectedUiScale = getGfxSdUiScale();
    setGfxSdUiScale(1.0f);
 
-   fillGfxRectangle(0, 0, state.screenW, state.screenH, COLOR_BLACK);   // letterbox bars read as black, not the app background
+   clearGfx(COLOR_BLACK);   // clear the full output; overscan transforms video and HUD, not the black margins
 
    const uint8_t *frame = NULL;
    if (state.player) {

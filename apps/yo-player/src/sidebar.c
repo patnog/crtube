@@ -16,12 +16,15 @@
 #define SIDEBAR_ROW_STEP           (SIDEBAR_ROW_HEIGHT + SIDEBAR_ROW_GAP)
 #define SIDEBAR_ICON_SIZE          24
 #define SIDEBAR_TEXT_SIZE          22
+#define SIDEBAR_SECTION_TEXT_SIZE   28
+#define SIDEBAR_TITLE_TEXT_SIZE     36
 #define SIDEBAR_EDGE_WIDTH         32
 #define SIDEBAR_EDGE_STRIP_WIDTH   52
 #define SIDEBAR_EDGE_HEIGHT        76
 #define SIDEBAR_MIN_WIDTH         300
 #define SIDEBAR_MAX_WIDTH         520
 #define SIDEBAR_CONTENT_LEFT       48
+#define SIDEBAR_CONTENT_OFFSET_PCT   2
 #define SIDEBAR_TEXT_LEFT         100
 #define SIDEBAR_RIGHT_PAD          14
 #define SIDEBAR_TITLE_Y            34
@@ -45,7 +48,7 @@ static const SidebarRow mainRows[SIDEBAR_MAIN_ROWS] = {
    { "History",        ICON_HISTORY,   SIDEBAR_ACCOUNT_HISTORY,        0 },
    { "Watch Later",    ICON_CLOCK,     SIDEBAR_ACCOUNT_WATCH_LATER,    0 },
    { "Trending",       ICON_UP_BIG,    SIDEBAR_TRENDING,               0 },
-   { "THIS PS3",       0,              -1,                             ROW_SECTION },
+   { "PS3",            0,              -1,                             ROW_SECTION },
    { "Subscriptions",  ICON_HDD,       SIDEBAR_PS3_SUBSCRIPTIONS,      0 },
    { "History",        ICON_HISTORY,   SIDEBAR_PS3_HISTORY,            0 },
    { "Watch Later",    ICON_CLOCK,     SIDEBAR_PS3_WATCH_LATER,        0 },
@@ -88,7 +91,8 @@ static int getPanelWidth(int screenW, float uiScale)
    int twoSpaces = (int)(measureFontText(side.font, fontSize, "  ") + 0.5f);
    // End the bright panel about two spaces after its longest navigation label;
    // the fixed dark rail and arrow occupy the remaining edge strip.
-   int width = SIDEBAR_TEXT_LEFT + textWidth + twoSpaces +
+   int contentOffset = screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
+   int width = SIDEBAR_TEXT_LEFT + contentOffset + textWidth + twoSpaces +
                SIDEBAR_EDGE_STRIP_WIDTH + SIDEBAR_RIGHT_PAD;
    if (width < SIDEBAR_MIN_WIDTH) width = SIDEBAR_MIN_WIDTH;
    if (width > SIDEBAR_MAX_WIDTH) width = SIDEBAR_MAX_WIDTH;
@@ -163,19 +167,20 @@ void initSidebar(Font *font, int screenW, int screenH)
    side.panelW = getPanelWidth(screenW, side.uiScale);
    side.selected = 5; // Trending is the initial active section.
 
+   int contentOffset = screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
    initLabel(&side.title, font, 0, 0,
-             SIDEBAR_MAX_WIDTH - SIDEBAR_CONTENT_LEFT - SIDEBAR_EDGE_STRIP_WIDTH - SIDEBAR_RIGHT_PAD,
-             48, 28, activeTheme->textPrimary, TEXT_NOWRAP, "CRTube");
+             SIDEBAR_MAX_WIDTH - SIDEBAR_CONTENT_LEFT - contentOffset - SIDEBAR_EDGE_STRIP_WIDTH - SIDEBAR_RIGHT_PAD,
+             56, SIDEBAR_TITLE_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP, "CRTube");
    setLabelScaleWithUi(&side.title, 1);
 
    for (int i = 0; i < SIDEBAR_MAIN_ROWS; i++) {
       initLabel(&side.mainNames[i], font, 0, 0,
-                SIDEBAR_MAX_WIDTH - SIDEBAR_TEXT_LEFT - SIDEBAR_EDGE_STRIP_WIDTH - SIDEBAR_RIGHT_PAD,
-                42, SIDEBAR_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, mainRows[i].name);
+                SIDEBAR_MAX_WIDTH - SIDEBAR_TEXT_LEFT - contentOffset - SIDEBAR_EDGE_STRIP_WIDTH - SIDEBAR_RIGHT_PAD,
+                46, (mainRows[i].flags & ROW_SECTION) ? SIDEBAR_SECTION_TEXT_SIZE : SIDEBAR_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, mainRows[i].name);
       setLabelScaleWithUi(&side.mainNames[i], 1);
       if (mainRows[i].icon) initIcon(&side.mainIcons[i], mainRows[i].icon, SIDEBAR_ICON_SIZE);
    }
-   initIcon(&side.edgeOpen, ICON_RIGHT_BIG, 27);
+   initIcon(&side.edgeOpen, ICON_LEFT_BIG, 27);
    initIcon(&side.edgeClose, ICON_LEFT_BIG, 27);
    keepSelectionVisible();
    updateSelectedColors();
@@ -303,19 +308,27 @@ static void drawEdge(int panelX)
 {
    int edgeX = panelX + side.panelW - SIDEBAR_EDGE_WIDTH;
    int edgeY = (side.screenH - SIDEBAR_EDGE_HEIGHT) / 2;
+   Icon *glyph = &side.edgeOpen; // The indicator always points left.
+   int glyphX;
 
    if (side.progress > 0.0f) {
       int railX = panelX + side.panelW - SIDEBAR_EDGE_STRIP_WIDTH;
       fillGfxRectangleFixed(railX, 0, SIDEBAR_EDGE_STRIP_WIDTH, side.screenH, activeTheme->appBg);
-      // A subtle inner rule makes the rail read as the panel's actual edge.
+      // Keep the arrow centered in the rail, clear of its light inner edge.
       fillGfxRectangleFixed(railX, 0, 2, side.screenH, activeTheme->textSecondary);
+      glyphX = railX + (SIDEBAR_EDGE_STRIP_WIDTH - glyph->size) / 2;
    } else {
-      fillGfxRectangleFixed(edgeX, edgeY, SIDEBAR_EDGE_WIDTH, SIDEBAR_EDGE_HEIGHT, activeTheme->surface);
+      // Move only the closed-state indicator and arrow 1% left of the
+      // previous position. The open rail and its arrow remain unchanged.
+      int closedOffset = -(int)(side.screenW * 1.0f / 100.0f + 0.5f);
+      int indicatorX = edgeX + closedOffset;
+      fillGfxRoundedRectangleFixed(indicatorX, edgeY,
+                                   SIDEBAR_EDGE_WIDTH, SIDEBAR_EDGE_HEIGHT,
+                                   10, activeTheme->surface);
+      glyphX = indicatorX + (SIDEBAR_EDGE_WIDTH - glyph->size) / 2;
    }
 
-   Icon *glyph = side.targetOpen ? &side.edgeClose : &side.edgeOpen;
-   drawSidebarIconFixed(glyph,
-                        edgeX + (SIDEBAR_EDGE_WIDTH - glyph->size) / 2,
+   drawSidebarIconFixed(glyph, glyphX,
                         edgeY + (SIDEBAR_EDGE_HEIGHT - glyph->size) / 2,
                         activeTheme->textPrimary);
 }
@@ -327,7 +340,10 @@ static void drawMainRows(int panelX)
    for (int i = side.scrollTop; i < end; i++) {
       int rowY = SIDEBAR_ROWS_TOP + (i - side.scrollTop) * SIDEBAR_ROW_STEP;
       if (mainRows[i].flags & ROW_SECTION) {
-         moveLabel(&side.mainNames[i], panelX + SIDEBAR_CONTENT_LEFT, rowY + 12);
+         refreshLabelScale(&side.mainNames[i]);
+         int contentOffset = side.screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
+         moveLabel(&side.mainNames[i], panelX + SIDEBAR_CONTENT_LEFT + contentOffset,
+                   getCenteredLabelY(&side.mainNames[i], rowY, SIDEBAR_ROW_HEIGHT));
          drawLabel(&side.mainNames[i]);
          continue;
       }
@@ -337,10 +353,11 @@ static void drawMainRows(int panelX)
                                SIDEBAR_ROW_HEIGHT, activeTheme->rowHighlight);
       int iconSize = (int)(SIDEBAR_ICON_SIZE * (side.uiScale >= 1.25f ? 1.25f : 1.0f) + 0.5f);
       int iconY = rowY + (SIDEBAR_ROW_HEIGHT - iconSize) / 2;
-      drawSidebarRowIcon(&side.mainIcons[i], panelX + SIDEBAR_CONTENT_LEFT, iconY,
+      int contentOffset = side.screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
+      drawSidebarRowIcon(&side.mainIcons[i], panelX + SIDEBAR_CONTENT_LEFT + contentOffset, iconY,
                          i == side.selected ? activeTheme->accent : activeTheme->textSecondary);
       refreshLabelScale(&side.mainNames[i]);
-      moveLabel(&side.mainNames[i], panelX + SIDEBAR_TEXT_LEFT,
+      moveLabel(&side.mainNames[i], panelX + SIDEBAR_TEXT_LEFT + contentOffset,
                 getCenteredLabelY(&side.mainNames[i], rowY, SIDEBAR_ROW_HEIGHT));
       drawLabel(&side.mainNames[i]);
    }
@@ -356,7 +373,12 @@ void drawSidebar(void)
    }
 
    keepSelectionVisible();
-   int travel = side.panelW - SIDEBAR_EDGE_WIDTH;
+   // Keep the collapsed indicator slightly inset from the physical left edge.
+   // The panel still finishes at x=0 when fully open, so the indicator travels
+   // with the panel edge throughout the same animation.
+   int closedOffset = side.screenW * 5 / 100;
+   int travel = side.panelW - SIDEBAR_EDGE_WIDTH - closedOffset;
+   if (travel < 0) travel = 0;
    int panelX = -(int)((1.0f - side.progress) * travel + 0.5f);
 
    if (side.progress > 0.0f) {
@@ -365,7 +387,8 @@ void drawSidebar(void)
          fillGfxRectangleFixed(panelRight, 0, side.screenW - panelRight, side.screenH, activeTheme->scrim);
       fillGfxRectangleFixed(panelX, 0, side.panelW, side.screenH, activeTheme->surface);
 
-      moveLabel(&side.title, panelX + SIDEBAR_CONTENT_LEFT, SIDEBAR_TITLE_Y);
+      int contentOffset = side.screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
+      moveLabel(&side.title, panelX + SIDEBAR_CONTENT_LEFT + contentOffset, SIDEBAR_TITLE_Y);
       refreshLabelScale(&side.title);
       drawLabel(&side.title);
 

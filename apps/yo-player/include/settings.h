@@ -14,3 +14,7 @@ typedef enum {
 void loadSettings(void);   // reads settings.txt, creating it with defaults when missing
 
 SponsorblockMode getSponsorblockMode(void);
+
+// Uniform display overscan in percent (-10..+10). Changes are saved immediately to settings.txt.
+int getOverscanPercent(void);
+int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails
