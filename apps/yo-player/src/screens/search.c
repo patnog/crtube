@@ -25,6 +25,7 @@
 #include "dbg.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define MARGIN_X      80
 #define HEADER_Y      54
@@ -64,6 +65,36 @@ static ButtonHints hints, hintsSecondRow;
 static int sdHintsTwoRows;
 static int sortL1Hint = -1, sortR1Hint = -1;
 
+static void prependLiveChannelItems(SearchResults *live, SearchResults *regular)
+{
+   int liveCount = 0;
+   int capacity = MAX_SEARCH_RESULTS - regular->count;
+   for (int i = 0; i < live->count && liveCount < capacity; i++) {
+      SearchResult *item = &live->items[i];
+      int duplicate = 0;
+      for (int j = 0; j < regular->count; j++) {
+         if (strcmp(regular->items[j].videoId, item->videoId) == 0) { duplicate = 1; break; }
+      }
+      for (int j = 0; !duplicate && j < liveCount; j++) {
+         if (strcmp(live->items[j].videoId, item->videoId) == 0) duplicate = 1;
+      }
+      if (duplicate) continue;
+      if (!item->channelId[0]) strCopy(item->channelId, sizeof item->channelId, search.channelId);
+      if (!item->author[0])
+         strCopy(item->author, sizeof item->author,
+                 search.channelName[0] ? search.channelName : regular->channelName);
+      if (liveCount != i) live->items[liveCount] = *item;
+      liveCount++;
+   }
+
+   if (liveCount <= 0) return;
+   memmove(regular->items + liveCount, regular->items,
+           regular->count * sizeof(regular->items[0]));
+   memcpy(regular->items, live->items, liveCount * sizeof(regular->items[0]));
+   regular->count += liveCount;
+   logInfo("[search] promoted %d active channel live stream(s)\n", liveCount);
+}
+
 static int searchFetch(const char *token, SearchResults *out, void *user)
 {
    int rc;
@@ -73,7 +104,18 @@ static int searchFetch(const char *token, SearchResults *out, void *user)
       (int)strlen(search.channelId), token ? "yes" : "no");
    if (search.channelId[0]) {
       const char *first = search.channelSortToken[0] ? search.channelSortToken : NULL;
+      SearchResults *live = NULL;
+      int liveRc = -1;
+      if (!token) {
+         live = malloc(sizeof(*live));
+         if (live) liveRc = getChannelLiveVideos(search.channelId, live);
+      }
       rc = getChannelVideos(search.channelId, token ? token : first, out);
+      if (rc == 0 && live && liveRc == 0 && live->count > 0)
+         prependLiveChannelItems(live, out);
+      else if (liveRc < 0 && !token)
+         logInfo("[search] channel live lookup unavailable rc=%d; keeping regular videos\n", liveRc);
+      free(live);
    } else {
       rc = searchVideos(search.query, search.sort, token, out);
    }

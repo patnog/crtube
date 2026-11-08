@@ -153,6 +153,8 @@ typedef struct Extractor {
    int (*isVideoMembersOnly)(const char *videoId);
    // Live streams feed. Appended to preserve the positional initializer above.
    int (*getLive)(LiveCategory category, const char *continuation, SearchResults *out, int (*stopped)(void));
+   // A channel's Streams tab, filtered to broadcasts that are live right now.
+   int (*getChannelLive)(const char *channelId, SearchResults *out);
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.
@@ -170,6 +172,8 @@ int getLiveFeed(LiveCategory category, const char *continuation, SearchResults *
 // a channel's Videos feed. token NULL = first page; else a sort-chip token (SearchResults.sortTokens) or a
 // next-page continuation. the first page also fills out->sortTokens. 0 ok, negative on error.
 int getChannelVideos(const char *channelId, const char *token, SearchResults *out);
+// Fetch currently-live broadcasts from a channel's Streams tab. Blocking; call on a worker thread.
+int getChannelLiveVideos(const char *channelId, SearchResults *out);
 
 // a signed-in account feed (see AccountFeed). continuation as above. 0 ok; negative on error or when
 // signed out. blocking: call from a worker thread.

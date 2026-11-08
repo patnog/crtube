@@ -20,11 +20,8 @@ It reuses what this repo already has:
 
 ## Features
 
-- **Browse & search** — a home screen with Subscriptions, Gaming, Sports, Podcasts and Watch Later feeds, plus
-  text search (on-screen keyboard) and per-channel video lists. Search has Relevance / Views sort orders;
-  channel views have Latest / Popular / Oldest. Pasting a YouTube link into the search box plays it straight away.
-- **Playback up to 1080p with sound** — streamed as it plays (nothing is downloaded in full first), H.264 + AAC.
-  Picks 1080p at 30 frames per second, or 720p when the video is 60 fps (the console can't keep up with 1080p60).
+- **Browse & search** — a sidebar with Recommended, account Subscriptions / History / Watch Later, separate PS3-local Subscriptions / History / Watch Later, Trending and Live. Search has Relevance / Views sort orders; channel views have Latest / Popular / Oldest. Pasting a YouTube link into search opens it directly. Trending tabs are Gaming, Sports and Podcasts; Live tabs are Popular, Music, Gaming, Sports, Podcasts and News.
+- **Playback with sound** — streamed as it plays (nothing is downloaded in full first), H.264 + AAC. Sony VDEC is the default decoder. An experimental setting can enable the integrated TEE Decoder for supported 1080p50/60 H.264 streams.
   Pause and seek with a scrub bar showing current / total time.
 - **Live streams** — plays anything with a LIVE badge (sports, news), a few seconds behind the live edge.
 - **Resume** — videos pick up from where you last stopped; already-watched videos are dimmed in the grid.
@@ -39,9 +36,35 @@ It reuses what this repo already has:
   YouTube's own chapter list when the description has none. Chapter boundaries are notched onto the seek bar.
 - **Subtitles** — cycle through the video's available subtitle languages (off by default); the chosen language
   shows in the player, and lines are drawn above the seek bar.
-- **SponsorBlock** — community-marked sponsor / intro / self-promo segments are skipped automatically and shown
-  on the seek bar in their category colours. How much gets skipped is a setting (see below).
+- **SponsorBlock** — community-marked segments are shown on the seek bar. Each category can be configured as Skip, Ask (Square skips the active segment) or Keep.
 - **No PSN, no ads** — talks to YouTube directly; appears under the XMB **Video** column like the old app.
+
+## TEE H.264 decoder
+
+This fork includes TheErsysEnding's TEE Decoder from
+[TEE-Vanced-PS3](https://github.com/TheErsysEnding/TEE-Vanced-PS3), integrated into
+`simple-lib-av`. It decodes H.264 on the PS3's SPEs and can reach 1080p60 on
+supported streams. It is an additional backend; Sony's `cellVdec` remains the
+default and handles streams outside the TEE decoder's supported format.
+
+The decoder currently supports H.264 Main/High Profile, 8-bit 4:2:0, progressive
+pictures, CABAC, one slice per picture, and coded dimensions up to 1920×1088.
+It does not support CAVLC/Constrained Baseline, interlaced pictures, multiple
+slices per picture, 10-bit video, or 4:2:2 chroma. The player only offers
+50/60-fps streams to this backend when the experimental setting is enabled and
+the decoder passes its availability check.
+
+The option is **off by default**. Set `enable-1080p60=on` in `settings.txt`, or
+enable **Enable 1080p60 (experimental)** in the home Settings panel. If the TEE
+decoder reports a fatal playback error, the player attempts an automatic
+handoff to a lower rendition decoded by Sony VDEC. This recovery is not a
+guarantee that every stream will play.
+
+**License:** the TEE Decoder is Copyright © 2026 TheErsysEnding and is licensed
+under **GNU LGPL-2.1-or-later**, not Apache-2.0. Its full license is included
+at [`../../libs/simple-lib-av/tee_decoder.LICENSE`](../../libs/simple-lib-av/tee_decoder.LICENSE);
+additional attribution and bundled-runtime notices are in
+[`../../NOTICE`](../../NOTICE).
 
 ## Display output and aspect ratios
 
@@ -89,28 +112,25 @@ Treat `account.txt` as a credential: anyone who can read the file may be able to
 
 ## Screens & controls
 
-The app boots into the **home** screen on the **Subscriptions** feed. Searching or opening a channel pushes the
-**search** screen on top; playing pushes the player. **Circle** always backs out one level. Button hints along
-the bottom use the console's own controller glyphs.
+The app boots into the home feed. The sidebar switches between account feeds, PS3-local lists, Trending and Live. Searching or opening a channel pushes a list screen; playing pushes the player. **Circle** opens the sidebar on the home screen and backs out of nested screens. Button hints along the bottom use the console's own controller glyphs.
 
 ### Home / search / channel lists
 
 - **D-pad** — move the highlight. Left / right wrap onto the previous / next row, so you can run through every
   tile with just left and right.
 - **X** — play the highlighted video.
-- **Square** — add the highlighted video to **Watch Later**, or remove it if it's already there. Videos in the
-  list show a "Watch Later" tag on their thumbnail.
+- **Square** — add the highlighted video to the PS3-local **Watch Later** list, or remove it if it's already there.
 - **R3** (right stick click) — **download** the highlighted video (see Downloads below). Live streams can't be
   downloaded.
 - **Triangle** — open the highlighted video's **channel** (that channel's videos only). Inside a channel,
   Triangle instead **subscribes / unsubscribes** from that channel.
-- **Start** — open the keyboard to search. Typing a YouTube link plays it directly.
-- **L1 / R1** (home only) — switch home category.
-- **Select** — on the home screen, open the account panel; in search results, cycle Relevance / Views, and
-  inside a channel, cycle Latest / Popular / Oldest.
+- **Select** — open YouTube search. Typing a YouTube link opens it directly.
+- **Start** — open the home Settings panel.
+- **L1 / R1** (home only) — switch the current home category.
 - **L2** — on SD 4:3 output, cycle the UI scale on the home screen or in a channel listing.
 - **R2** (home only) — refresh the current category.
-- **Circle** — back out (channel → search results → home).
+- **Circle** — open the sidebar; in nested screens, back out one level.
+- **Left** — from the first grid column, open the sidebar.
 - **PS button** — exit.
 
 ### In the player
@@ -119,8 +139,7 @@ the bottom use the console's own controller glyphs.
 - **Left / Right** — seek back / forward in VOD. Holding a direction accelerates the seek; live streams cannot
   be seeked.
 - **X** — pause / resume. Hold to restart a VOD from the beginning; live streams use a normal pause/resume press.
-- **Square** — switch to another available video resolution.
-- **L3** (left-stick click) — cycle available audio tracks when more than one exists.
+- **Square** — skip the active SponsorBlock segment when its category is set to Ask.
 - **L1 / R1** — play the previous / next video. R1 can request the next recommendation when no next item is
   already queued.
 - **L2** — show the full playback information HUD.
@@ -129,13 +148,11 @@ the bottom use the console's own controller glyphs.
 - **R3** (right-stick click) — toggle playback statistics.
 - **Select** — show the video **description** over the video (playback carries on); scroll with up / down, close
   with Select or Circle.
-- **Triangle** — cycle **subtitles** (off by default) through the video's available languages; the current
-  language shows while the seek bar is up.
-- **Start** — open the **chapter** list; up / down select, X jumps there, Start or Circle closes.
+- **Triangle** — toggle **subtitles**.
+- **Start** — open playback Options. Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay are selected there.
 - **Circle** — back to the list.
 
-Community **SponsorBlock** segments are skipped automatically during playback and marked on the seek bar in
-their category colours. Live streams have no seek bar (there's nothing to scrub).
+Community **SponsorBlock** segments are marked on the seek bar in their category colours. Categories set to Ask can be skipped with Square. Live streams have no seek bar (there's nothing to scrub).
 
 ## SD 4:3 interface scaling
 
@@ -166,14 +183,14 @@ official SDK: `/dev_hdd0/tmp/crtube_sdk/`), created with defaults on first launc
 text file you can edit over FTP; file edits apply on the next launch, while Settings-panel changes such as
 overscan are saved immediately. A bad value quietly falls back to its default.
 
-- **`sponsorblock-mode`** — how much SponsorBlock skips:
-  - `off` — never skip anything (segments aren't even fetched).
-  - `ads` (default) — skip paid promotions only: sponsors, self-promo, like / subscribe reminders.
-  - `all` — also skip intros, outros, filler and non-music sections.
-- **`theme`** — which colour theme to start in, naming one of the blocks in `themes.txt` (see below).
-  Defaults to `youtube`.
-- **`overscan`** — uniform output zoom from `-10` to `+10` percent (default `0`). The Settings panel
-  saves changes immediately; the same transform applies to navigation and playback after video crop.
+- **`autoplay`** — `on` (default) plays the next recommendation when a video ends; `off` returns to the library.
+- **`enable-1080p60`** — `off` (default) or `on`; enables experimental TEE Decoder selection for supported H.264 50/60-fps streams.
+- **`subtitle-language`** — preferred language code (default `en`); creator-provided tracks are tried before English auto-generated captions.
+- **`region`** — two-letter country code for content lists (default `US`).
+- **`sponsorblock-mode`** — legacy global mode (`off`, `ads`, `all`) used to migrate older settings files; per-category settings take precedence.
+- **`sponsorblock-sponsor`, `sponsorblock-selfpromo`, `sponsorblock-interaction`, `sponsorblock-intro`, `sponsorblock-outro`, `sponsorblock-music-offtopic`, `sponsorblock-filler`** — each accepts `skip`, `ask` or `keep`.
+- **`theme`** — which colour theme to start in, naming one of the blocks in `themes.txt` (default `youtube`).
+- **`overscan`** — uniform output zoom from `-10` to `+10` percent (default `0`). The Settings panel saves changes immediately.
 
 ## Themes
 
@@ -236,6 +253,18 @@ These client identifiers and YouTube endpoints are implementation details, not s
 - **Live streams** use a different delivery than normal videos (a rolling sequence of segments rather than one
   file), so they take a little longer to start and to exit, and can't be downloaded or seeked. Otherwise they
   play the same, a few seconds behind the live edge.
-- **1080p60** videos aren't played at 60 fps — the console's hardware decoder can't keep up, so those fall back
-  to 720p.
+- **TEE Decoder support** is experimental and limited to H.264 Main/High, 8-bit 4:2:0, progressive, CABAC, one slice per picture, up to 1920×1088. CAVLC, interlaced, multi-slice, 10-bit and 4:2:2 streams are not supported by TEE; Sony VDEC remains the fallback path where supported.
 - The Subscriptions feed is a merged list, so it can't page past the first batch it gathers from each channel.
+
+## Credits and component licenses
+
+- **Original application and shared PS3 libraries:** mohasi / `ps3-dev` contributors (Apache-2.0).
+- **YouTube account sign-in lineage:** vortigauntlet / `yo-player-signin`.
+- **TEE H.264 decoder:** TheErsysEnding, integrated from
+  [TEE-Vanced-PS3](https://github.com/TheErsysEnding/TEE-Vanced-PS3).
+  The decoder is LGPL-2.1-or-later; see
+  [`../../libs/simple-lib-av/tee_decoder.LICENSE`](../../libs/simple-lib-av/tee_decoder.LICENSE)
+  and [`../../NOTICE`](../../NOTICE).
+
+The repository-level Apache-2.0 license applies to the Apache-licensed project
+code; it does not relicense the TEE Decoder or the other third-party components.

@@ -13,14 +13,15 @@ This repository is a fork of [vortigauntlet/yo-player-signin](https://github.com
 ## Highlights
 
 - **Optional YouTube account sign-in:** Sign in using YouTube's device authorization flow. Approve the code on a phone or computer; no browser is required on the PS3.
-- **Personal account feeds:** Browse Recommended, Subscriptions, History, and Watch Later feeds from the signed-in account. Playback itself remains on the anonymous player client.
+- **Account and PS3-local libraries:** Browse Recommended, account Subscriptions / History / Watch Later, and separate PS3-local Subscriptions / History / Watch Later lists. Playback itself remains on the anonymous player client.
 - **Dynamic display layout:** The app follows the PS3's active video output. 16:9 keeps the standard widescreen UI; SD 4:3 activates a dedicated CRT layout, including a two-column video grid and adjusted navigation hints.
 - **Adjustable SD UI scale:** Press **L2** on the home screen or channel view to switch between the supported SD interface scales. The selection is saved separately from the normal settings file.
 - **Improved YouTube playback handling:** VOD and live playback use separate InnerTube client paths. VOD uses the VISIONOS client; live streams use the Android VR client to obtain the DASH segment data required by the live player.
 - **VOD client fallback:** When the primary VISIONOS request explicitly reports an unplayable VOD, the extractor can retry supported alternate clients. Live streams are kept out of this fallback path.
 - **Members-only identification:** Restricted videos can be identified and marked in the video grid instead of being mistaken for ordinary playable videos.
-- **Streaming playback:** H.264 video and AAC audio are streamed and decoded by the PS3; the app does not need to download an entire video before playback.
-- **User features:** Search, channel browsing, subscriptions, Watch Later, watch history, resume playback, subtitles, chapters, SponsorBlock, background downloads, and XMB video export.
+- **Streaming playback:** H.264 video and AAC audio are streamed during playback. The app includes the TEE H.264 decoder as an experimental option for supported 1080p50/60 streams, with Sony VDEC remaining the default.
+- **Navigation and feeds:** A sidebar provides Search, Recommended, account feeds, PS3-local lists, Trending, Live, Account, Settings and Exit. Trending has Gaming, Sports and Podcasts tabs; Live has Popular, Music, Gaming, Sports, Podcasts and News.
+- **Playback and settings:** Search, channel browsing, resume, subtitles, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, region selection, background downloads and XMB video export.
 
 ## What this fork adds
 
@@ -34,27 +35,28 @@ The fork is based on `vortigauntlet/yo-player-signin`. In addition to the accoun
 | Live playback | DASH manifest parsing and rolling segment-sequence playback for live broadcasts |
 | Restricted content | Members-only detection and a visible `*Members only` badge on affected grid items |
 | Diagnostics | Additional boot-stage and playback/extraction logging to make failures easier to diagnose on real hardware |
+| H.264 decoding | Optional TEE Decoder backend for supported 1080p50/60 H.264 streams, with automatic recovery to a lower rendition through Sony VDEC if TEE decoding fails |
 | PSL1GHT build | An open-toolchain PSL1GHT target and build documentation alongside the Sony SDK project |
 
 The original account functionality remains optional. Without signing in, the app continues to provide its anonymous browsing and playback paths.
 
 ## User-facing features
 
-### Account and feeds
-- Sign in or sign out from the home screen using **SELECT**.
-- Enter the device code at the verification URL shown by the app on another device.
-- Browse the account's Recommended, Subscriptions, History, and Watch Later feeds.
+### Navigation, account and feeds
+- Open the sidebar with **CIRCLE**, or press **LEFT** while the grid selection is in its first column.
+- The sidebar separates account Subscriptions / History / Watch Later from the PS3-local versions of those lists. It also links to Recommended, Trending, Live, Account, Settings and Exit.
+- Open **Account** in the sidebar to sign in or sign out. Enter the device code at the verification URL on another device.
 - Access tokens are refreshed when needed. Signing out removes the locally saved token and attempts to revoke it.
-- Account authentication is used for account feeds; video playback remains separate from the signed-in account.
+- Account authorization is used for account feeds; video playback remains separate from the signed-in account.
 
 ### Browsing and playback
-- Browse trending categories, search YouTube, and open channel pages.
+- Browse Trending (Gaming, Sports, Podcasts) and Live (Popular, Music, Gaming, Sports, Podcasts, News), search YouTube, and open channel pages.
 - Sort search results by relevance or view count; sort channel videos by latest, popular, or oldest.
 - Paste or type a YouTube URL into search to open the video directly.
 - Stream H.264 video and AAC audio with hardware decoding.
 - Use pause, seek, volume, subtitles, chapter navigation, description overlay, and autoplay controls.
 - Resume videos from the last saved playback position.
-- Skip community-submitted SponsorBlock segments according to the selected setting.
+- Configure each SponsorBlock category as Skip, Ask or Keep.
 
 ### Personal library and downloads
 - Subscribe to channels and browse their latest uploads.
@@ -80,15 +82,16 @@ in the app take precedence if a screen has a context-specific action.
 |---|---|
 | D-pad | Move the selection through the video grid |
 | **X** | Play the selected video |
-| **Square** | Add the selected video to Watch Later, or remove it if it is already saved |
+| **Square** | Add the selected video to the PS3-local Watch Later list, or remove it if it is already saved |
 | **R3** (right-stick click) | Queue the selected VOD for background download; live streams cannot be downloaded |
 | **Triangle** | Open the selected video's channel; inside a channel listing, subscribe to or unsubscribe from that channel |
-| **START** | Open YouTube search; entering a YouTube URL opens that video directly |
-| **SELECT** | On the home screen, open the account panel; in search results or a channel listing, change the sort order |
+| **SELECT** | Open YouTube search; entering a YouTube URL opens that video directly |
+| **START** | Open the home Settings panel |
+| **CIRCLE** | Open the sidebar; in a nested screen, go back |
+| **LEFT** | From the first grid column, open the sidebar |
 | **L1 / R1** | Switch home categories |
 | **L2** | On SD 4:3 output, cycle the additional UI scale on the home screen or channel listing |
 | **R2** | Refresh the current home category |
-| **CIRCLE** | Go back to the previous screen |
 | **PS button** | Exit the application |
 
 ### Playback
@@ -98,19 +101,18 @@ in the app take precedence if a screen has a context-specific action.
 | **X** | Pause or resume playback. Hold to restart a VOD from the beginning; live streams use a normal pause/resume press |
 | **LEFT / RIGHT** | Seek backward or forward in a VOD; holding a direction accelerates the seek. Live streams do not support seeking |
 | **UP / DOWN** | Decrease or increase the playback volume |
-| **TRIANGLE** | Cycle through available subtitle tracks |
-| **SQUARE** | Switch to another available video resolution |
-| **L3** (left-stick click) | Cycle through available audio tracks when alternatives exist |
+| **TRIANGLE** | Toggle subtitles |
+| **SQUARE** | Skip the currently active SponsorBlock segment when its category is set to Ask |
 | **L1 / R1** | Play the previous / next video. If no next item is already queued, R1 can request the next recommendation |
 | **L2** | Show the full playback information HUD |
 | **R2** | Toggle crop-to-fill mode |
 | **Right Analog Stick** | While crop-to-fill is enabled, move the cropped picture horizontally and vertically to adjust which part of the image is visible |
 | **R3** (right-stick click) | Toggle playback statistics |
 | **SELECT** | Open the video description overlay; use **UP / DOWN** to scroll and **SELECT** or **CIRCLE** to close |
-| **START** | Open the chapter list; use **UP / DOWN** to select a chapter and **X** to jump to it. **START** or **CIRCLE** closes the list |
+| **START** | Open playback Options, including Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay |
 | **CIRCLE** | Return to the video list |
 
-Live streams have no seek bar and cannot be downloaded. The description and chapter overlays temporarily take control of navigation while open.
+Live streams have no seek bar and cannot be downloaded. The description and chapter overlays temporarily take control of navigation while open. Audio tracks, quality and chapters are selected from playback Options; Square is reserved for SponsorBlock Ask actions.
 
 ## Build and installation
 
@@ -127,7 +129,7 @@ For the application architecture, settings, storage files, playback behavior, an
 
 - YouTube changes its internal APIs and client restrictions frequently. Extraction compatibility may require future updates.
 - Live streams use a rolling segment window. They start and exit differently from VOD and do not support normal seeking or background downloading.
-- 1080p60 may fall back to 720p60 because of the PS3's video-decoding performance limits.
+- The TEE Decoder is experimental and opt-in. It supports a defined subset of H.264 (8-bit 4:2:0, progressive, CABAC, one slice per picture, up to 1920×1088); unsupported streams continue through Sony VDEC where possible. If TEE decoding fails during playback, the player attempts to switch to a lower rendition using Sony VDEC.
 - Account feeds require a working network connection and valid Google authorization. Access can be revoked from the Google account security page.
 - The SD scale toggle is intended for SD/CRT output; it is not a general display zoom control.
 
@@ -138,6 +140,7 @@ This project builds on the work of:
 - **mohasi** — original Yo! Player and the `ps3-dev` project, including the PS3 application foundation, shared libraries, rendering, and media playback infrastructure.
 - **vortigauntlet** — the `yo-player-signin` fork and its YouTube account sign-in implementation.
 - **openlewa** — the PSL1GHT Yo! Player port that forms part of the project's toolchain lineage.
+- **TheErsysEnding** — author of the TEE Decoder integrated from [TEE-Vanced-PS3](https://github.com/TheErsysEnding/TEE-Vanced-PS3). The decoder is separately licensed under LGPL-2.1-or-later; see `libs/simple-lib-av/tee_decoder.LICENSE` and `NOTICE`.
 - **PS3 homebrew and PSL1GHT contributors** — the open-source libraries and tools used by the project.
 
 Upstream repositories:
@@ -148,4 +151,4 @@ Upstream repositories:
 
 ## License
 
-See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). The project retains the applicable upstream licensing and third-party notices. Check the individual component notices before redistributing bundled dependencies.
+The repository's original `ps3-dev`-derived code is licensed under Apache-2.0 (`LICENSE`). That license does **not** override component-specific licenses: the integrated TEE Decoder is LGPL-2.1-or-later (`libs/simple-lib-av/tee_decoder.LICENSE`), and its bundled runtime portions retain their own notices. See `NOTICE` before redistributing source or binary packages.

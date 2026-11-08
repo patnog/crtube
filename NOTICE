@@ -12,3 +12,109 @@ their own licenses, which continue to apply to those components:
 
 The Cell SDK under sdk/ is Sony's own material and is not covered by this
 license.
+
+
+TEE Decoder
+Copyright (C) 2026 TheErsysEnding
+Source: https://github.com/TheErsysEnding/TEE-Vanced-PS3
+Location: libs/simple-lib-av/src/tee_decoder/
+Licensed under the GNU Lesser General Public License, version 2.1 or later.
+The full license is provided in libs/simple-lib-av/tee_decoder.LICENSE.
+
+The TEE Decoder is a separate component and is not covered by this repository's
+Apache License 2.0. Its CABAC syntax-element decoding follows the structure of
+FFmpeg's libavcodec/h264_cabac.c, also licensed under LGPL-2.1-or-later. Its
+tables are from the H.264 standard (ITU-T H.264).
+
+The two SPU programs in td_spu_images.c contain small portions of these
+third-party runtimes:
+
+- GCC runtime start-up and end files: GPL-3.0 with the GCC Runtime Library
+  Exception. The exception permits programs compiled with the runtime to be
+  distributed under terms of their choice.
+- PSL1GHT SPU thread library (libsputhread):
+  Copyright (c) 2011 PSL1GHT Development Team.
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+  THE SOFTWARE.
+- newlib runtime portions (exit, atexit and reentrancy data):
+  (1) Red Hat Incorporated:
+      Copyright (c) 1994-2009 Red Hat, Inc. All rights reserved.
+      This copyrighted material is made available to anyone wishing to use,
+      modify, copy, or redistribute it subject to the terms and conditions
+      of the BSD License. This program is distributed in the hope that
+      it will be useful, but WITHOUT ANY WARRANTY expressed or implied,
+      including the implied warranties of MERCHANTABILITY or FITNESS FOR
+      A PARTICULAR PURPOSE. A copy of this license is available at
+      http://www.opensource.org/licenses. Any Red Hat trademarks that are
+      incorporated in the source code or documentation are not subject to
+      the BSD License and may only be used or replicated with the express
+      permission of Red Hat, Inc.
+  (2) University of California, Berkeley:
+      Copyright (c) 1981-2000 The Regents of the University of California.
+      All rights reserved.
+      Redistribution and use in source and binary forms, with or without
+      modification, are permitted provided that the following conditions are met:
+      * Redistributions of source code must retain the above copyright notice,
+        this list of conditions and the following disclaimer.
+      * Redistributions in binary form must reproduce the above copyright notice,
+        this list of conditions and the following disclaimer in the documentation
+        and/or other materials provided with the distribution.
+      * Neither the name of the University nor the names of its contributors
+        may be used to endorse or promote products derived from this software
+        without specific prior written permission.
+      THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+      AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+      IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+      ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+      LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+      CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+      SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+      INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+      CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+      ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+      POSSIBILITY OF SUCH DAMAGE.
+- newlib SPU memset:
+  Copyright (C) 2001, 2006 International Business Machines Corporation,
+  Sony Computer Entertainment, Incorporated, and Toshiba Corporation.
+  All rights reserved.
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+  * Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+  * Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+  * Neither the names of the copyright holders nor their contributors may be
+    used to endorse or promote products derived from this software without
+    specific prior written permission.
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+The TEE Decoder source and its license notices were taken from the project
+linked above. Any modifications to the decoder source in this repository must
+be marked in the modified files as required by LGPL-2.1 section 2(b). The
+decoder is statically linked into simple-lib-av; binary distributors should
+review and satisfy the LGPL-2.1 relinking and source-availability requirements
+for the exact package they distribute.

@@ -1,13 +1,14 @@
 # simple-lib-av
 
 Audio and video playback for PS3 homebrew apps (Sony SDK 4.75). This is where all media code
-lives: the audio mixer and the full H.264/AAC video stack. It uses the PS3's built-in hardware
-decoders, so playback is real-time without pegging the main CPU.
+lives: the audio mixer and the H.264/AAC video stack. Sony's `cellVdec` remains the default H.264
+backend; an optional TEE Decoder backend can decode supported high-frame-rate H.264 streams on
+the PS3's SPEs. The TEE Decoder is a separate LGPL-2.1-or-later component; see `tee_decoder.LICENSE`.
 
 ## What it can play
 
 **Video**
-- H.264 video, 8-bit only, decoded on the PS3's hardware video decoder (cellVdec, spread across 4 SPUs).
+- H.264 video, 8-bit only. Sony `cellVdec` is the default backend; the optional TEE backend supports H.264 Main/High, 8-bit 4:2:0, progressive, CABAC, one slice per picture, up to 1920×1088.
 - AAC audio, decoded on the hardware audio decoder (cellAdec). Video with no audio plays silent.
 - Containers: MKV (Matroska) and MP4. Both plain MP4 and *fragmented* MP4 (the streaming format
   YouTube serves) are handled.
@@ -71,8 +72,7 @@ those as the alloc/free hooks for true zero-copy.
 
 ## Hardware limits
 
-- **Frame rate.** 1080p decodes at roughly 35 fps on the 4 SPUs. 24 fps films play with headroom;
-  1080p50 broadcasts play best-effort and may drop frames.
+- **Frame rate.** Sony `cellVdec` decodes 1080p at roughly 35 fps on the 4 SPUs. The optional TEE backend is designed for supported 1080p50/60 streams; it uses SPE resources and is enabled by the application only when its experimental setting is on. TEE does not support CAVLC/Constrained Baseline, interlaced pictures, multiple slices per picture, 10-bit video or 4:2:2 chroma.
 - **Reference frames (the black-screen trap).** The PS3's decoder can only hold about 4 reference
   frames at 1080p. The library rewrites a stream's `max_num_ref_frames` down to fit where it can. Some
   encodes (e.g. 5-reference-frame anime Blu-ray rips) need more than fit and can't be patched down -
@@ -95,3 +95,12 @@ those as the alloc/free hooks for true zero-copy.
 
 The audio decoders are vendored single-header libraries pulled straight into `audio.c` (not compiled
 separately): `vorbis.h` (stb_vorbis) and `mp3.h` / `flac.h` / `wav.h` (the dr_libs).
+
+## Third-party decoder license
+
+`src/tee_decoder/` contains TheErsysEnding's TEE Decoder, integrated from
+[TEE-Vanced-PS3](https://github.com/TheErsysEnding/TEE-Vanced-PS3). It is
+Copyright © 2026 TheErsysEnding and licensed under GNU LGPL-2.1-or-later.
+The full license text is in [`tee_decoder.LICENSE`](tee_decoder.LICENSE).
+Additional notices for CABAC-derived code and runtime components embedded in
+the SPU images are recorded in the repository root [`NOTICE`](../../NOTICE).

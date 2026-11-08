@@ -1386,7 +1386,9 @@ static int parseLockupItem(const char *block, const char *end, SearchResult *ite
    readField(block, end, "\"thumbnailBadgeViewModel\"", "text",    item->duration, sizeof item->duration);
    readContentEndingWith(block, end, " views", item->views, sizeof item->views);
    readContentEndingWith(block, end, " ago",   item->published, sizeof item->published);
-   item->isLive = 0;
+   const char *livePos = strstr(block, "\"style\":\"LIVE\"");
+   item->isLive = (livePos && livePos < end) || strcmp(item->duration, "LIVE") == 0;
+   if (item->isLive) item->duration[0] = 0;
    return item->title[0] != 0;
 }
 
@@ -1510,6 +1512,35 @@ static int getChannel(const char *channelId, const char *token, SearchResults *o
    if (token) bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, gl, token);
    else       bodyLen = snprintf(body, sizeof body, TRENDING_BODY_FMT, gl, channelId, CHANNEL_VIDEOS_PARAMS);
    return postAndParse(BROWSE_URL, body, bodyLen, out);
+}
+
+// The channel Streams tab includes live, upcoming and archived broadcasts. Keep only the
+// entries carrying YouTube's active LIVE badge so they can be promoted above regular uploads.
+#define CHANNEL_LIVE_PARAMS "EgdzdHJlYW1z8gYECgJ6AA=="
+static int getChannelLive(const char *channelId, SearchResults *out)
+{
+   if (!channelId || !channelId[0] || !out) return -1;
+   const char *gl = getContentRegionCode();
+   char body[512];
+   int bodyLen = snprintf(body, sizeof body, TRENDING_BODY_FMT, gl, channelId, CHANNEL_LIVE_PARAMS);
+   if (bodyLen < 0 || bodyLen >= (int)sizeof body) {
+      memset(out, 0, sizeof *out);
+      return -1;
+   }
+
+   int rc = postAndParse(BROWSE_URL, body, bodyLen, out);
+   if (rc < 0) return rc;
+
+   int kept = 0;
+   for (int i = 0; i < out->count; i++) {
+      if (!out->items[i].isLive) continue;
+      if (kept != i) out->items[kept] = out->items[i];
+      kept++;
+   }
+   out->count = kept;
+   out->continuation[0] = 0;
+   logInfo("[yt] channel live channel=%s active=%d\n", channelId, kept);
+   return 0;
 }
 
 // ---- signed-in account feeds ----
@@ -1839,5 +1870,6 @@ static int fetchLive(LiveCategory category, const char *continuation, SearchResu
 
 const Extractor youtubeExtractor = {
    "youtube", matches, extract, search, fetchTrending, getChannel, fetchAccountFeed,
-   youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly, fetchLive
+   youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly, fetchLive,
+   getChannelLive
 };
