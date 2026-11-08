@@ -1,6 +1,7 @@
 // stream-select - format selection shared by playback and download (see stream-select.h).
 
 #include "stream-select.h"
+#include "settings.h"
 #include "decode-h264.h"
 #include "dbg.h"
 #include <string.h>
@@ -63,7 +64,7 @@ const StreamFormat *pickBestVideo(const StreamInfo *info)
 
 const StreamFormat *pickBestPlaybackVideo(const StreamInfo *info)
 {
-   return pickBestVideoInternal(info, 1);
+   return pickBestVideoInternal(info, getEnable1080p60());
 }
 
 const StreamFormat *pickVideoForProfile(const StreamInfo *info, int profile)

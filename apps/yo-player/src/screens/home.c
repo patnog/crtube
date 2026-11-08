@@ -172,11 +172,11 @@ static int         panelConfirmHint, panelBackHint;
 // Compact settings shell. The selected value is highlighted independently of
 // its row label; font scaling never changes the panel's physical geometry.
 #define SETTINGS_PANEL_W 620
-#define SETTINGS_PANEL_H 440
+#define SETTINGS_PANEL_H 480
 #define SETTINGS_ROW_HEIGHT 46
-#define SETTINGS_ROW_TOP 78
-#define SETTINGS_ROW_STEP 58
-#define SETTINGS_ROW_COUNT 5
+#define SETTINGS_ROW_TOP 70
+#define SETTINGS_ROW_STEP 54
+#define SETTINGS_ROW_COUNT 6
 static Label settingsTitle, settingsLabels[SETTINGS_ROW_COUNT], settingsValues[SETTINGS_ROW_COUNT];
 static ButtonHints settingsHints;
 static Label settingsAutoplayOptions[2];
@@ -831,20 +831,21 @@ static void updateSettingsPanel(void)
       home.settingsSelected = (home.settingsSelected + 1) % SETTINGS_ROW_COUNT;
    if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
        isPadButtonPressed(PAD_BTN_RIGHT)) {
-      if (home.settingsSelected == 0) {
-         int enabled = getAutoplayEnabled();
+      if (home.settingsSelected == 0 || home.settingsSelected == 1) {
+         int enabled = home.settingsSelected == 0 ? getAutoplayEnabled() : getEnable1080p60();
          if (isPadButtonPressed(PAD_BTN_LEFT)) enabled = 0;
          else if (isPadButtonPressed(PAD_BTN_RIGHT)) enabled = 1;
          else enabled = !enabled;
-         setAutoplayEnabled(enabled);
-      } else if (home.settingsSelected == 1) {
-         cycleSdScale();
+         if (home.settingsSelected == 0) setAutoplayEnabled(enabled);
+         else setEnable1080p60(enabled);
       } else if (home.settingsSelected == 2) {
+         cycleSdScale();
+      } else if (home.settingsSelected == 3) {
          int delta = isPadButtonPressed(PAD_BTN_LEFT) ? -1 : 1;
          setOverscanPercent(getOverscanPercent() + delta);
-      } else if (home.settingsSelected == 3 && isPadButtonPressed(PAD_BTN_CROSS)) {
-         openRegionPicker();
       } else if (home.settingsSelected == 4 && isPadButtonPressed(PAD_BTN_CROSS)) {
+         openRegionPicker();
+      } else if (home.settingsSelected == 5 && isPadButtonPressed(PAD_BTN_CROSS)) {
          openSponsorBlockPanel();
       }
    }
@@ -860,11 +861,11 @@ static void drawSettingsPanel(void)
    int overscan = getOverscanPercent();
    if (overscan > 0) snprintf(overscanValue, sizeof overscanValue, "+%d%%", overscan);
    else              snprintf(overscanValue, sizeof overscanValue, "%d%%", overscan);
-   setLabelIfChanged(&settingsValues[1], scaleValue);
-   setLabelIfChanged(&settingsValues[2], overscanValue);
+   setLabelIfChanged(&settingsValues[2], scaleValue);
+   setLabelIfChanged(&settingsValues[3], overscanValue);
    const ContentRegion *region = getContentRegionAt(getContentRegionIndex());
-   setLabelIfChanged(&settingsValues[3], region ? region->name : getContentRegionCode());
-   setLabelIfChanged(&settingsValues[4], "Configure");
+   setLabelIfChanged(&settingsValues[4], region ? region->name : getContentRegionCode());
+   setLabelIfChanged(&settingsValues[5], "Configure");
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
    int x = (home.screenW - panelW) / 2;
@@ -884,10 +885,10 @@ static void drawSettingsPanel(void)
       moveLabel(name, x + 40, getCenteredLabelY(name, rowY, SETTINGS_ROW_HEIGHT));
       drawLabel(name);
 
-      if (i == 0) {
-         // Keep the inactive track dark and draw a restrained halo around
-         // only the active selector instead of highlighting the full switch.
-         int selected = getAutoplayEnabled() ? 1 : 0;
+      if (i == 0 || i == 1) {
+         // Both boolean settings use the same compact OFF/ON switch.
+         int enabled = i == 0 ? getAutoplayEnabled() : getEnable1080p60();
+         int selected = enabled ? 1 : 0;
          int toggleY = rowY + (SETTINGS_ROW_HEIGHT - 36) / 2;
          int selectedX = autoplayX + selected * 66;
          fillGfxRoundedRectangle(autoplayX, toggleY, 132, 36, 8, activeTheme->surface);
@@ -1099,7 +1100,8 @@ static void initHome(void)
    initLabel(&panelFooter, &uiFont, 0, 0, accountTextW, AUTO, 20, activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabel(&settingsTitle, &uiFont, 0, 0, settingsTextW - 48, AUTO, 24, activeTheme->textPrimary, TEXT_NOWRAP, "Settings");
    static const char *settingNames[SETTINGS_ROW_COUNT] = {
-      "Autoplay", "UI Scaling", "Overscan", "Content Region", "SponsorBlock"
+      "Autoplay", "Enable 1080p60 (experimental)", "UI Scaling",
+      "Overscan", "Content Region", "SponsorBlock"
    };
    for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
       initLabel(&settingsLabels[i], &uiFont, 0, 0, settingsTextW - 220, AUTO, 20,

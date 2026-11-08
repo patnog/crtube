@@ -19,6 +19,8 @@ static const char *DEFAULT_SETTINGS =
    "\n"
    "autoplay=on\n"
    "# on = play the next recommendation when a video ends; off = return to the library\n"
+   "enable-1080p60=off\n"
+   "# on = allow experimental TEE 1080p50/60 playback; off = Sony VDEC only, up to 1080p30\n"
    "region=US\n"
    "# country used for YouTube content lists (two-letter gl code); default US\n"
    "\n"
@@ -50,6 +52,7 @@ static const char *SPONSOR_SETTING_KEYS[SPONSOR_CATEGORY_COUNT] = {
    "sponsorblock-intro", "sponsorblock-outro", "sponsorblock-music-offtopic", "sponsorblock-filler"
 };
 static int autoplayEnabled = 1;
+static int enable1080p60 = 0;
 static int overscanPercent = 0;
 
 static const ContentRegion REGIONS[] = {
@@ -120,6 +123,20 @@ void loadSettings(void)
       autoplayEnabled = 1;
       if (rewriteSettingKey(SETTINGS_PATH, "autoplay", "on") != 0)
          logWarn("[settings] couldn't add autoplay default to %s\n", SETTINGS_PATH);
+   }
+
+   const char *experimental1080 = findSettingValue(text, "enable-1080p60");
+   if (experimental1080) {
+      if      (settingValueEquals(experimental1080, "on"))  enable1080p60 = 1;
+      else if (settingValueEquals(experimental1080, "off")) enable1080p60 = 0;
+      else {
+         enable1080p60 = 0;
+         logWarn("[settings] unknown enable-1080p60 value, using off\\n");
+      }
+   } else {
+      enable1080p60 = 0;
+      if (rewriteSettingKey(SETTINGS_PATH, "enable-1080p60", "off") != 0)
+         logWarn("[settings] couldn't add enable-1080p60 default to %s\\n", SETTINGS_PATH);
    }
 
    const char *region = findSettingValue(text, "region");
@@ -228,6 +245,21 @@ int setAutoplayEnabled(int enabled)
    }
    autoplayEnabled = enabled;
    logInfo("[settings] autoplay=%s\n", enabled ? "on" : "off");
+   return 0;
+}
+
+int getEnable1080p60(void) { return enable1080p60; }
+
+int setEnable1080p60(int enabled)
+{
+   enabled = enabled ? 1 : 0;
+   if (enabled == enable1080p60) return 0;
+   if (rewriteSettingKey(SETTINGS_PATH, "enable-1080p60", enabled ? "on" : "off") != 0) {
+      logWarn("[settings] couldn't persist enable-1080p60=%s\n", enabled ? "on" : "off");
+      return -1;
+   }
+   enable1080p60 = enabled;
+   logInfo("[settings] enable-1080p60=%s\n", enabled ? "on" : "off");
    return 0;
 }
 

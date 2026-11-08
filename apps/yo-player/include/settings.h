@@ -25,6 +25,10 @@ int getAutoplayEnabled(void);
 // Persists the value immediately; returns 0 on success, -1 if settings.txt could not be updated.
 int setAutoplayEnabled(int enabled);
 
+// Experimental 1080p50/60 playback through the TEE decoder. Defaults to off.
+int getEnable1080p60(void);
+int setEnable1080p60(int enabled);
+
 // Uniform display overscan in percent (-10..+10). Changes are saved immediately to settings.txt.
 int getOverscanPercent(void);
 int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails
