@@ -15,7 +15,7 @@ This repository is a fork of [vortigauntlet/yo-player-signin](https://github.com
 - **Optional YouTube account sign-in:** Sign in using YouTube's device authorization flow. Approve the code on a phone or computer; no browser is required on the PS3.
 - **Account and PS3-local libraries:** Browse Recommended, account Subscriptions / History / Watch Later, and separate PS3-local Subscriptions / History / Watch Later lists. Playback itself remains on the anonymous player client.
 - **Dynamic display layout:** The app follows the PS3's active video output. 16:9 keeps the standard widescreen UI; SD 4:3 activates a dedicated CRT layout, including a two-column video grid and adjusted navigation hints.
-- **Adjustable SD UI scale:** Press **L2** on the home screen or channel view to switch between the supported SD interface scales. The selection is saved separately from the normal settings file.
+- **Adjustable SD UI scale:** Configure the SD interface scale through **UI Scaling** in the home Settings panel.
 - **Improved YouTube playback handling:** VOD and live playback use separate InnerTube client paths. VOD uses the VISIONOS client; live streams use the Android VR client to obtain the DASH segment data required by the live player.
 - **VOD client fallback:** When the primary VISIONOS request explicitly reports an unplayable VOD, the extractor can retry supported alternate clients. Live streams are kept out of this fallback path.
 - **Members-only identification:** Restricted videos can be identified and marked in the video grid instead of being mistaken for ordinary playable videos.
@@ -29,7 +29,7 @@ The fork is based on `vortigauntlet/yo-player-signin`. In addition to the accoun
 
 | Area | Changes in this fork |
 |---|---|
-| CRT / SD presentation | Dedicated 4:3 SD grid layout, SD-specific navigation hints, and a persistent 1.0x / 1.5x UI scale toggle |
+| CRT / SD presentation | Dedicated 4:3 SD grid layout, SD-specific navigation hints, and configurable UI scaling through the Settings panel |
 | YouTube extraction | VISIONOS-based VOD extraction and a separate Android VR request path for live streams |
 | Playback resilience | A limited alternate-client retry for VODs explicitly rejected by the primary client; live playback is excluded from that retry |
 | Live playback | DASH manifest parsing and rolling segment-sequence playback for live broadcasts |
@@ -67,9 +67,21 @@ The original account functionality remains optional. Without signing in, the app
 
 ### CRT and SD display
 - On SD output, the application uses a layout designed around a 4:3 screen.
-- Press **L2** on the home screen or channel view to cycle the available SD UI scales.
-- The scale choice is persisted in `/dev_hdd0/tmp/yo-player/sd-ui-scale.txt`.
-- The video grid uses a two-column arrangement on 4:3 SD output to preserve readable titles and usable thumbnail sizes.
+- Configure the SD interface scale through **UI Scaling** in the home Settings panel.
+- The video grid uses a two-column arrangement on 4:3 SD output to preserve readable titles and usable thumbnail sizes. In 16:9 it uses three-column to better use the screen space.
+
+## Settings
+
+Open **Settings** from the sidebar or press **START** on the home screen. The menu contains the following application-wide options:
+
+- **UI Scaling** — adjust the interface size. On SD 4:3 output, this controls the CRT-oriented interface scale; change it in Settings rather than with a controller shortcut.
+- **Overscan** — apply a uniform zoom adjustment to compensate for televisions that crop the edges of the image. The value ranges from `-10` to `+10` percent; `0` leaves the output unchanged.
+- **Region** — select the two-letter country code used for regional YouTube content lists (default: `US`).
+- **Autoplay** — enable or disable automatic playback of the next recommended video when the current video ends.
+- **Enable 1080p60 (experimental)** — opt in to the TEE H.264 decoder path for supported 1080p50/60 streams. It is disabled by default; Sony VDEC remains the standard playback path.
+- **SponsorBlock** — configure each supported segment category independently as **Skip**, **Ask** or **Keep**.
+
+The Settings menu controls global preferences. Per-video options such as Quality, Audio, Subtitles, Chapters and Crop to Fill remain in the playback **Options** panel.
 
 ## Controls
 
@@ -86,11 +98,10 @@ in the app take precedence if a screen has a context-specific action.
 | **R3** (right-stick click) | Queue the selected VOD for background download; live streams cannot be downloaded |
 | **Triangle** | Open the selected video's channel; inside a channel listing, subscribe to or unsubscribe from that channel |
 | **SELECT** | Open YouTube search; entering a YouTube URL opens that video directly |
-| **START** | Open the home Settings panel |
+| **START** | Open the home Settings panel; UI Scaling, Overscan, Region and other application preferences are configured there |
 | **CIRCLE** | Open the sidebar; in a nested screen, go back |
 | **LEFT** | From the first grid column, open the sidebar |
 | **L1 / R1** | Switch home categories |
-| **L2** | On SD 4:3 output, cycle the additional UI scale on the home screen or channel listing |
 | **R2** | Refresh the current home category |
 | **PS button** | Exit the application |
 
@@ -131,7 +142,6 @@ For the application architecture, settings, storage files, playback behavior, an
 - Live streams use a rolling segment window. They start and exit differently from VOD and do not support normal seeking or background downloading.
 - The TEE Decoder is experimental and opt-in. It supports a defined subset of H.264 (8-bit 4:2:0, progressive, CABAC, one slice per picture, up to 1920×1088); unsupported streams continue through Sony VDEC where possible. If TEE decoding fails during playback, the player attempts to switch to a lower rendition using Sony VDEC.
 - Account feeds require a working network connection and valid Google authorization. Access can be revoked from the Google account security page.
-- The SD scale toggle is intended for SD/CRT output; it is not a general display zoom control.
 
 ## Credits and upstream
 
