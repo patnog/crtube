@@ -10,6 +10,9 @@
 // one. NULL if none is usable.
 const StreamFormat *pickBestVideo(const StreamInfo *info);
 
+// Playback selector: additionally allows 1080p50/60 only when TEE initializes.
+const StreamFormat *pickBestPlaybackVideo(const StreamInfo *info);
+
 // Best format in a resolution profile: 0 <=480p60, 1 481-720p60, 2 721-1080p30.
 const StreamFormat *pickVideoForProfile(const StreamInfo *info, int profile);
 

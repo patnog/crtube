@@ -32,6 +32,8 @@ void         destroyVideoPlayer(VideoPlayer *player);
 const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height);
 
 int   isVideoPlayerReady(const VideoPlayer *player);
+// True only when a TEE-backed decoder encountered a fatal decode error.
+int   isVideoPlayerTeeFailed(const VideoPlayer *player);
 int   isVideoPlayerUsingSeparateAudio(const VideoPlayer *player);
 int   isVideoPlayerSeparateAudioAlive(const VideoPlayer *player);
 void  setVideoPlayerAudioVolume(VideoPlayer *player, float volume);

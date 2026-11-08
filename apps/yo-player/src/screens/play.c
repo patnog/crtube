@@ -259,6 +259,7 @@ static struct {
    VideoPlayer     *retiringResolutionPlayer;
    volatile int     resolutionSwitchDone;
    int              resolutionSwitchThreadActive, resolutionSwitchWasPaused, resolutionSwitchWasFirstFrameSeen;
+   int              resolutionSwitchTeeRecovery, teeRecoveryAttempted;
    int              resolutionSwitchTarget, resolutionSwitchOldIndex, resolutionSwitchRestored;
    volatile int     resolutionSwitchAborting;
    float            resolutionSwitchPosition;
@@ -524,7 +525,7 @@ static void worker(uint64_t arg)
       if (!found) preferredSubtitleName[0] = 0;
    }
 
-   const StreamFormat *video = pickBestVideo(info);
+   const StreamFormat *video = pickBestPlaybackVideo(info);
    if (!video) { fail("no playable mp4 video"); goto done; }
    for (int profile = 0; profile < 3; profile++) {
       const StreamFormat *candidate = pickVideoForProfile(info, profile);
@@ -996,25 +997,47 @@ static void resolutionSwitchWorker(uint64_t arg)
    if (oldPlayer) destroyVideoPlayer(oldPlayer);
 
    VideoPlayer *replacement = NULL;
-   if (!state.resolutionSwitchAborting)
+   if (!state.resolutionSwitchAborting && state.resolutionSwitchTeeRecovery) {
+      // The old TEE session has already failed and was retired above. Never reopen it.
+      // Try each available lower profile until the original Sony decoder reaches pre-roll.
+      for (int profile = state.resolutionSwitchTarget; profile >= 0 && !replacement; profile--) {
+         if (!state.videoAvailable[profile] ||
+             strcmp(state.videoUrls[profile], state.resolutionSwitchOldVideoUrl) == 0)
+            continue;
+         state.resolutionSwitchTarget = profile;
+         strCopy(state.resolutionSwitchVideoUrl, sizeof state.resolutionSwitchVideoUrl,
+                 state.videoUrls[profile]);
+         logInfo("[tee-recovery] trying Sony fallback profile=%d %dp@%d itag=%d\n",
+                 profile, state.videoHeights[profile], state.videoFps[profile],
+                 state.videoItags[profile]);
+         replacement = openReadyResolutionPlayer(state.resolutionSwitchVideoUrl,
+                                                   state.resolutionSwitchAudioUrl,
+                                                   state.resolutionSwitchPosition);
+      }
+   } else if (!state.resolutionSwitchAborting) {
       replacement = openReadyResolutionPlayer(state.resolutionSwitchVideoUrl,
-                                               state.resolutionSwitchAudioUrl,
-                                               state.resolutionSwitchPosition);
+                                                state.resolutionSwitchAudioUrl,
+                                                state.resolutionSwitchPosition);
+   }
 
-   // If the requested rendition cannot be opened, recover the previous rendition before
-   // reporting completion. This avoids leaving playback blank after a failed manual switch.
-   if (!replacement && !state.resolutionSwitchAborting) {
+   // Manual resolution changes restore the previous rendition on failure. TEE recovery must
+   // never reopen the failed 1080p60 source.
+   if (!replacement && !state.resolutionSwitchAborting && !state.resolutionSwitchTeeRecovery) {
       logWarn("[video-diag] requested resolution failed; reopening previous rendition\n");
       replacement = openReadyResolutionPlayer(state.resolutionSwitchOldVideoUrl,
                                                 state.resolutionSwitchOldAudioUrl,
                                                 state.resolutionSwitchPosition);
       state.resolutionSwitchRestored = replacement != NULL;
    }
-
-   if (!replacement && !state.resolutionSwitchAborting) {
+   if (!replacement && state.resolutionSwitchTeeRecovery) {
+      strCopy(state.message, sizeof state.message, "Video decoder recovery failed");
+      state.stage = STAGE_FAILED;
+   }
+   if (!replacement && !state.resolutionSwitchAborting && !state.resolutionSwitchTeeRecovery) {
       strCopy(state.message, sizeof state.message, "Resolution switch and recovery failed");
       state.stage = STAGE_FAILED;
    }
+
    state.pendingResolutionPlayer = replacement;
    __sync_synchronize();
    state.resolutionSwitchDone = 1;
@@ -1025,16 +1048,17 @@ static int startResolutionSwitch(int target, int automaticFallback)
 {
    if (target < 0 || target >= 3 || !state.videoAvailable[target] ||
        !state.player || state.resolutionSwitchThreadActive || state.audioSwitchThreadActive ||
-       state.seeking || state.isLive) return 0;
+       state.seeking || (state.isLive && automaticFallback != 2)) return 0;
    if (strcmp(state.videoUrls[target], state.videoUrls[state.resolutionIndex]) == 0) return 0;
 
    state.resolutionSwitchTarget = target;
    state.resolutionSwitchOldIndex = state.resolutionIndex;
    state.resolutionSwitchRestored = 0;
    state.resolutionSwitchAborting = 0;
+   state.resolutionSwitchTeeRecovery = (automaticFallback == 2);
    state.resolutionSwitchWasPaused = isVideoPaused(state.player);
    state.resolutionSwitchWasFirstFrameSeen = state.firstFrameSeen;
-   state.resolutionSwitchPosition = getVideoPositionSeconds(state.player);
+   state.resolutionSwitchPosition = state.isLive ? 0.0f : getVideoPositionSeconds(state.player);
    strCopy(state.resolutionSwitchVideoUrl, sizeof state.resolutionSwitchVideoUrl, state.videoUrls[target]);
    strCopy(state.resolutionSwitchOldVideoUrl, sizeof state.resolutionSwitchOldVideoUrl,
            state.videoUrls[state.resolutionIndex]);
@@ -1064,10 +1088,10 @@ static int startResolutionSwitch(int target, int automaticFallback)
       state.retiringResolutionPlayer = NULL;
       if (!state.resolutionSwitchWasPaused && state.player) setVideoPaused(state.player, 0);
       state.firstFrameSeen = state.resolutionSwitchWasFirstFrameSeen;
-      showToast("Resolution switch could not start");
+      if (automaticFallback != 2) showToast("Resolution switch could not start");
       return 0;
    }
-   {
+   if (automaticFallback != 2) {
       char notice[96];
       if (state.videoFps[target] > 0) {
          if (automaticFallback)
@@ -1553,11 +1577,31 @@ static void updatePlay(void)
       }
    }
 
+   // A fatal TEE decode error triggers an invisible handoff to a lower rendition.
+   // Keep the status label on "Loading..." and never retry the failed TEE URL.
+   if (state.stage == STAGE_PLAYING && state.player &&
+       !state.teeRecoveryAttempted && !state.resolutionSwitchThreadActive &&
+       !state.audioSwitchThreadActive && !state.seeking &&
+       isVideoPlayerTeeFailed(state.player)) {
+      state.teeRecoveryAttempted = 1;
+      int lowerProfile = findLowerResolutionProfile();
+      if (lowerProfile >= 0) {
+         if (!startResolutionSwitch(lowerProfile, 2)) {
+            strCopy(state.message, sizeof state.message, "Video decoder recovery could not start");
+            state.stage = STAGE_FAILED;
+         }
+      } else {
+         strCopy(state.message, sizeof state.message, "No compatible fallback video quality");
+         state.stage = STAGE_FAILED;
+      }
+   }
+
    // Commit a resolution change only after its replacement player has reached a decoded pre-roll.
    if (state.resolutionSwitchDone && state.resolutionSwitchThreadActive) {
       joinThread(state.resolutionSwitchTid);
       state.resolutionSwitchThreadActive = 0;
       if (state.pendingResolutionPlayer) {
+         int teeRecovery = state.resolutionSwitchTeeRecovery;
          state.player = state.pendingResolutionPlayer;
          state.pendingResolutionPlayer = NULL;
          if (state.resolutionSwitchRestored) {
@@ -1581,18 +1625,23 @@ static void updatePlay(void)
          state.lastFrame = NULL;
          state.framesThisSecond = state.measuredFps = 0;
          state.message[0] = 0;
-         if (state.resolutionSwitchRestored) {
-            showToast("Resolution unavailable; previous stream restored");
-         } else {
-            char notice[64];
-            if (state.vidFps > 0)
-               snprintf(notice, sizeof notice, "Video: %dp @ %d FPS", state.vidH, state.vidFps);
-            else
-               snprintf(notice, sizeof notice, "Video: %dp", state.vidH);
-            showToast(notice);
+         if (!teeRecovery) {
+            if (state.resolutionSwitchRestored) {
+               showToast("Resolution unavailable; previous stream restored");
+            } else {
+               char notice[64];
+               if (state.vidFps > 0)
+                  snprintf(notice, sizeof notice, "Video: %dp @ %d FPS", state.vidH, state.vidFps);
+               else
+                  snprintf(notice, sizeof notice, "Video: %dp", state.vidH);
+               showToast(notice);
+            }
          }
+         state.resolutionSwitchTeeRecovery = 0;
       } else {
-         showToast("Resolution switch and recovery failed");
+         if (!state.resolutionSwitchTeeRecovery)
+            showToast("Resolution switch and recovery failed");
+         state.resolutionSwitchTeeRecovery = 0;
       }
    }
 
@@ -1746,7 +1795,8 @@ static void updatePlay(void)
    // status text: the failure reason, or "Loading..." until playback. setLabelText skips unchanged
    // text, so calling it each frame only rasterises on a real change.
    if (state.audioSwitchThreadActive) setLabelText(&statusLabel, state.message[0] ? state.message : "Loading audio...");
-   else if (state.resolutionSwitchThreadActive) setLabelText(&statusLabel, "Changing resolution...");
+   else if (state.resolutionSwitchThreadActive)
+      setLabelText(&statusLabel, state.resolutionSwitchTeeRecovery ? "Loading..." : "Changing resolution...");
    else if (state.stage == STAGE_FAILED) setLabelText(&statusLabel, state.message);
    else if (state.stage != STAGE_PLAYING) setLabelText(&statusLabel, state.message[0] ? state.message : "Loading...");
 }

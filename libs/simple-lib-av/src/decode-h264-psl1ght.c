@@ -1,6 +1,7 @@
 // Native PSL1GHT wrapper around GameOS VDEC H.264.
 
 #include "decode-h264.h"
+#include "decode-h264-tee.h"
 #include "thread.h"
 #include "dbg.h"
 
@@ -21,7 +22,12 @@
 #define VDEC_SPU_PRIORITY 100
 #define VDEC_PPU_STACK_SIZE 0x40000
 
+#define H264_BACKEND_VDEC 0
+#define H264_BACKEND_TEE  1
+
 struct H264Decoder {
+   int backend;                 // 0 = native PSL1GHT VDEC, 1 = TEE Decoder
+   H264TeeBackend *tee;
    u32 handle;
    void *workMemory;
    size_t workMemorySize;
@@ -163,9 +169,41 @@ fail:
    return NULL;
 }
 
+H264Decoder *createH264DecoderForStream(int width, int height, int level,
+                                        int maxRefFrames, int fps)
+{
+   // TEE Decoder is reserved for progressive 1080p-class H.264 at 50/60 fps.
+   // Lower resolutions and lower frame rates retain the existing Sony path.
+   if (fps >= 50 && width >= 1920 && height >= 1000 &&
+       width <= 1920 && height <= 1088) {
+      H264Decoder *decoder = (H264Decoder *)calloc(1, sizeof *decoder);
+      char error[200];
+      if (!decoder) return NULL;
+      decoder->backend = H264_BACKEND_TEE;
+      decoder->width = width;
+      decoder->height = height;
+      decoder->tee = openH264TeeBackend(width, height, error, sizeof(error));
+      if (!decoder->tee) {
+         logWarn("[decode-h264] TEE backend unavailable for %dx%d@%d: %s\n",
+                 width, height, fps, error[0] ? error : "initialization failed");
+         free(decoder);
+         return NULL;
+      }
+      logInfo("[decode-h264] selected TEE backend for %dx%d@%d\n", width, height, fps);
+      return decoder;
+   }
+
+   return createH264Decoder(width, height, level, maxRefFrames);
+}
+
+int isH264DecoderTee(const H264Decoder *decoder)
+{
+   return decoder && decoder->backend == H264_BACKEND_TEE;
+}
+
 void setH264DecoderAlternateSkip(H264Decoder *decoder, int enabled)
 {
-   if (!decoder) return;
+   if (!decoder || decoder->backend == H264_BACKEND_TEE) return;
    decoder->alternateSkipEnabled = enabled != 0;
    if (decoder->alternateSkipEnabled)
       logInfo("[decode-h264] alternating skip-non-reference mode enabled\n");
@@ -173,7 +211,10 @@ void setH264DecoderAlternateSkip(H264Decoder *decoder, int enabled)
 
 int decodeAuH264(H264Decoder *decoder, const uint8_t *data, int size, uint64_t pts)
 {
-   if (!decoder || decoder->errored || !data || size <= 0) return -1;
+   if (!decoder || !data || size <= 0) return -1;
+   if (decoder->backend == H264_BACKEND_TEE)
+      return feedH264TeeBackend(decoder->tee, data, size, pts);
+   if (decoder->errored) return -1;
 
    // PSL1GHT's public VDEC binding is known to accept microsecond timestamps.
    uint64_t ptsUs = pts / 1000ull;
@@ -201,7 +242,10 @@ int decodeAuH264(H264Decoder *decoder, const uint8_t *data, int size, uint64_t p
 
 int getAuBacklogH264(const H264Decoder *decoder)
 {
-   return decoder ? decoder->auFedCount - decoder->auDoneCount : 0;
+   if (!decoder) return 0;
+   if (decoder->backend == H264_BACKEND_TEE)
+      return getH264TeeBackendBacklog(decoder->tee);
+   return decoder->auFedCount - decoder->auDoneCount;
 }
 
 static void discardReportedPictures(H264Decoder *decoder,
@@ -219,7 +263,10 @@ static void discardReportedPictures(H264Decoder *decoder,
 
 int resetH264Decoder(H264Decoder *decoder)
 {
-   if (!decoder || !decoder->handle) return -1;
+   if (!decoder) return -1;
+   if (decoder->backend == H264_BACKEND_TEE)
+      return flushH264TeeBackend(decoder->tee);
+   if (!decoder->handle) return -1;
    decoder->seqDone = 0;
 
    s32 result = 0;
@@ -254,7 +301,10 @@ int resetH264Decoder(H264Decoder *decoder)
 int getFrameH264(H264Decoder *decoder, void *yuvOut, int *outWidth,
                  int *outHeight, uint64_t *outPts)
 {
-   if (!decoder || decoder->errored) return -1;
+   if (!decoder) return -1;
+   if (decoder->backend == H264_BACKEND_TEE)
+      return getH264TeeBackendFrame(decoder->tee, yuvOut, outWidth, outHeight, outPts);
+   if (decoder->errored) return -1;
    if (decoder->picPending <= 0) return 0;
 
    u32 pictureAddress = 0;
@@ -302,12 +352,17 @@ int getFrameH264(H264Decoder *decoder, void *yuvOut, int *outWidth,
 
 uint64_t getDecoderReadyUs(const H264Decoder *decoder)
 {
-   return decoder ? decoder->lastReadyUs : 0;
+   return decoder && decoder->backend != H264_BACKEND_TEE ? decoder->lastReadyUs : 0;
 }
 
 void destroyH264Decoder(H264Decoder *decoder)
 {
    if (!decoder) return;
+   if (decoder->backend == H264_BACKEND_TEE) {
+      closeH264TeeBackend(decoder->tee);
+      free(decoder);
+      return;
+   }
    if (decoder->handle) {
       (void)vdecEndSequence(decoder->handle);
       (void)vdecClose(decoder->handle);

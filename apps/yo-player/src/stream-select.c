@@ -1,26 +1,30 @@
 // stream-select - format selection shared by playback and download (see stream-select.h).
 
 #include "stream-select.h"
+#include "decode-h264.h"
 #include "dbg.h"
 #include <string.h>
 
-// what the PS3 H.264 decoder can keep up with: 1080p at <=30 fps, or 720p at <=60 fps (fewer pixels/sec
-// than 1080p30). 1080p60 (itag 298/299) exceeds it and is skipped, falling to 720p60.
-static int decodableVideo(const StreamFormat *format)
+// Sony VDEC remains limited to 1080p30 / 720p60. Only route 1080p50/60
+// candidates into the selector when the separate TEE backend passes its
+// one-time runtime initialization probe.
+static int decodableVideo(const StreamFormat *format, int allowTee)
 {
    if (format->height <= 0 || format->fps <= 0 || format->fps > 60) return 0;
    if (format->height <= 720) return 1;
-   return format->height <= 1080 && format->fps <= 30;
+   if (format->height <= 1080 && format->fps <= 30) return 1;
+   return format->width >= 1920 && format->height == 1080 &&
+          format->fps >= 50 && allowTee && isH264TeeAvailable();
 }
 
-const StreamFormat *pickBestVideo(const StreamInfo *info)
+static const StreamFormat *pickBestVideoInternal(const StreamInfo *info, int allowTee)
 {
    const StreamFormat *best = NULL;
    for (int i = 0; i < info->formatCount; i++) {
       const StreamFormat *format = &info->formats[i];
       if (!format->hasVideo || format->needsCipher || !format->url[0]) continue;
       if (strcmp(format->container, "mp4") != 0) continue;   // mp4 == avc1 for these itags
-      if (!decodableVideo(format)) continue;
+      if (!decodableVideo(format, allowTee)) continue;
       if (!best || format->height > best->height || (format->height == best->height && format->fps > best->fps))
          best = format;
    }
@@ -36,7 +40,7 @@ const StreamFormat *pickBestVideo(const StreamInfo *info)
             if (f->needsCipher) reason = "cipher";
             else if (!f->url[0]) reason = "no-url";
             else if (strcmp(f->container, "mp4") != 0) reason = "container";
-            else if (!decodableVideo(f)) reason = "resolution-fps";
+            else if (!decodableVideo(f, allowTee)) reason = "resolution-fps";
             else reason = "eligible-check-selector";
          } else if (f->hasAudio) {
             reason = f->needsCipher ? "audio-cipher" : (!f->url[0] ? "audio-no-url" : "audio-only");
@@ -50,6 +54,16 @@ const StreamFormat *pickBestVideo(const StreamInfo *info)
       logInfo("[yt] video selector chose itag=%d %dx%d fps=%d\n", best->itag, best->width, best->height, best->fps);
    }
    return best;
+}
+
+const StreamFormat *pickBestVideo(const StreamInfo *info)
+{
+   return pickBestVideoInternal(info, 0);
+}
+
+const StreamFormat *pickBestPlaybackVideo(const StreamInfo *info)
+{
+   return pickBestVideoInternal(info, 1);
 }
 
 const StreamFormat *pickVideoForProfile(const StreamInfo *info, int profile)

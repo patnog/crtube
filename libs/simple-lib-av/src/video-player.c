@@ -53,6 +53,7 @@ struct VideoPlayer {
    int              threadActive;
    volatile int     running;      // decode thread runs while set
    volatile int     ended;        // demux hit end of stream
+   volatile int     teeFailed;    // TEE backend returned a fatal decode error
 
    // audio pipeline (absent for files without an AAC track: video plays silent)
    AacDecoder      *aacDecoder;
@@ -104,6 +105,25 @@ static int shouldAlternateSkipForStream(const VideoPlayer *player)
    uint64_t fps = 1000000000ull / player->demuxer.frameDurationNs;
    uint64_t pixelsPerSecond = (uint64_t)player->allocW * (uint64_t)player->allocH * fps;
    return fps > 31 && pixelsPerSecond >= 75000000ull;
+}
+
+static int getStreamFps(const VideoPlayer *player)
+{
+   return player && player->demuxer.frameDurationNs
+      ? (int)(1000000000ull / player->demuxer.frameDurationNs) : 0;
+}
+
+static void logDecoderForStream(const VideoPlayer *player)
+{
+   uint64_t fpsMilli = player && player->demuxer.frameDurationNs
+      ? 1000000000000ull / player->demuxer.frameDurationNs : 0;
+   int decoderFps = getStreamFps(player);
+
+   logInfo("[video-player] decoder=%s stream=%dx%d coded=%dx%d fps=%llu.%03llu decoderFps=%d\n",
+           isH264DecoderTee(player->decoder) ? "TEE" : "Sony VDEC",
+           player->demuxer.width, player->demuxer.height,
+           player->allocW, player->allocH,
+           fpsMilli / 1000ull, fpsMilli % 1000ull, decoderFps);
 }
 
 static void configureDecoderForStream(VideoPlayer *player)
@@ -193,8 +213,11 @@ static void performSeek(VideoPlayer *player)
    if (!player->decoder || resetH264Decoder(player->decoder) != 0) {
       logWarn("[video-player] decoder reset failed, recreating decoder\n");
       destroyH264Decoder(player->decoder);
-      player->decoder = createH264Decoder(player->allocW, player->allocH, player->demuxer.level, player->demuxer.h264.maxRefFrames);
-      if (player->decoder) configureDecoderForStream(player);
+      player->decoder = createH264DecoderForStream(player->allocW, player->allocH, player->demuxer.level, player->demuxer.h264.maxRefFrames, getStreamFps(player));
+      if (player->decoder) {
+         configureDecoderForStream(player);
+         logDecoderForStream(player);
+      }
    }
    player->hasPendingAu = 0;
    // land on the fragment keyframe covering the target - or, for a sponsor skip, the next keyframe at/after it
@@ -266,6 +289,8 @@ static void decodeThread(uint64_t arg)
          unlock(&player->lock);
       } else {
          player->slots[slot].state = SLOT_EMPTY;
+         if (got < 0 && isH264DecoderTee(player->decoder))
+            player->teeFailed = 1;
          if (player->seekRequestNs < 0) player->ended = 1;
          unlock(&player->lock);
          // idle at end of stream (or after a hard error) until a seek restarts decode
@@ -496,9 +521,10 @@ VideoPlayer *createVideoPlayerSplit(const char *videoPath, const char *audioPath
       player->allocW = roundUp16(player->demuxer.width);
       player->allocH = roundUp16(player->demuxer.height);
    }
-   player->decoder = createH264Decoder(player->allocW, player->allocH, player->demuxer.level, player->demuxer.h264.maxRefFrames);
+   player->decoder = createH264DecoderForStream(player->allocW, player->allocH, player->demuxer.level, player->demuxer.h264.maxRefFrames, getStreamFps(player));
    if (!player->decoder) goto fail;
    configureDecoderForStream(player);
+   logDecoderForStream(player);
 
    // YUV 4:2:0 planar frames; cellVdecGetPicture requires 128-byte alignment, size a multiple of 128
    size_t frameBytes = ((size_t)player->allocW * player->allocH * 3 / 2 + 127) & ~(size_t)127;
@@ -713,6 +739,10 @@ int replaceVideoPlayerAudio(VideoPlayer *player, const char *audioPath, float po
    pauseAudioPcmFeedSlot(player->audioFeedSlot, player->paused);
    logInfo("[audio-diag] audio-only replacement active slot=%d paused=%d\n", player->audioFeedSlot, player->paused);
    return 0;
+}
+
+int isVideoPlayerTeeFailed(const VideoPlayer *player) {
+    return player && player->teeFailed;
 }
 
 int isVideoPlayerReady(const VideoPlayer *player) {

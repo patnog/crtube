@@ -21,6 +21,18 @@ typedef struct H264Decoder H264Decoder;
 // buffers (+1) so high-reference streams don't overflow the level's default pool. NULL on failure.
 H264Decoder *createH264Decoder(int width, int height, int level, int maxRefFrames);
 
+// Selects the TEE backend only for 1920x1080-class streams at 50/60 fps.
+// Returns NULL if that TEE backend cannot initialize; it never routes such a
+// stream to the native Sony VDEC backend.
+H264Decoder *createH264DecoderForStream(int width, int height, int level,
+                                        int maxRefFrames, int fps);
+
+// Returns non-zero when this decoder instance is using the TEE backend.
+int isH264DecoderTee(const H264Decoder *decoder);
+
+// Performs a one-time TEE initialization probe; cached for format selection.
+int isH264TeeAvailable(void);
+
 // For high pixel-rate streams, alternate normal and skip-non-reference decoding on successive
 // access units. This keeps media time moving on the PS3's ~35 fps 1080p decoder; it does not
 // produce 60 decoded pictures per second. Set before feeding begins.
