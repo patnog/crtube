@@ -1559,7 +1559,285 @@ static int fetchAccountFeed(AccountFeed feed, const char *continuation, SearchRe
    return 0;
 }
 
+
+// ---- Live feeds ----
+
+#define LIVE_BROWSE_ID     "UC4R8DWoMoI7CAwX8_LjQHig"
+#define LIVE_SEARCH_PARAMS "EgJAAQ=="
+#define LIVE_SESSION_CAP   96
+
+typedef enum { LIVE_KIND_BROWSE, LIVE_KIND_SEARCH } LiveKind;
+
+static const struct {
+   LiveKind kind;
+   const char *name;
+   const char *idOrQuery;
+   const char *params;
+   const char *fallbackQuery;
+   int fallbackBelow;
+} LIVE_FEEDS[LIVE_COUNT] = {
+   { LIVE_KIND_BROWSE, "popular",  LIVE_BROWSE_ID, "EgdsaXZldGFikgEDCKEK", "live",   1 },
+   { LIVE_KIND_SEARCH, "music",    "music",        LIVE_SEARCH_PARAMS,     NULL,     0 },
+   { LIVE_KIND_BROWSE, "gaming",   LIVE_BROWSE_ID, "EgdsaXZldGFikgEDCJ8K", "gaming", 1 },
+   { LIVE_KIND_BROWSE, "sports",   LIVE_BROWSE_ID, "EgdsaXZldGFikgEDCKAK", "sports", 1 },
+   { LIVE_KIND_SEARCH, "podcasts", "podcast",      LIVE_SEARCH_PARAMS,     NULL,     0 },
+   { LIVE_KIND_BROWSE, "news",     LIVE_BROWSE_ID, "EgdsaXZldGFikgEDCKUK", NULL,     6 },
+};
+
+static const struct { const char *codes, *word; } LIVE_NEWS_WORDS[] = {
+   { "DE AT CH", "nachrichten" },
+   { "FR",       "actualit\xc3\xa9" "s" },
+   { "IT",       "notizie" },
+   { "ES MX",    "noticias" },
+   { "PT BR",    "not\xc3\xad" "cias" },
+   { "NL BE",    "nieuws" },
+   { "PL",       "wiadomo\xc5\x9b" "ci" },
+   { "CZ",       "zpr\xc3\xa1" "vy" },
+   { "TR",       "haber" },
+   { "RU",       "\xd0\xbd\xd0\xbe\xd0\xb2\xd0\xbe\xd1\x81\xd1\x82\xd0\xb8" },
+   { "UA BG",    "\xd0\xbd\xd0\xbe\xd0\xb2\xd0\xb8\xd0\xbd\xd0\xb8" },
+   { "RS",       "\xd0\xb2\xd0\xb5\xd1\x81\xd1\x82\xd0\xb8" },
+   { "HR",       "vijesti" },
+   { "GR",       "\xce\xb5\xce\xb9\xce\xb4\xce\xae\xcf\x83\xce\xb5\xce\xb9\xcf\x82" },
+   { "SE NO",    "nyheter" },
+   { "DK",       "nyheder" },
+   { "FI",       "uutiset" },
+   { "HU",       "h\xc3\xad" "rek" },
+   { "RO",       "\xc8\x99" "tiri" },
+   { "JP",       "\xe3\x83\x8b\xe3\x83\xa5\xe3\x83\xbc\xe3\x82\xb9" },
+   { "KR",       "\xeb\x89\xb4\xec\x8a\xa4" },
+};
+
+static const char *liveNewsWord(const char *gl)
+{
+   for (unsigned i = 0; i < sizeof LIVE_NEWS_WORDS / sizeof LIVE_NEWS_WORDS[0]; i++) {
+      const char *code = LIVE_NEWS_WORDS[i].codes;
+      while (code[0] && code[1]) {
+         if (code[0] == gl[0] && code[1] == gl[1]) return LIVE_NEWS_WORDS[i].word;
+         code += code[2] ? 3 : 2;
+      }
+   }
+   return "news";
+}
+
+static int isLiveSessionChar(char c)
+{
+   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+          (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+          c == '+' || c == '/' || c == '=';
+}
+
+static int isLiveSessionToken(const char *text)
+{
+   int length = 0;
+   while (isLiveSessionChar(text[length])) length++;
+   return length > 0 && text[length] == 0;
+}
+
+static void captureLiveSession(const char *resp, const char *end, char *out, int cap)
+{
+   char raw[128] = "";
+   out[0] = 0;
+   if (!jsonString(resp, end, "visitorData", raw, sizeof raw) ||
+       (int)strlen(raw) >= (int)sizeof raw - 1) return;
+   for (const char *c = raw; *c; c++)
+      if (!isLiveSessionChar(*c) && *c != '%') return;
+   if (urlDecode(raw, out, cap) < 0 ||
+       (int)strlen(out) >= cap - 1 || !isLiveSessionToken(out))
+      out[0] = 0;
+}
+
+// Live shelves need to echo the visitor session returned by YouTube. Search-style
+// feeds use the same parser but do not need that header. append preserves shelf
+// items when a thin shelf is topped up by a fallback search.
+static int postAndParseLive(const char *url, const char *body, int bodyLen,
+                            const char *visitorId, char *replyVisitor, int replyVisitorCap,
+                            int append, SearchResults *out)
+{
+   if (!append) memset(out, 0, sizeof *out);
+   if (replyVisitor && replyVisitorCap > 0) replyVisitor[0] = 0;
+
+   char *resp = malloc(RESP_CAP);
+   if (!resp) return -1;
+
+   HttpHeader headers[7] = {
+      { "Content-Type", "application/json" },
+      { "User-Agent", WEB_UA },
+      { "X-YouTube-Client-Name", "1" },
+      { "X-YouTube-Client-Version", WEB_VERSION },
+      { "Origin", "https://www.youtube.com" },
+      { "Accept-Encoding", "identity" },
+      { NULL, NULL },
+   };
+   int headerCount = 6;
+   if (visitorId && visitorId[0]) {
+      headers[6].name = "X-Goog-Visitor-Id";
+      headers[6].value = visitorId;
+      headerCount = 7;
+   }
+
+   int respLen = 0, status = 0;
+   int rc = fetchHttp("POST", url, headers, headerCount, body, bodyLen,
+                      resp, RESP_CAP, &respLen, &status);
+   if (rc < 0 || status != 200) {
+      free(resp);
+      return rc < 0 ? rc : -status;
+   }
+
+   if (append) out->continuation[0] = 0;
+   parseVideoResults(resp, respLen, out);
+   if (replyVisitor && replyVisitorCap > 0)
+      captureLiveSession(resp, resp + respLen, replyVisitor, replyVisitorCap);
+   free(resp);
+   return 0;
+}
+
+static int wrapLiveToken(char *token, int cap, const char *session)
+{
+   int tokenLength = (int)strlen(token);
+   int sessionLength = session ? (int)strlen(session) : 0;
+   int prefix = session ? 3 + sessionLength : 2;
+   if (strchr(token, '|') || tokenLength + prefix >= cap) {
+      token[0] = 0;
+      return -1;
+   }
+   memmove(token + prefix, token, tokenLength + 1);
+   token[0] = session ? 'b' : 's';
+   token[1] = '|';
+   if (session) {
+      memcpy(token + 2, session, sessionLength);
+      token[2 + sessionLength] = '|';
+   }
+   return 0;
+}
+
+static const char *splitLiveToken(const char *continuation, int *browse, char *session, int cap)
+{
+   session[0] = 0;
+   if (continuation[0] == 's' && continuation[1] == '|') {
+      *browse = 0;
+      return continuation[2] ? continuation + 2 : NULL;
+   }
+   if (continuation[0] != 'b' || continuation[1] != '|') return NULL;
+
+   const char *start = continuation + 2;
+   const char *bar = strchr(start, '|');
+   int length = bar ? (int)(bar - start) : 0;
+   if (length <= 0 || length >= cap || !bar[1]) return NULL;
+   memcpy(session, start, length);
+   session[length] = 0;
+   if (!isLiveSessionToken(session)) {
+      session[0] = 0;
+      return NULL;
+   }
+   *browse = 1;
+   return bar + 1;
+}
+
+static int keepLiveOnly(SearchResults *out, int from)
+{
+   int kept = from;
+   for (int i = from; i < out->count; i++) {
+      if (!out->items[i].isLive) continue;
+      if (kept != i) out->items[kept] = out->items[i];
+      kept++;
+   }
+   out->count = kept;
+   return kept - from;
+}
+
+static int fetchLive(LiveCategory category, const char *continuation, SearchResults *out, int (*stopped)(void))
+{
+   if (category < 0 || category >= LIVE_COUNT) {
+      memset(out, 0, sizeof *out);
+      return -1;
+   }
+
+   const char *gl = getContentRegionCode();
+   const char *name = LIVE_FEEDS[category].name;
+   char body[MAX_CONTINUATION + 512];
+   char sent[LIVE_SESSION_CAP] = "";
+   char reply[LIVE_SESSION_CAP] = "";
+   char escaped[256];
+   int browse = LIVE_FEEDS[category].kind == LIVE_KIND_BROWSE;
+   int bodyLen;
+
+   if (!continuation) {
+      jsonEscape(LIVE_FEEDS[category].idOrQuery, escaped, sizeof escaped);
+      if (browse)
+         bodyLen = snprintf(body, sizeof body, TRENDING_BODY_FMT, gl, escaped, LIVE_FEEDS[category].params);
+      else
+         bodyLen = snprintf(body, sizeof body, SEARCH_BODY_FMT, gl, escaped, LIVE_FEEDS[category].params);
+   } else {
+      const char *token = splitLiveToken(continuation, &browse, sent, sizeof sent);
+      if (!token) {
+         logError("[yt] live %s: invalid continuation token\n", name);
+         memset(out, 0, sizeof *out);
+         return 0;
+      }
+      bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, gl, token);
+   }
+   if (bodyLen < 0 || bodyLen >= (int)sizeof body) {
+      memset(out, 0, sizeof *out);
+      return -1;
+   }
+
+   int rc = postAndParseLive(browse ? BROWSE_URL : SEARCH_URL, body, bodyLen,
+                             continuation && browse ? sent : NULL,
+                             browse ? reply : NULL, sizeof reply, 0, out);
+   int fallbackBelow = continuation ? 0 : LIVE_FEEDS[category].fallbackBelow;
+   if (rc < 0 && (fallbackBelow == 0 || rc > -100)) {
+      logError("[yt] live %s %s failed rc=%d\n", name, continuation ? "next page" : "page 1", rc);
+      return rc;
+   }
+
+   char note[128] = "";
+   if (rc < 0) snprintf(note, sizeof note, ", shelf HTTP %d", -rc);
+   int parsed = out->count;
+   int live = keepLiveOnly(out, 0);
+   int tokenIsBrowse = browse;
+
+   if (live < fallbackBelow) {
+      const char *word = LIVE_FEEDS[category].fallbackQuery
+                       ? LIVE_FEEDS[category].fallbackQuery : liveNewsWord(gl);
+      char fallbackQuery[256];
+      jsonEscape(word, fallbackQuery, sizeof fallbackQuery);
+      int noted = (int)strlen(note);
+      bodyLen = snprintf(body, sizeof body, SEARCH_BODY_FMT, gl, fallbackQuery, LIVE_SEARCH_PARAMS);
+      if (stopped && stopped()) {
+         snprintf(note + noted, sizeof note - noted, ", stopped before fallback search");
+      } else if (bodyLen >= 0 && bodyLen < (int)sizeof body) {
+         int before = out->count;
+         int fallbackRc = postAndParseLive(SEARCH_URL, body, bodyLen, NULL, NULL, 0, 1, out);
+         if (fallbackRc == 0) {
+            int added = keepLiveOnly(out, before);
+            snprintf(note + noted, sizeof note - noted, ", fallback \"%s\": +%d live", word, added);
+            tokenIsBrowse = 0;
+            rc = 0;
+         } else {
+            snprintf(note + noted, sizeof note - noted, ", fallback \"%s\" failed rc=%d", word, fallbackRc);
+         }
+      }
+      if (rc < 0) {
+         logError("[yt] live %s page 1 failed%s\n", name, note);
+         return rc;
+      }
+   }
+
+   const char *session = reply[0] ? reply : sent;
+   if (tokenIsBrowse && !session[0]) out->continuation[0] = 0;
+   int tooLong = out->continuation[0] &&
+      wrapLiveToken(out->continuation, sizeof out->continuation, tokenIsBrowse ? session : NULL) != 0;
+
+   logInfo("[yt] live %s gl=%s %s: parsed %d, live %d%s, next=%d%s%s\n",
+           name, gl, continuation ? "next page" : "page 1", parsed, live, note,
+           out->continuation[0] ? 1 : 0,
+           tokenIsBrowse ? (session[0] ? ", session=1" : ", session=0") : "",
+           tooLong ? ", token too long" : "");
+   return 0;
+}
+
 const Extractor youtubeExtractor = {
    "youtube", matches, extract, search, fetchTrending, getChannel, fetchAccountFeed,
-   youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly
+   youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly, fetchLive
 };

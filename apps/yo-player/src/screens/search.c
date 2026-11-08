@@ -1,6 +1,6 @@
 // search screen - a VideoGrid in one of two modes: a text search or a channel's videos (see search.h).
-// Pushed on top of home. Triangle drills into a channel in place, Circle backs out (channel -> search
-// results -> pop to home), SELECT opens search, START opens Settings, X plays.
+// Pushed on top of home. Triangle drills into a channel in place, Circle backs out, SELECT opens search,
+// START opens Settings, L1/R1 switches text-search ordering, X plays.
 
 #include "app-config.h"
 #include "screens/search.h"
@@ -60,6 +60,7 @@ static Font        uiFont;
 static Label       titleLabel, sortLabel, statusLabel;
 static ButtonHints hints, hintsSecondRow;
 static int sdHintsTwoRows;
+static int sortL1Hint = -1, sortR1Hint = -1;
 
 static int searchFetch(const char *token, SearchResults *out, void *user)
 {
@@ -95,6 +96,9 @@ static void setHeading(void)
    else                     { snprintf(heading, sizeof heading, "Search: %s", search.query); setLabelText(&sortLabel, SortNames[search.sort]); }
    setLabelText(&titleLabel, heading);
    updateTriangleHint();
+   ButtonHints *sortHints = sdHintsTwoRows ? &hintsSecondRow : &hints;
+   setButtonHintShown(sortHints, sortL1Hint, !search.channelId[0]);
+   setButtonHintShown(sortHints, sortR1Hint, !search.channelId[0]);
 }
 
 static void reload(void)
@@ -180,6 +184,8 @@ static void initSearch(void)
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_SELECT), "Search");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R3),     "Download");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_START),  "Settings");
+      sortL1Hint = addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_L1), "");
+      sortR1Hint = addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R1), "Sort");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R2), "Refresh");
       setButtonHintsStableLayout(&hintsSecondRow, 1);
    } else {
@@ -191,6 +197,8 @@ static void initSearch(void)
       addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT),   "Search");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R3),       "Download");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_START),    "Settings");
+      sortL1Hint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L1),       "");
+      sortR1Hint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R1),       "Sort");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R2),       "Refresh");
    }
 
@@ -238,6 +246,13 @@ static void updateSearch(void)
    // Circle leaves search/channel sub-screens and returns to normal home navigation.
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { popScreen(); return; }
    if (isPadButtonPressed(PAD_BTN_R2)) { reload(); return; }
+
+   if (!search.channelId[0] &&
+       (isPadButtonPressed(PAD_BTN_R1) || isPadButtonPressed(PAD_BTN_L1))) {
+      search.sort = (search.sort + 1) % SORT_COUNT;
+      reload();
+      return;
+   }
 
    updateVideoGrid(&search.grid);
    if (gridStage(&search.grid) != GRID_READY) return;

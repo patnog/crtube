@@ -1,6 +1,7 @@
 // home - the landing screen: trending categories in a VideoGrid (see home.h).
 
 #include "app-config.h"
+#include "app.h"
 #include "screens/home.h"
 #include "screens/search.h"
 #include "screens/play.h"
@@ -48,17 +49,20 @@
 #define HINT_TEXT     22
 
 static const char *TrendingNames[TREND_COUNT] = { "Gaming", "Sports", "Podcasts" };
+static const char *LiveNames[LIVE_COUNT] = { "Popular", "Music", "Gaming", "Sports", "Podcasts", "News" };
 static const char *AccountNames[ACCOUNT_FEED_COUNT] = { "Recommended", "Subscriptions", "History", "Watch Later" };
 
-// home categories = the trending feeds, a Subscriptions feed and the Watch Later queue kept on this PS3,
-// and - when signed in - the account's own feeds.
+// Home categories = Trending, the PS3 queues, and - when signed in - the account's own feeds. Live is a
+// separate, uncached page entered from the sidebar; L1/R1 only cycle its six subcategories once inside it.
 #define HOME_SUBS        TREND_COUNT
 #define HOME_WATCHLATER  (TREND_COUNT + 1)
 #define HOME_ACCOUNT     (TREND_COUNT + 2)                      // first account feed; + AccountFeed
 #define HOME_CAT_COUNT   (HOME_ACCOUNT + ACCOUNT_FEED_COUNT)
 #define HOME_LOCAL_HISTORY (HOME_ACCOUNT + ACCOUNT_FEED_COUNT)  // in-memory history for this app session
+#define HOME_LIVE         (HOME_LOCAL_HISTORY + 1)               // entered from the sidebar; never in the home L1/R1 ring
 #define LOCAL_HISTORY_CAP 32
 #define SUBS_PER_CHANNEL 8      // latest videos pulled from each subscribed channel
+#define LIVE_MAX_AGE_US (10ULL * 60 * 1000000)
 
 // the L1/R1 cycle. signed out it is the original app's; signed in, the account feeds lead.
 static const int SignedOutOrder[] = {
@@ -96,10 +100,14 @@ static const uint64_t AccountFeedRefreshIntervals[ACCOUNT_FEED_COUNT] = {
 static struct {
    VideoGrid grid;
    int       category;
+   LiveCategory liveCategory;
+   uint64_t  liveLoadedUs;
    int       screenW, screenH;
    int       accountOpen;   // the sign-in / account panel is showing
    int       settingsOpen;  // the settings window is showing
    int       settingsSelected;
+   int       exitConfirmOpen;
+   int       exitConfirmSelected; // 0 = Yes, 1 = No (safe default)
    int       regionOpen;
    int       regionSelected;
    int       sponsorblockOpen;
@@ -186,6 +194,11 @@ static Label sponsorActionLabels[3];
 static ButtonHints sponsorHints;
 static ButtonRepeat sponsorNavigateRepeat;
 static ButtonRepeat settingsNavigateRepeat;
+static ButtonRepeat exitConfirmNavigateRepeat;
+static Label exitConfirmTitle, exitConfirmMessage, exitConfirmChoices[2];
+static ButtonHints exitConfirmHints;
+#define EXIT_CONFIRM_PANEL_W 560
+#define EXIT_CONFIRM_PANEL_H 240
 #define REGION_MAX_ROWS 40
 #define REGION_PANEL_W 620
 #define REGION_PANEL_H 440
@@ -208,6 +221,7 @@ static unsigned regionRevisionSeen;
 #define TREND_CHIP_GAP 6
 static Label trendingChipLabels[TREND_COUNT];
 static Icon trendingChipIcons[TREND_COUNT];
+static Label liveChipLabels[LIVE_COUNT];
 static const IconId TrendingIcons[TREND_COUNT] = { ICON_MICROCHIP, ICON_STAR, ICON_VOLUME_UP };
 
 static int getSettingsPanelWidth(void)
@@ -320,10 +334,16 @@ void recordLocalHistory(const char *videoId, const char *title, const char *auth
    localHistoryCount++;
 }
 
+static int homeLiveFetchStopped(void)
+{
+   return gridStopRequested(&home.grid);
+}
+
 static int homeFetch(const char *token, SearchResults *out, void *user)
 {
    (void)user;
    if (home.category == HOME_LOCAL_HISTORY) return fetchLocalHistory(out);
+   if (home.category == HOME_LIVE) return getLiveFeed(home.liveCategory, token, out, homeLiveFetchStopped);
    if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY)
       return getAccountFeed((AccountFeed)(home.category - HOME_ACCOUNT), token, out);
    if (home.category == HOME_SUBS)       return fetchSubscriptions(out);
@@ -341,6 +361,7 @@ static void setHeading(void)
       snprintf(heading, sizeof heading, "%s", AccountNames[home.category - HOME_ACCOUNT]);
    else if (home.category == HOME_SUBS)       snprintf(heading, sizeof heading, "Subscriptions%s", local);
    else if (home.category == HOME_WATCHLATER) snprintf(heading, sizeof heading, "Watch Later%s", local);
+   else if (home.category == HOME_LIVE)       snprintf(heading, sizeof heading, "Live");
    else                                       snprintf(heading, sizeof heading, "Trending");
    setLabelText(&titleLabel, heading);
 }
@@ -353,13 +374,15 @@ static void refreshCurrentCategory(void)
       accountFeedRefreshUs[feed] = getTimeUs();
    }
    logInfo("[home] manual/periodic refresh category=%d\n", home.category);
+   if (home.category == HOME_LIVE) home.liveLoadedUs = getTimeUs();
    setGridSource(&home.grid, homeFetch, NULL);
 }
 
 static void loadCategory(void)
 {
    setHeading();
-   if (home.category == HOME_LOCAL_HISTORY) {
+   if (home.category == HOME_LOCAL_HISTORY || home.category == HOME_LIVE) {
+      if (home.category == HOME_LIVE) home.liveLoadedUs = getTimeUs();
       setGridSource(&home.grid, homeFetch, NULL);
       return;
    }
@@ -385,7 +408,7 @@ static void loadCategory(void)
 // cache the current category (only when it's fully loaded) so returning to it is instant.
 static void cacheCurrent(void)
 {
-   if (home.category == HOME_LOCAL_HISTORY) return;
+   if (home.category == HOME_LOCAL_HISTORY || home.category == HOME_LIVE) return;
    if (gridStage(&home.grid) != GRID_READY || gridBusy(&home.grid)) return;   // don't copy mid-append
    categoryCache[home.category] = *gridResults(&home.grid);
    categoryCached[home.category] = 1;
@@ -396,7 +419,8 @@ static void openAccountPanel(void);
 
 static void setSidebarForCategory(void)
 {
-   if (home.category == HOME_WATCHLATER) setSidebarCurrent(SIDEBAR_PS3_WATCH_LATER);
+   if (home.category == HOME_LIVE) setSidebarCurrent(SIDEBAR_LIVE);
+   else if (home.category == HOME_WATCHLATER) setSidebarCurrent(SIDEBAR_PS3_WATCH_LATER);
    else if (home.category == HOME_LOCAL_HISTORY) setSidebarCurrent(SIDEBAR_PS3_HISTORY);
    else if (home.category == HOME_SUBS) setSidebarCurrent(SIDEBAR_PS3_SUBSCRIPTIONS);
    else if (home.category == HOME_ACCOUNT + ACCOUNT_FEED_HOME) setSidebarCurrent(SIDEBAR_RECOMMENDED);
@@ -419,7 +443,9 @@ static void selectAccountFeed(AccountFeed feed)
 
 static void switchToCategory(int category)
 {
-   if (category < 0 || category >= HOME_CAT_COUNT || category == home.category) return;
+   if (category < 0 ||
+       (category >= HOME_CAT_COUNT && category != HOME_LOCAL_HISTORY && category != HOME_LIVE) ||
+       category == home.category) return;
    cacheCurrent();
    home.category = category;
    loadCategory();
@@ -428,6 +454,11 @@ static void switchToCategory(int category)
 
 static void switchCategory(int delta)
 {
+   if (home.category == HOME_LIVE) {
+      home.liveCategory = (LiveCategory)((home.liveCategory + delta + LIVE_COUNT) % LIVE_COUNT);
+      loadCategory();
+      return;
+   }
    cacheCurrent();
    const int *order = isSignedIn() ? SignedInOrder : SignedOutOrder;
    int count = isSignedIn() ? (int)(sizeof SignedInOrder / sizeof SignedInOrder[0])
@@ -808,6 +839,67 @@ static void drawSponsorBlockPanel(void)
    drawButtonHints(&sponsorHints, home.screenW);
 }
 
+static void openExitConfirmation(void)
+{
+   home.exitConfirmOpen = 1;
+   home.exitConfirmSelected = 1; // No is selected by default.
+   exitConfirmNavigateRepeat.timer = exitConfirmNavigateRepeat.repeats = 0;
+}
+
+static void updateExitConfirmation(void)
+{
+   if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+      home.exitConfirmOpen = 0;
+      return;
+   }
+   if (isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_LEFT)) ||
+       isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
+      home.exitConfirmSelected = (home.exitConfirmSelected + 1) % 2;
+   else if (isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_RIGHT)) ||
+            isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
+      home.exitConfirmSelected = (home.exitConfirmSelected + 1) % 2;
+
+   if (isPadButtonPressed(PAD_BTN_CROSS)) {
+      if (home.exitConfirmSelected == 0) requestAppExit();
+      else home.exitConfirmOpen = 0;
+   }
+}
+
+static void drawExitConfirmation(void)
+{
+   int panelW = home.screenW - 48;
+   if (panelW > EXIT_CONFIRM_PANEL_W) panelW = EXIT_CONFIRM_PANEL_W;
+   int panelH = EXIT_CONFIRM_PANEL_H;
+   if (panelH > home.screenH - 48) panelH = home.screenH - 48;
+   int x = (home.screenW - panelW) / 2;
+   int y = (home.screenH - panelH) / 2;
+
+   fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRoundedRectangle(x, y, panelW, panelH, 10, activeTheme->appBg);
+   fillGfxRoundedRectangle(x, y, panelW, 4, 2, activeTheme->accent);
+   refreshLabelScale(&exitConfirmTitle);
+   refreshLabelScale(&exitConfirmMessage);
+   drawLabelCentered(&exitConfirmTitle, home.screenW / 2, y + 34);
+   drawLabelCentered(&exitConfirmMessage, home.screenW / 2, y + 94);
+
+   int choiceY = y + 148;
+   int choiceW = 112, choiceH = 40, gap = 24;
+   int choicesX = home.screenW / 2 - choiceW - gap / 2;
+   for (int i = 0; i < 2; i++) {
+      Label *label = &exitConfirmChoices[i];
+      refreshLabelScale(label);
+      int bx = choicesX + i * (choiceW + gap);
+      fillGfxRoundedRectangle(bx, choiceY, choiceW, choiceH, 8,
+                              i == home.exitConfirmSelected ? activeTheme->accent : activeTheme->surface);
+      setLabelColor(label, i == home.exitConfirmSelected ? activeTheme->appBg : activeTheme->textPrimary);
+      moveLabel(label, bx + (choiceW - label->tt.tex.w) / 2,
+                getCenteredLabelY(label, choiceY, choiceH));
+      drawLabel(label);
+   }
+   exitConfirmHints.y = y + panelH - 34;
+   drawButtonHints(&exitConfirmHints, home.screenW);
+}
+
 void openHomeSettingsPanel(void)
 {
    home.settingsOpen = 1;
@@ -969,6 +1061,55 @@ static void drawTrendingTabs(void)
    }
 }
 
+static int liveTabsWidth(int first, int last, int pad, int gap)
+{
+   int width = 0;
+   for (int i = first; i <= last; i++)
+      width += liveChipLabels[i].tt.tex.w + 2 * pad + (i > first ? gap : 0);
+   return width;
+}
+
+static void drawLiveTabs(void)
+{
+   int active = (int)home.liveCategory;
+   int x = titleLabel.x + titleLabel.tt.tex.w + 18;
+   int right = home.screenW - MARGIN_X;
+   int pad = TREND_CHIP_PAD_X, gap = TREND_CHIP_GAP;
+   for (int i = 0; i < LIVE_COUNT; i++) refreshLabelScale(&liveChipLabels[i]);
+
+   while (x + liveTabsWidth(0, LIVE_COUNT - 1, pad, gap) > right && pad > 4) pad--;
+   while (x + liveTabsWidth(0, LIVE_COUNT - 1, pad, gap) > right && gap > 3) gap--;
+
+   int first = 0, last = LIVE_COUNT - 1;
+   if (x + liveTabsWidth(first, last, pad, gap) > right) {
+      int bestCount = 0;
+      first = last = active;
+      for (int from = 0; from <= active; from++) {
+         for (int to = active; to < LIVE_COUNT; to++) {
+            int count = to - from + 1;
+            if (count > bestCount && x + liveTabsWidth(from, to, pad, gap) <= right) {
+               first = from;
+               last = to;
+               bestCount = count;
+            }
+         }
+      }
+   }
+
+   int y = titleLabel.y + (titleLabel.tt.tex.h - TREND_CHIP_HEIGHT) / 2;
+   for (int i = first; i <= last; i++) {
+      Label *label = &liveChipLabels[i];
+      int width = label->tt.tex.w + 2 * pad;
+      int selected = i == active;
+      fillGfxRectangleFixed(x, y, width, TREND_CHIP_HEIGHT,
+                            selected ? activeTheme->rowHighlight : activeTheme->surface);
+      setLabelColor(label, selected ? activeTheme->accent : activeTheme->textPrimary);
+      moveLabel(label, x + pad, getCenteredLabelY(label, y, TREND_CHIP_HEIGHT));
+      drawLabel(label);
+      x += width + gap;
+   }
+}
+
 // OSK confirmed: a link plays directly, anything else opens a search.
 static void onQueryEntered(const char *text)
 {
@@ -1003,6 +1144,12 @@ void handleHomeSidebarSelection(int picked)
       case SIDEBAR_TRENDING:
          if (home.category >= TREND_COUNT) switchToCategory(TREND_GAMING);
          break;
+      case SIDEBAR_LIVE:
+         if (home.category != HOME_LIVE) {
+            home.liveCategory = LIVE_POPULAR;
+            switchToCategory(HOME_LIVE);
+         }
+         break;
       case SIDEBAR_PS3_SUBSCRIPTIONS:
          switchToCategory(HOME_SUBS);
          break;
@@ -1018,6 +1165,9 @@ void handleHomeSidebarSelection(int picked)
       case SIDEBAR_SETTINGS:
          openHomeSettingsPanel();
          break;
+      case SIDEBAR_EXIT:
+         openExitConfirmation();
+         break;
       default:
          break;
    }
@@ -1026,8 +1176,11 @@ void handleHomeSidebarSelection(int picked)
 static void initHome(void)
 {
    home.pendingAccountCategory = -1;
+   home.liveCategory = LIVE_POPULAR;
    home.settingsOpen = 0;
    home.settingsSelected = 0;
+   home.exitConfirmOpen = 0;
+   home.exitConfirmSelected = 1;
    home.regionOpen = 0;
    home.sponsorblockOpen = 0;
    home.sponsorblockSelected = 0;
@@ -1161,6 +1314,21 @@ static void initHome(void)
    addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_DPAD_LEFT), "");
    addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Change");
    addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_CIRCLE), "Close");
+
+   initLabel(&exitConfirmTitle, &uiFont, 0, 0, EXIT_CONFIRM_PANEL_W - 48, AUTO, 28,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Exit CRTube");
+   initLabel(&exitConfirmMessage, &uiFont, 0, 0, EXIT_CONFIRM_PANEL_W - 48, AUTO, 20,
+             activeTheme->textSecondary, TEXT_NOWRAP, "Are you sure you want to close the app?");
+   initLabel(&exitConfirmChoices[0], &uiFont, 0, 0, 100, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Yes");
+   initLabel(&exitConfirmChoices[1], &uiFont, 0, 0, 100, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, "No");
+   initButtonHints(&exitConfirmHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
+   addButtonHint(&exitConfirmHints, getConsoleGlyph(GLYPH_CROSS), "Choose");
+   addButtonHint(&exitConfirmHints, getConsoleGlyph(GLYPH_DPAD_LEFT), "Change");
+   addButtonHint(&exitConfirmHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "");
+   addButtonHint(&exitConfirmHints, getConsoleGlyph(GLYPH_CIRCLE), "Cancel");
+
    // Settings is a compact control panel; keep its typography at a stable
    // physical size even when the rest of the UI uses the 1.5x SD font scale.
    for (int i = 0; i < TREND_COUNT; i++) {
@@ -1168,6 +1336,11 @@ static void initHome(void)
                 activeTheme->textPrimary, TEXT_NOWRAP, TrendingNames[i]);
       setLabelScaleWithUi(&trendingChipLabels[i], 1);
       initIcon(&trendingChipIcons[i], TrendingIcons[i], TREND_CHIP_ICON_SIZE);
+   }
+   for (int i = 0; i < LIVE_COUNT; i++) {
+      initLabel(&liveChipLabels[i], &uiFont, 0, 0, 180, AUTO, TREND_CHIP_FONT_SIZE,
+                activeTheme->textPrimary, TEXT_NOWRAP, LiveNames[i]);
+      setLabelScaleWithUi(&liveChipLabels[i], 1);
    }
    initButtonHints(&panelHints, &uiFont, panelY + getAccountPanelHeight() - 48, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
    panelConfirmHint = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CROSS),  "Try again");
@@ -1203,11 +1376,13 @@ static void updateHome(void)
       for (int c = 0; c < TREND_COUNT; c++) categoryCached[c] = 0;
       categoryCached[HOME_ACCOUNT + ACCOUNT_FEED_HOME] = 0;
       logInfo("[home] content region changed to %s; regional feeds invalidated\n", getContentRegionCode());
-      if (home.category < TREND_COUNT || home.category == HOME_ACCOUNT + ACCOUNT_FEED_HOME)
+      if (home.category < TREND_COUNT || home.category == HOME_LIVE ||
+          home.category == HOME_ACCOUNT + ACCOUNT_FEED_HOME)
          refreshCurrentCategory();
    }
    if (home.accountOpen) { updateAccountPanel(); return; }
    if (home.settingsOpen) { updateSettingsPanel(); return; }
+   if (home.exitConfirmOpen) { updateExitConfirmation(); return; }
    if (oskInputActive()) return;
 
    // Circle remains a global shortcut for the menu. LEFT only opens it when
@@ -1308,16 +1483,18 @@ static void drawHome(void)
    // selection glow that reaches into the header band.
    drawLabel(&titleLabel);
    if (home.category < TREND_COUNT) drawTrendingTabs();
+   else if (home.category == HOME_LIVE) drawLiveTabs();
    drawButtonHints(&hints, home.screenW);
    if (sdHintsTwoRows) drawButtonHints(&hintsSecondRow, home.screenW);
    drawDownloadOverlay(home.screenW);
-   if (!home.accountOpen && !home.settingsOpen) drawSidebar();
+   if (!home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen) drawSidebar();
    if (home.accountOpen) drawAccountPanel();
    if (home.settingsOpen) {
       drawSettingsPanel();
       if (home.regionOpen) drawRegionPicker();
       else if (home.sponsorblockOpen) drawSponsorBlockPanel();
    }
+   if (home.exitConfirmOpen) drawExitConfirmation();
 }
 
 static void suspendHome(void) { stopVideoGrid(&home.grid); }   // free the http pools for the pushed screen
@@ -1326,6 +1503,11 @@ static void suspendHome(void) { stopVideoGrid(&home.grid); }   // free the http 
 // already-loaded grid is kept as-is (instant, thumbnails intact).
 static void resumeHome(void)
 {
+   if (home.category == HOME_LIVE) {
+      uint64_t age = getTimeUs() - home.liveLoadedUs;
+      if (gridStage(&home.grid) != GRID_READY || age >= LIVE_MAX_AGE_US) loadCategory();
+      return;
+   }
    if (home.category == HOME_LOCAL_HISTORY) {
       loadCategory();
       return;
@@ -1371,6 +1553,11 @@ static void termHome(void)
    freeLabel(&settingsAutoplayOptions[0]);
    freeLabel(&settingsAutoplayOptions[1]);
    termButtonHints(&settingsHints);
+   freeLabel(&exitConfirmTitle);
+   freeLabel(&exitConfirmMessage);
+   freeLabel(&exitConfirmChoices[0]);
+   freeLabel(&exitConfirmChoices[1]);
+   termButtonHints(&exitConfirmHints);
    freeLabel(&regionTitle);
    freeLabel(&regionDescription);
    freeLabel(&regionPosition);
@@ -1380,6 +1567,7 @@ static void termHome(void)
       freeLabel(&trendingChipLabels[i]);
       freeIcon(&trendingChipIcons[i]);
    }
+   for (int i = 0; i < LIVE_COUNT; i++) freeLabel(&liveChipLabels[i]);
    closeFont(&uiFont);
 }
 

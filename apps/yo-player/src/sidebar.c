@@ -1,5 +1,5 @@
 // Sliding home navigation overlay. The grid remains underneath and is never
-// resized. Trending is a single entry; its category tabs live in the page header.
+// resized. Trending and Live each have category tabs in the page header.
 #include "sidebar.h"
 
 #include "gfx.h"
@@ -31,7 +31,7 @@
 #define SIDEBAR_TITLE_Y            34
 #define SIDEBAR_ROWS_TOP          104
 #define SIDEBAR_ROWS_BOTTOM        18
-#define SIDEBAR_MAIN_ROWS          13
+#define SIDEBAR_MAIN_ROWS          15
 #define SIDEBAR_MAX_ROWS           SIDEBAR_MAIN_ROWS
 #define ROW_SECTION                 1
 
@@ -49,13 +49,15 @@ static const SidebarRow mainRows[SIDEBAR_MAIN_ROWS] = {
    { "History",        ICON_HISTORY,   SIDEBAR_ACCOUNT_HISTORY,        0 },
    { "Watch Later",    ICON_CLOCK,     SIDEBAR_ACCOUNT_WATCH_LATER,    0 },
    { "Trending",       ICON_UP_BIG,    SIDEBAR_TRENDING,               0 },
+   { "Live",           ICON_WIFI,      SIDEBAR_LIVE,                    0 },
    { "PS3",            0,              -1,                             ROW_SECTION },
    { "Subscriptions",  ICON_HDD,       SIDEBAR_PS3_SUBSCRIPTIONS,      0 },
    { "History",        ICON_HISTORY,   SIDEBAR_PS3_HISTORY,            0 },
    { "Watch Later",    ICON_CLOCK,     SIDEBAR_PS3_WATCH_LATER,        0 },
    { "APP",            0,              -1,                             ROW_SECTION },
    { "Account",        ICON_GOOGLE,    SIDEBAR_ACCOUNT,                0 },
-   { "Settings",       ICON_COG,       SIDEBAR_SETTINGS,               0 }
+   { "Settings",       ICON_COG,       SIDEBAR_SETTINGS,               0 },
+   { "Exit App",        0,              SIDEBAR_EXIT,                    0 }
 };
 
 static struct {
@@ -209,11 +211,13 @@ void setSidebarCurrent(SidebarItem item)
       case SIDEBAR_ACCOUNT_HISTORY:         side.selected = 3; break;
       case SIDEBAR_ACCOUNT_WATCH_LATER:     side.selected = 4; break;
       case SIDEBAR_TRENDING:                side.selected = 5; break;
-      case SIDEBAR_PS3_SUBSCRIPTIONS:       side.selected = 7; break;
-      case SIDEBAR_PS3_HISTORY:             side.selected = 8; break;
-      case SIDEBAR_PS3_WATCH_LATER:         side.selected = 9; break;
-      case SIDEBAR_ACCOUNT:                 side.selected = 11; break;
-      case SIDEBAR_SETTINGS:                side.selected = 12; break;
+      case SIDEBAR_LIVE:                    side.selected = 6; break;
+      case SIDEBAR_PS3_SUBSCRIPTIONS:       side.selected = 8; break;
+      case SIDEBAR_PS3_HISTORY:             side.selected = 9; break;
+      case SIDEBAR_PS3_WATCH_LATER:         side.selected = 10; break;
+      case SIDEBAR_ACCOUNT:                 side.selected = 12; break;
+      case SIDEBAR_SETTINGS:                side.selected = 13; break;
+      case SIDEBAR_EXIT:                    side.selected = 14; break;
       default: break;
    }
    keepSelectionVisible();

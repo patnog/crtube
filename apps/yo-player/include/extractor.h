@@ -92,8 +92,20 @@ typedef enum {
    TREND_COUNT
 } TrendingCategory;
 
+// Live page categories. Keep this order aligned with LIVE_FEEDS in youtube.c
+// and LiveNames in home.c.
+typedef enum {
+   LIVE_POPULAR,
+   LIVE_MUSIC,
+   LIVE_GAMING,
+   LIVE_SPORTS,
+   LIVE_PODCASTS,
+   LIVE_NEWS,
+   LIVE_COUNT
+} LiveCategory;
+
 // search result ordering. YouTube's newer WEB API only offers these two sorts (its "Prioritize" menu
-// dropped date-sort); the UI cycles them with SELECT. keep SortNames in the search screen in sync.
+// dropped date-sort); the search screen switches them with L1/R1. keep SortNames in sync.
 typedef enum {
    SORT_RELEVANCE,
    SORT_VIEWS,
@@ -139,6 +151,8 @@ typedef struct Extractor {
    // Check whether a video is restricted to channel members. Blocking; call on a worker thread.
    // Returns 1 for members-only, 0 for public/other, negative on request failure.
    int (*isVideoMembersOnly)(const char *videoId);
+   // Live streams feed. Appended to preserve the positional initializer above.
+   int (*getLive)(LiveCategory category, const char *continuation, SearchResults *out, int (*stopped)(void));
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.
@@ -149,6 +163,9 @@ int searchVideos(const char *query, SortOrder sort, const char *continuation, Se
 
 // a trending category feed (the launch/home screen). continuation as above. 0 ok, negative on error.
 int getTrending(TrendingCategory category, const char *continuation, SearchResults *out);
+
+// A Live category feed. Continuation tokens are opaque to the caller.
+int getLiveFeed(LiveCategory category, const char *continuation, SearchResults *out, int (*stopped)(void));
 
 // a channel's Videos feed. token NULL = first page; else a sort-chip token (SearchResults.sortTokens) or a
 // next-page continuation. the first page also fills out->sortTokens. 0 ok, negative on error.
