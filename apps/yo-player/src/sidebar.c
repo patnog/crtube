@@ -1,5 +1,5 @@
 // Sliding home navigation overlay. The grid remains underneath and is never
-// resized. Trending is a nested page; section captions are not selectable.
+// resized. Trending is a single entry; its category tabs live in the page header.
 #include "sidebar.h"
 
 #include "gfx.h"
@@ -20,19 +20,15 @@
 #define SIDEBAR_EDGE_STRIP_WIDTH   52
 #define SIDEBAR_EDGE_HEIGHT        76
 #define SIDEBAR_MIN_WIDTH         300
-#define SIDEBAR_MAX_WIDTH         620
-#define SIDEBAR_CONTENT_LEFT       28
-#define SIDEBAR_TEXT_LEFT          78
+#define SIDEBAR_MAX_WIDTH         520
+#define SIDEBAR_CONTENT_LEFT       48
+#define SIDEBAR_TEXT_LEFT         100
 #define SIDEBAR_RIGHT_PAD          14
 #define SIDEBAR_TITLE_Y            34
 #define SIDEBAR_ROWS_TOP          104
 #define SIDEBAR_ROWS_BOTTOM        18
 #define SIDEBAR_MAIN_ROWS          13
-#define SIDEBAR_TREND_ROWS          4
 #define SIDEBAR_MAX_ROWS           SIDEBAR_MAIN_ROWS
-#define SIDEBAR_PAGE_MAIN           0
-#define SIDEBAR_PAGE_TRENDING       1
-
 #define ROW_SECTION                 1
 
 typedef struct {
@@ -58,22 +54,13 @@ static const SidebarRow mainRows[SIDEBAR_MAIN_ROWS] = {
    { "Settings",       ICON_COG,       SIDEBAR_SETTINGS,               0 }
 };
 
-static const SidebarRow trendingRows[SIDEBAR_TREND_ROWS] = {
-   { "Back",           ICON_LEFT_BIG,  -1,                             0 },
-   { "Gaming",         ICON_MICROCHIP, SIDEBAR_TRENDING_GAMING,         0 },
-   { "Sports",         ICON_STAR,      SIDEBAR_TRENDING_SPORTS,         0 },
-   { "Podcasts",       ICON_VOLUME_UP, SIDEBAR_TRENDING_PODCASTS,       0 }
-};
-
 static struct {
    Font *font;
    int screenW, screenH, panelW;
    float uiScale;
    int selected;
-   int trendingSelected;
    int scrollTop;
    int visibleRows;
-   int page;
    int focused;
    int targetOpen;
    float progress;
@@ -83,8 +70,6 @@ static struct {
    Label title;
    Label mainNames[SIDEBAR_MAX_ROWS];
    Icon mainIcons[SIDEBAR_MAX_ROWS];
-   Label trendingNames[SIDEBAR_TREND_ROWS];
-   Icon trendingIcons[SIDEBAR_TREND_ROWS];
    Icon edgeOpen;
    Icon edgeClose;
 } side;
@@ -98,10 +83,15 @@ static float easeOut(float t)
 static int getPanelWidth(int screenW, float uiScale)
 {
    if (uiScale < 1.0f) uiScale = 1.0f;
-   int width = screenW * 42 / 100;
-   if (width > SIDEBAR_MAX_WIDTH) width = SIDEBAR_MAX_WIDTH;
-   width += (int)(100.0f * (uiScale - 1.0f) + 0.5f);
+   int fontSize = (int)(SIDEBAR_TEXT_SIZE * uiScale + 0.5f);
+   int textWidth = (int)(measureFontText(side.font, fontSize, "Recommended") + 0.5f);
+   int twoSpaces = (int)(measureFontText(side.font, fontSize, "  ") + 0.5f);
+   // End the bright panel about two spaces after its longest navigation label;
+   // the fixed dark rail and arrow occupy the remaining edge strip.
+   int width = SIDEBAR_TEXT_LEFT + textWidth + twoSpaces +
+               SIDEBAR_EDGE_STRIP_WIDTH + SIDEBAR_RIGHT_PAD;
    if (width < SIDEBAR_MIN_WIDTH) width = SIDEBAR_MIN_WIDTH;
+   if (width > SIDEBAR_MAX_WIDTH) width = SIDEBAR_MAX_WIDTH;
    int maxWidth = screenW * 72 / 100;
    if (width > maxWidth) width = maxWidth;
    if (width > screenW) width = screenW;
@@ -110,10 +100,6 @@ static int getPanelWidth(int screenW, float uiScale)
 
 static const SidebarRow *getRows(int *count)
 {
-   if (side.page == SIDEBAR_PAGE_TRENDING) {
-      *count = SIDEBAR_TREND_ROWS;
-      return trendingRows;
-   }
    *count = SIDEBAR_MAIN_ROWS;
    return mainRows;
 }
@@ -129,11 +115,6 @@ static void keepSelectionVisible(void)
 {
    int count;
    getRows(&count);
-   if (side.page == SIDEBAR_PAGE_TRENDING) {
-      side.visibleRows = SIDEBAR_TREND_ROWS;
-      side.scrollTop = 0;
-      return;
-   }
    side.visibleRows = (side.screenH - SIDEBAR_ROWS_TOP - SIDEBAR_ROWS_BOTTOM) / SIDEBAR_ROW_STEP;
    if (side.visibleRows < 3) side.visibleRows = 3;
    if (side.visibleRows > count) side.visibleRows = count;
@@ -164,9 +145,7 @@ static void updateSelectedColors(void)
    int count;
    const SidebarRow *rows = getRows(&count);
    for (int i = 0; i < count; i++) {
-      Label *label;
-      if (side.page == SIDEBAR_PAGE_TRENDING) label = &side.trendingNames[i];
-      else label = &side.mainNames[i];
+      Label *label = &side.mainNames[i];
       uint32_t color = (i == side.selected) ? activeTheme->accent : activeTheme->textPrimary;
       if (rows[i].flags & ROW_SECTION) color = activeTheme->textSecondary;
       setLabelColor(label, color);
@@ -183,7 +162,6 @@ void initSidebar(Font *font, int screenW, int screenH)
    if (side.uiScale < 1.0f) side.uiScale = 1.0f;
    side.panelW = getPanelWidth(screenW, side.uiScale);
    side.selected = 5; // Trending is the initial active section.
-   side.trendingSelected = 1;
 
    initLabel(&side.title, font, 0, 0,
              SIDEBAR_MAX_WIDTH - SIDEBAR_CONTENT_LEFT - SIDEBAR_EDGE_STRIP_WIDTH - SIDEBAR_RIGHT_PAD,
@@ -197,15 +175,8 @@ void initSidebar(Font *font, int screenW, int screenH)
       setLabelScaleWithUi(&side.mainNames[i], 1);
       if (mainRows[i].icon) initIcon(&side.mainIcons[i], mainRows[i].icon, SIDEBAR_ICON_SIZE);
    }
-   for (int i = 0; i < SIDEBAR_TREND_ROWS; i++) {
-      initLabel(&side.trendingNames[i], font, 0, 0,
-                SIDEBAR_MAX_WIDTH - SIDEBAR_TEXT_LEFT - SIDEBAR_EDGE_STRIP_WIDTH - SIDEBAR_RIGHT_PAD,
-                42, SIDEBAR_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, trendingRows[i].name);
-      setLabelScaleWithUi(&side.trendingNames[i], 1);
-      initIcon(&side.trendingIcons[i], trendingRows[i].icon, SIDEBAR_ICON_SIZE);
-   }
-   initIcon(&side.edgeOpen, ICON_RIGHT_BIG, 20);
-   initIcon(&side.edgeClose, ICON_LEFT_BIG, 20);
+   initIcon(&side.edgeOpen, ICON_RIGHT_BIG, 27);
+   initIcon(&side.edgeClose, ICON_LEFT_BIG, 27);
    keepSelectionVisible();
    updateSelectedColors();
 }
@@ -217,10 +188,6 @@ void termSidebar(void)
       freeLabel(&side.mainNames[i]);
       if (mainRows[i].icon) freeIcon(&side.mainIcons[i]);
    }
-   for (int i = 0; i < SIDEBAR_TREND_ROWS; i++) {
-      freeLabel(&side.trendingNames[i]);
-      freeIcon(&side.trendingIcons[i]);
-   }
    freeIcon(&side.edgeOpen);
    freeIcon(&side.edgeClose);
    memset(&side, 0, sizeof side);
@@ -228,7 +195,6 @@ void termSidebar(void)
 
 void setSidebarCurrent(SidebarItem item)
 {
-   side.page = SIDEBAR_PAGE_MAIN;
    switch (item) {
       case SIDEBAR_SEARCH:                  side.selected = 0; break;
       case SIDEBAR_RECOMMENDED:             side.selected = 1; break;
@@ -236,9 +202,6 @@ void setSidebarCurrent(SidebarItem item)
       case SIDEBAR_ACCOUNT_HISTORY:         side.selected = 3; break;
       case SIDEBAR_ACCOUNT_WATCH_LATER:     side.selected = 4; break;
       case SIDEBAR_TRENDING:                side.selected = 5; break;
-      case SIDEBAR_TRENDING_GAMING:         side.selected = 5; side.trendingSelected = 1; break;
-      case SIDEBAR_TRENDING_SPORTS:         side.selected = 5; side.trendingSelected = 2; break;
-      case SIDEBAR_TRENDING_PODCASTS:       side.selected = 5; side.trendingSelected = 3; break;
       case SIDEBAR_PS3_SUBSCRIPTIONS:       side.selected = 7; break;
       case SIDEBAR_PS3_HISTORY:             side.selected = 8; break;
       case SIDEBAR_PS3_WATCH_LATER:         side.selected = 9; break;
@@ -252,7 +215,6 @@ void setSidebarCurrent(SidebarItem item)
 
 void openSidebar(void)
 {
-   side.page = SIDEBAR_PAGE_MAIN;
    side.focused = 1;
    keepSelectionVisible();
    updateSelectedColors();
@@ -299,8 +261,6 @@ int updateSidebar(void)
    if (isPadButtonPressed(PAD_BTN_UP)) moveSelection(-1);
    if (isPadButtonPressed(PAD_BTN_DOWN)) moveSelection(1);
 
-   // LEFT and CIRCLE both close the sidebar. RIGHT is intentionally left
-   // unhandled so it does not act as a second close shortcut.
    if (isPadButtonPressed(PAD_BTN_LEFT) || isPadButtonPressed(PAD_BTN_CIRCLE)) {
       side.focused = 0;
       animateTo(0);
@@ -309,21 +269,7 @@ int updateSidebar(void)
    if (isPadButtonPressed(PAD_BTN_CROSS)) {
       int count;
       const SidebarRow *rows = getRows(&count);
-      if (side.page == SIDEBAR_PAGE_TRENDING && side.selected == 0) {
-         side.page = SIDEBAR_PAGE_MAIN;
-         side.selected = 5;
-         keepSelectionVisible();
-         updateSelectedColors();
-         return -1;
-      }
       int action = rows[side.selected].action;
-      if (action == SIDEBAR_TRENDING) {
-         side.page = SIDEBAR_PAGE_TRENDING;
-         side.selected = side.trendingSelected;
-         keepSelectionVisible();
-         updateSelectedColors();
-         return -1;
-      }
       side.focused = 0;
       animateTo(0);
       return action;
@@ -336,6 +282,20 @@ static void drawSidebarIconFixed(Icon *icon, int x, int y, uint32_t color)
    if (!icon || !icon->tex || icon->tex->w <= 0 || icon->tex->h <= 0) return;
    drawGfxTextureFixedPosition(x + icon->offsetX, y + icon->offsetY,
                                icon->tex->w, icon->tex->h, *icon->tex,
+                               0.0f, 0.0f, 1.0f, 1.0f, color, GFX_FILTER_LINEAR);
+}
+
+static void drawSidebarRowIcon(Icon *icon, int x, int y, uint32_t color)
+{
+   if (!icon || !icon->tex || icon->tex->w <= 0 || icon->tex->h <= 0) return;
+   // Give the navigation glyphs a little more visual weight at 1.5x without
+   // scaling the sidebar geometry or the edge arrow.
+   float iconScale = side.uiScale >= 1.25f ? 1.25f : 1.0f;
+   int width = (int)(icon->tex->w * iconScale + 0.5f);
+   int height = (int)(icon->tex->h * iconScale + 0.5f);
+   int offsetX = (int)(icon->offsetX * iconScale + 0.5f);
+   int offsetY = (int)(icon->offsetY * iconScale + 0.5f);
+   drawGfxTextureFixedPosition(x + offsetX, y + offsetY, width, height, *icon->tex,
                                0.0f, 0.0f, 1.0f, 1.0f, color, GFX_FILTER_LINEAR);
 }
 
@@ -372,34 +332,17 @@ static void drawMainRows(int panelX)
          continue;
       }
       if (i == side.selected)
-         fillGfxRectangleFixed(panelX + 20, rowY,
-                               side.panelW - 20 - SIDEBAR_EDGE_STRIP_WIDTH,
+         fillGfxRectangleFixed(panelX + 36, rowY,
+                               side.panelW - 36 - SIDEBAR_EDGE_STRIP_WIDTH,
                                SIDEBAR_ROW_HEIGHT, activeTheme->rowHighlight);
-      int iconY = rowY + (SIDEBAR_ROW_HEIGHT - SIDEBAR_ICON_SIZE) / 2;
-      drawSidebarIconFixed(&side.mainIcons[i], panelX + SIDEBAR_CONTENT_LEFT, iconY,
-                           i == side.selected ? activeTheme->accent : activeTheme->textSecondary);
+      int iconSize = (int)(SIDEBAR_ICON_SIZE * (side.uiScale >= 1.25f ? 1.25f : 1.0f) + 0.5f);
+      int iconY = rowY + (SIDEBAR_ROW_HEIGHT - iconSize) / 2;
+      drawSidebarRowIcon(&side.mainIcons[i], panelX + SIDEBAR_CONTENT_LEFT, iconY,
+                         i == side.selected ? activeTheme->accent : activeTheme->textSecondary);
       refreshLabelScale(&side.mainNames[i]);
       moveLabel(&side.mainNames[i], panelX + SIDEBAR_TEXT_LEFT,
                 getCenteredLabelY(&side.mainNames[i], rowY, SIDEBAR_ROW_HEIGHT));
       drawLabel(&side.mainNames[i]);
-   }
-}
-
-static void drawTrendingRows(int panelX)
-{
-   for (int i = 0; i < SIDEBAR_TREND_ROWS; i++) {
-      int rowY = SIDEBAR_ROWS_TOP + i * SIDEBAR_ROW_STEP;
-      if (i == side.selected)
-         fillGfxRectangleFixed(panelX + 20, rowY,
-                               side.panelW - 20 - SIDEBAR_EDGE_STRIP_WIDTH,
-                               SIDEBAR_ROW_HEIGHT, activeTheme->rowHighlight);
-      int iconY = rowY + (SIDEBAR_ROW_HEIGHT - SIDEBAR_ICON_SIZE) / 2;
-      drawSidebarIconFixed(&side.trendingIcons[i], panelX + SIDEBAR_CONTENT_LEFT, iconY,
-                           i == side.selected ? activeTheme->accent : activeTheme->textSecondary);
-      refreshLabelScale(&side.trendingNames[i]);
-      moveLabel(&side.trendingNames[i], panelX + SIDEBAR_TEXT_LEFT,
-                getCenteredLabelY(&side.trendingNames[i], rowY, SIDEBAR_ROW_HEIGHT));
-      drawLabel(&side.trendingNames[i]);
    }
 }
 
@@ -426,8 +369,7 @@ void drawSidebar(void)
       refreshLabelScale(&side.title);
       drawLabel(&side.title);
 
-      if (side.page == SIDEBAR_PAGE_TRENDING) drawTrendingRows(panelX);
-      else drawMainRows(panelX);
+      drawMainRows(panelX);
    }
    drawEdge(panelX);
 }

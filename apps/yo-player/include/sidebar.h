@@ -11,9 +11,6 @@ typedef enum {
    SIDEBAR_ACCOUNT_HISTORY,
    SIDEBAR_ACCOUNT_WATCH_LATER,
    SIDEBAR_TRENDING,
-   SIDEBAR_TRENDING_GAMING,
-   SIDEBAR_TRENDING_SPORTS,
-   SIDEBAR_TRENDING_PODCASTS,
    SIDEBAR_PS3_SUBSCRIPTIONS,
    SIDEBAR_PS3_HISTORY,
    SIDEBAR_PS3_WATCH_LATER,
@@ -28,6 +25,6 @@ void setSidebarCurrent(SidebarItem item);
 int  isSidebarActive(void);
 int  isSidebarFocused(void);
 // LEFT opens from the first grid column; UP/DOWN navigate; CROSS commits;
-// LEFT or CIRCLE closes; RIGHT has no close action.
+// LEFT or CIRCLE closes; RIGHT leaves the menu open.
 int  updateSidebar(void);
 void drawSidebar(void);

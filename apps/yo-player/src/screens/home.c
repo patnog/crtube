@@ -13,6 +13,7 @@
 #include "sidebar.h"
 #include "ui/button-hints.h"
 #include "ui/console-glyphs.h"
+#include "ui/icon-font.h"
 
 #include "gfx.h"
 #include "theme.h"
@@ -168,11 +169,26 @@ static Label       panelTitle, panelLine1, panelLine2, panelCode, panelFooter;
 static ButtonHints panelHints;
 static int         panelConfirmHint, panelBackHint;
 
-// Settings window shell. Content Region and per-category SponsorBlock controls
-// are populated by the settings implementation patch; scaling already exists.
-#define SETTINGS_PANEL_W 900
-#define SETTINGS_PANEL_H 430
-static Label settingsTitle, settingsRows[3], settingsFooter;
+// Compact settings shell. The selected value is highlighted independently of
+// its row label; font scaling never changes the panel's physical geometry.
+#define SETTINGS_PANEL_W 620
+#define SETTINGS_PANEL_H 380
+#define SETTINGS_ROW_HEIGHT 54
+#define SETTINGS_ROW_TOP 98
+#define SETTINGS_ROW_STEP 82
+static Label settingsTitle, settingsLabels[3], settingsValues[3], settingsFooter;
+
+// Trending's feeds remain separate pages, presented as one page with three
+// persistent category chips in the header (matching TEE Vanced's layout).
+#define TREND_CHIP_ICON_SIZE 18
+#define TREND_CHIP_FONT_SIZE 14
+#define TREND_CHIP_HEIGHT 40
+#define TREND_CHIP_PAD_X 8
+#define TREND_CHIP_ICON_GAP 6
+#define TREND_CHIP_GAP 6
+static Label trendingChipLabels[TREND_COUNT];
+static Icon trendingChipIcons[TREND_COUNT];
+static const IconId TrendingIcons[TREND_COUNT] = { ICON_MICROCHIP, ICON_STAR, ICON_VOLUME_UP };
 
 static int getSettingsPanelWidth(void)
 {
@@ -305,7 +321,7 @@ static void setHeading(void)
       snprintf(heading, sizeof heading, "%s", AccountNames[home.category - HOME_ACCOUNT]);
    else if (home.category == HOME_SUBS)       snprintf(heading, sizeof heading, "Subscriptions%s", local);
    else if (home.category == HOME_WATCHLATER) snprintf(heading, sizeof heading, "Watch Later%s", local);
-   else                                       snprintf(heading, sizeof heading, "Trending \xe2\x80\xa2 %s", TrendingNames[home.category]);
+   else                                       snprintf(heading, sizeof heading, "Trending");
    setLabelText(&titleLabel, heading);
 }
 
@@ -367,9 +383,6 @@ static void setSidebarForCategory(void)
    else if (home.category == HOME_ACCOUNT + ACCOUNT_FEED_SUBSCRIPTIONS) setSidebarCurrent(SIDEBAR_ACCOUNT_SUBSCRIPTIONS);
    else if (home.category == HOME_ACCOUNT + ACCOUNT_FEED_HISTORY) setSidebarCurrent(SIDEBAR_ACCOUNT_HISTORY);
    else if (home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER) setSidebarCurrent(SIDEBAR_ACCOUNT_WATCH_LATER);
-   else if (home.category == TREND_GAMING) setSidebarCurrent(SIDEBAR_TRENDING_GAMING);
-   else if (home.category == TREND_SPORTS) setSidebarCurrent(SIDEBAR_TRENDING_SPORTS);
-   else if (home.category == TREND_PODCASTS) setSidebarCurrent(SIDEBAR_TRENDING_PODCASTS);
    else setSidebarCurrent(SIDEBAR_TRENDING);
 }
 
@@ -549,14 +562,13 @@ static void updateSettingsPanel(void)
 
 static void drawSettingsPanel(void)
 {
-   char scaleText[96];
-   if (isGfxSdVideoOutput())
-      snprintf(scaleText, sizeof scaleText, "UI Scaling                         %.1fx", (double)getGfxUiScaleFactor());
-   else
-      snprintf(scaleText, sizeof scaleText, "UI Scaling                         Not available on HD output");
-   setLabelIfChanged(&settingsRows[0], scaleText);
-   setLabelIfChanged(&settingsRows[1], "Content Region                    Configurable in next settings update");
-   setLabelIfChanged(&settingsRows[2], "SponsorBlock                      Per-category controls in next settings update");
+   // Avoid printf floating-point formatting here: the PS3 runtime may be built
+   // without float printf support, which can leave only the trailing "x".
+   const char *scaleValue = !isGfxSdVideoOutput() ? "Unavailable" :
+                            (getGfxUiScaleFactor() >= 1.25f ? "1.5x" : "1.0x");
+   setLabelIfChanged(&settingsValues[0], scaleValue);
+   setLabelIfChanged(&settingsValues[1], "Coming soon");
+   setLabelIfChanged(&settingsValues[2], "Coming soon");
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
    int x = (home.screenW - panelW) / 2;
@@ -564,20 +576,83 @@ static void drawSettingsPanel(void)
    fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
    fillGfxRectangle(x, y, panelW, panelH, activeTheme->appBg);
    fillGfxRectangle(x, y, panelW, 4, activeTheme->accent);
-   drawLabelCentered(&settingsTitle, home.screenW / 2, y + 30);
+   refreshLabelScale(&settingsTitle);
+   drawLabelCentered(&settingsTitle, home.screenW / 2, y + 28);
 
-   int rowGap = (panelH - 184) / 3;
    for (int i = 0; i < 3; i++) {
-      int rowY = y + 92 + i * rowGap;
+      Label *name = &settingsLabels[i];
+      Label *value = &settingsValues[i];
+      int rowY = y + SETTINGS_ROW_TOP + i * SETTINGS_ROW_STEP;
+      refreshLabelScale(name);
+      refreshLabelScale(value);
+
+      int valuePad = 12;
+      int valueW = value->tt.tex.w + valuePad * 2;
+      int minValueW = 88;
+      if (valueW < minValueW) valueW = minValueW;
+      int valueX = x + panelW - 40 - valueW;
+      int valueY = getCenteredLabelY(value, rowY, SETTINGS_ROW_HEIGHT);
+      int valueH = value->tt.tex.h + 10;
+
+      // The focus chip hugs only the value being edited. Its vertical bounds
+      // follow the actual rasterized glyph height, not the row's line box.
       if (i == home.settingsSelected)
-         fillGfxRectangle(x + 24, rowY - 8, panelW - 48, 58, activeTheme->rowHighlight);
-      setLabelColor(&settingsRows[i], i == home.settingsSelected ? activeTheme->accent : activeTheme->textPrimary);
-      refreshLabelScale(&settingsRows[i]);
-      moveLabel(&settingsRows[i], x + 52, rowY);
-      drawLabel(&settingsRows[i]);
+         fillGfxRectangle(valueX, valueY - 5, valueW, valueH, activeTheme->rowHighlight);
+
+      setLabelColor(name, activeTheme->textPrimary);
+      setLabelColor(value, i == home.settingsSelected ? activeTheme->accent : activeTheme->textPrimary);
+      moveLabel(name, x + 40, getCenteredLabelY(name, rowY, SETTINGS_ROW_HEIGHT));
+      moveLabel(value, valueX + (valueW - value->tt.tex.w) / 2, valueY);
+      drawLabel(name);
+      drawLabel(value);
    }
    refreshLabelScale(&settingsFooter);
    drawLabelCentered(&settingsFooter, home.screenW / 2, y + panelH - 42);
+}
+
+static void drawHomeIconFixed(Icon *icon, int x, int y, uint32_t color)
+{
+   if (!icon || !icon->tex || icon->tex->w <= 0 || icon->tex->h <= 0) return;
+   drawGfxTextureFixedPosition(x + icon->offsetX, y + icon->offsetY,
+                               icon->tex->w, icon->tex->h, *icon->tex,
+                               0.0f, 0.0f, 1.0f, 1.0f, color, GFX_FILTER_LINEAR);
+}
+
+static void drawTrendingTabs(void)
+{
+   int x = titleLabel.x + titleLabel.tt.tex.w + 18;
+   int right = home.screenW - MARGIN_X;
+   int gap = TREND_CHIP_GAP;
+   int pad = TREND_CHIP_PAD_X;
+   int total = 0;
+   for (int i = 0; i < TREND_COUNT; i++) {
+      refreshLabelScale(&trendingChipLabels[i]);
+      total += TREND_CHIP_ICON_SIZE + TREND_CHIP_ICON_GAP + trendingChipLabels[i].tt.tex.w + 2 * pad;
+      if (i) total += gap;
+   }
+   int available = right - x;
+   if (total > available) {
+      pad = 4;
+      gap = 3;
+   }
+   int chipY = titleLabel.y + (titleLabel.tt.tex.h - TREND_CHIP_HEIGHT) / 2;
+   if (chipY < titleLabel.y - 4) chipY = titleLabel.y - 4;
+
+   for (int i = 0; i < TREND_COUNT; i++) {
+      Label *label = &trendingChipLabels[i];
+      int chipW = TREND_CHIP_ICON_SIZE + TREND_CHIP_ICON_GAP + label->tt.tex.w + 2 * pad;
+      int active = home.category == i;
+      fillGfxRectangleFixed(x, chipY, chipW, TREND_CHIP_HEIGHT,
+                            active ? activeTheme->rowHighlight : activeTheme->surface);
+      drawHomeIconFixed(&trendingChipIcons[i], x + pad,
+                        chipY + (TREND_CHIP_HEIGHT - TREND_CHIP_ICON_SIZE) / 2,
+                        active ? activeTheme->accent : activeTheme->textSecondary);
+      moveLabel(label, x + pad + TREND_CHIP_ICON_SIZE + TREND_CHIP_ICON_GAP,
+                getCenteredLabelY(label, chipY, TREND_CHIP_HEIGHT));
+      setLabelColor(label, active ? activeTheme->accent : activeTheme->textPrimary);
+      drawLabel(label);
+      x += chipW + gap;
+   }
 }
 
 // OSK confirmed: a link plays directly, anything else opens a search.
@@ -656,13 +731,23 @@ static void initHome(void)
    initLabel(&panelLine2,  &uiFont, 0, 0, accountTextW, AUTO, 22, activeTheme->textPrimary,   TEXT_NOWRAP_ELLIPSIS, "");
    initLabel(&panelCode,   &uiFont, 0, 0, accountTextW, AUTO, 56, activeTheme->textPrimary,   TEXT_NOWRAP, "");
    initLabel(&panelFooter, &uiFont, 0, 0, accountTextW, AUTO, 20, activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
-   initLabel(&settingsTitle, &uiFont, 0, 0, settingsTextW - 48, AUTO, 30, activeTheme->textPrimary, TEXT_NOWRAP, "Settings");
-   for (int i = 0; i < 3; i++)
-      initLabel(&settingsRows[i], &uiFont, 0, 0, settingsTextW - 88, AUTO, 23, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
-   initLabel(&settingsFooter, &uiFont, 0, 0, settingsTextW - 48, AUTO, 19, activeTheme->textSecondary, TEXT_NOWRAP, "X / LEFT / RIGHT: Change     O: Close");
-   setLabelScaleWithUi(&settingsTitle, 1);
-   for (int i = 0; i < 3; i++) setLabelScaleWithUi(&settingsRows[i], 1);
-   setLabelScaleWithUi(&settingsFooter, 1);
+   initLabel(&settingsTitle, &uiFont, 0, 0, settingsTextW - 48, AUTO, 24, activeTheme->textPrimary, TEXT_NOWRAP, "Settings");
+   static const char *settingNames[3] = { "UI Scaling", "Content Region", "SponsorBlock" };
+   for (int i = 0; i < 3; i++) {
+      initLabel(&settingsLabels[i], &uiFont, 0, 0, settingsTextW - 220, AUTO, 20,
+                activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, settingNames[i]);
+      initLabel(&settingsValues[i], &uiFont, 0, 0, 160, AUTO, 22,
+                activeTheme->textPrimary, TEXT_NOWRAP, "");
+   }
+   initLabel(&settingsFooter, &uiFont, 0, 0, settingsTextW - 48, AUTO, 15, activeTheme->textSecondary, TEXT_NOWRAP, "X / LEFT / RIGHT: Change     O: Close");
+   // Settings is a compact control panel; keep its typography at a stable
+   // physical size even when the rest of the UI uses the 1.5x SD font scale.
+   for (int i = 0; i < TREND_COUNT; i++) {
+      initLabel(&trendingChipLabels[i], &uiFont, 0, 0, 220, AUTO, TREND_CHIP_FONT_SIZE,
+                activeTheme->textPrimary, TEXT_NOWRAP, TrendingNames[i]);
+      setLabelScaleWithUi(&trendingChipLabels[i], 1);
+      initIcon(&trendingChipIcons[i], TrendingIcons[i], TREND_CHIP_ICON_SIZE);
+   }
    initButtonHints(&panelHints, &uiFont, panelY + getAccountPanelHeight() - 48, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
    panelConfirmHint = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CROSS),  "Try again");
    panelBackHint    = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CIRCLE), "Close");
@@ -704,7 +789,7 @@ static void updateHome(void)
          openSidebar();
          return;
       }
-      if (isPadButtonPressed(PAD_BTN_LEFT) && gridStage(&home.grid) == GRID_READY &&
+      if (isPadButtonPressed(PAD_BTN_LEFT) &&
           home.grid.columns > 0 && home.grid.selected >= 0 &&
           (home.grid.selected % home.grid.columns) == 0) {
          openSidebar();
@@ -730,14 +815,8 @@ static void updateHome(void)
             case SIDEBAR_ACCOUNT_WATCH_LATER:
                selectAccountFeed(ACCOUNT_FEED_WATCH_LATER);
                break;
-            case SIDEBAR_TRENDING_GAMING:
-               switchToCategory(TREND_GAMING);
-               break;
-            case SIDEBAR_TRENDING_SPORTS:
-               switchToCategory(TREND_SPORTS);
-               break;
-            case SIDEBAR_TRENDING_PODCASTS:
-               switchToCategory(TREND_PODCASTS);
+            case SIDEBAR_TRENDING:
+               if (home.category >= TREND_COUNT) switchToCategory(TREND_GAMING);
                break;
             case SIDEBAR_PS3_SUBSCRIPTIONS:
                switchToCategory(HOME_SUBS);
@@ -833,13 +912,16 @@ static void drawHome(void)
    refreshLabelScale(&titleLabel);
    refreshLabelScale(&statusLabel);
    fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->appBg);
-   drawLabel(&titleLabel);
    if (gridStage(&home.grid) == GRID_READY) {
       drawVideoGrid(&home.grid);
    } else {
       setLabelText(&statusLabel, gridStage(&home.grid) == GRID_EMPTY ? "No results" : "Loading...");
       drawLabel(&statusLabel);
    }
+   // Draw the header after the grid so the category chips remain above any
+   // selection glow that reaches into the header band.
+   drawLabel(&titleLabel);
+   if (home.category < TREND_COUNT) drawTrendingTabs();
    drawButtonHints(&hints, home.screenW);
    if (sdHintsTwoRows) drawButtonHints(&hintsSecondRow, home.screenW);
    drawDownloadOverlay(home.screenW);
@@ -892,8 +974,15 @@ static void termHome(void)
    freeLabel(&panelCode);
    freeLabel(&panelFooter);
    freeLabel(&settingsTitle);
-   for (int i = 0; i < 3; i++) freeLabel(&settingsRows[i]);
+   for (int i = 0; i < 3; i++) {
+      freeLabel(&settingsLabels[i]);
+      freeLabel(&settingsValues[i]);
+   }
    freeLabel(&settingsFooter);
+   for (int i = 0; i < TREND_COUNT; i++) {
+      freeLabel(&trendingChipLabels[i]);
+      freeIcon(&trendingChipIcons[i]);
+   }
    closeFont(&uiFont);
 }
 
