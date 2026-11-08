@@ -15,6 +15,11 @@ void loadSettings(void);   // reads settings.txt, creating it with defaults when
 
 SponsorblockMode getSponsorblockMode(void);
 
+// Automatic recommendation playback after a VOD ends. Defaults to enabled.
+int getAutoplayEnabled(void);
+// Persists the value immediately; returns 0 on success, -1 if settings.txt could not be updated.
+int setAutoplayEnabled(int enabled);
+
 // Uniform display overscan in percent (-10..+10). Changes are saved immediately to settings.txt.
 int getOverscanPercent(void);
 int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails

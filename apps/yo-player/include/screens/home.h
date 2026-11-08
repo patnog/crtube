@@ -6,6 +6,9 @@
 
 void openHome(void);
 
+// Apply an action selected from the shared sidebar overlay (also used by channel view).
+void handleHomeSidebarSelection(int picked);
+
 // Called by playback after the first decoded frame; history is kept only for this app run.
 void recordLocalHistory(const char *videoId, const char *title, const char *author);
 extern Screen homeScreen;

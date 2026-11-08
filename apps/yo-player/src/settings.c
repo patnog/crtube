@@ -13,7 +13,10 @@
 
 // the file written on first launch: each setting at its default, with a comment explaining the values.
 static const char *DEFAULT_SETTINGS =
-   "# yo-player settings - edit over FTP; file edits apply on the next launch\n"
+   "# yo-player settings - Autoplay applies immediately; other startup settings apply on the next launch\n"
+   "\n"
+   "autoplay=on\n"
+   "# on = play the next recommendation when a video ends; off = return to the library\n"
    "\n"
    "sponsorblock-mode=ads\n"
    "# off = never skip anything, ads = skip paid promotions only (sponsors, self-promo,\n"
@@ -27,6 +30,7 @@ static const char *DEFAULT_SETTINGS =
    "# spaces become hyphens). the shipped one is youtube.\n";
 
 static SponsorblockMode sponsorblockMode = SPONSORBLOCK_ADS;
+static int autoplayEnabled = 1;
 static int overscanPercent = 0;
 
 void loadSettings(void)
@@ -35,6 +39,19 @@ void loadSettings(void)
    overscanPercent = 0;
    if (loadSettingsFile(SETTINGS_PATH, DEFAULT_SETTINGS, text, sizeof text) == 1)
       logInfo("[settings] created %s with defaults\n", SETTINGS_PATH);
+
+   autoplayEnabled = 1;
+   const char *autoplay = findSettingValue(text, "autoplay");
+   if (autoplay) {
+      if      (settingValueEquals(autoplay, "on"))  autoplayEnabled = 1;
+      else if (settingValueEquals(autoplay, "off")) autoplayEnabled = 0;
+      else logWarn("[settings] unknown autoplay value, using on\n");
+   } else {
+      // Migrate existing settings.txt files without disturbing their other settings.
+      autoplayEnabled = 1;
+      if (rewriteSettingKey(SETTINGS_PATH, "autoplay", "on") != 0)
+         logWarn("[settings] couldn't add autoplay default to %s\n", SETTINGS_PATH);
+   }
 
    const char *mode = findSettingValue(text, "sponsorblock-mode");
    if (mode) {
@@ -66,6 +83,21 @@ void loadSettings(void)
 }
 
 SponsorblockMode getSponsorblockMode(void) { return sponsorblockMode; }
+
+int getAutoplayEnabled(void) { return autoplayEnabled; }
+
+int setAutoplayEnabled(int enabled)
+{
+   enabled = enabled ? 1 : 0;
+   if (enabled == autoplayEnabled) return 0;
+   if (rewriteSettingKey(SETTINGS_PATH, "autoplay", enabled ? "on" : "off") != 0) {
+      logWarn("[settings] couldn't persist autoplay=%s\n", enabled ? "on" : "off");
+      return -1;
+   }
+   autoplayEnabled = enabled;
+   logInfo("[settings] autoplay=%s\n", enabled ? "on" : "off");
+   return 0;
+}
 
 int getOverscanPercent(void) { return overscanPercent; }
 

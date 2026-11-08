@@ -1688,6 +1688,14 @@ static void updatePlay(void)
    if (state.sbReady && state.stage == STAGE_PLAYING && state.player && !isVideoPaused(state.player) && !state.seeking)
       autoSkipSponsor();
 
+   // With autoplay disabled, ending a VOD behaves like pressing Circle:
+   // return to the screen that launched this video instead of requesting /next.
+   if (state.stage == STAGE_PLAYING && state.player && !state.isLive &&
+       isVideoEnded(state.player) && !getAutoplayEnabled()) {
+      popScreen();
+      return;
+   }
+
    // Automatic playback: ask /next once after a VOD reaches its end. Network failure is non-fatal.
    if (state.stage == STAGE_PLAYING && state.player && !state.isLive &&
        isVideoEnded(state.player) && !state.nextAttempted && !state.nextThreadActive) {

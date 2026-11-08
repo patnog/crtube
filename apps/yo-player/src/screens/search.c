@@ -4,6 +4,8 @@
 
 #include "app-config.h"
 #include "screens/search.h"
+#include "screens/home.h"
+#include "sidebar.h"
 #include "screens/play.h"
 #include "video-grid.h"
 #include "storage.h"
@@ -242,6 +244,23 @@ static void updateSearch(void)
    updateDownloadOverlay();
    if (oskInputActive()) return;
 
+   // Channel pages share the home sidebar. LEFT opens it from the first
+   // column (or while the grid is loading); Circle remains the channel back action.
+   if (search.channelId[0] && !isSidebarActive() && isPadButtonPressed(PAD_BTN_LEFT) &&
+       (gridStage(&search.grid) != GRID_READY || search.grid.columns <= 0 ||
+        search.grid.selected < 0 || (search.grid.selected % search.grid.columns) == 0)) {
+      openSidebar();
+      return;
+   }
+   if (search.channelId[0] && isSidebarActive()) {
+      int picked = updateSidebar();
+      if (picked >= 0) {
+         popScreen();
+         handleHomeSidebarSelection(picked);
+      }
+      return;
+   }
+
    if (search.channelId[0] && isPadButtonPressed(PAD_BTN_L2) && isGfxSdVideoOutput()) {
       cycleSdScale();
       return;
@@ -319,6 +338,7 @@ static void drawSearch(void)
    drawButtonHints(&hints, search.screenW);
    if (sdHintsTwoRows) drawButtonHints(&hintsSecondRow, search.screenW);
    drawDownloadOverlay(search.screenW);
+   if (search.channelId[0]) drawSidebar();
 }
 
 static void termSearch(void)

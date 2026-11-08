@@ -174,10 +174,13 @@ static int         panelConfirmHint, panelBackHint;
 // its row label; font scaling never changes the panel's physical geometry.
 #define SETTINGS_PANEL_W 620
 #define SETTINGS_PANEL_H 440
-#define SETTINGS_ROW_HEIGHT 50
-#define SETTINGS_ROW_TOP 88
-#define SETTINGS_ROW_STEP 68
-static Label settingsTitle, settingsLabels[4], settingsValues[4], settingsFooter;
+#define SETTINGS_ROW_HEIGHT 46
+#define SETTINGS_ROW_TOP 78
+#define SETTINGS_ROW_STEP 58
+#define SETTINGS_ROW_COUNT 5
+static Label settingsTitle, settingsLabels[SETTINGS_ROW_COUNT], settingsValues[SETTINGS_ROW_COUNT];
+static ButtonHints settingsHints;
+static Label settingsAutoplayOptions[2];
 
 // Trending's feeds remain separate pages, presented as one page with three
 // persistent category chips in the header (matching TEE Vanced's layout).
@@ -552,14 +555,22 @@ static void openSettingsPanel(void)
 static void updateSettingsPanel(void)
 {
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.settingsOpen = 0; return; }
-   if (isPadButtonPressed(PAD_BTN_UP)) home.settingsSelected = (home.settingsSelected + 3) % 4;
-   if (isPadButtonPressed(PAD_BTN_DOWN)) home.settingsSelected = (home.settingsSelected + 1) % 4;
+   if (isPadButtonPressed(PAD_BTN_UP))
+      home.settingsSelected = (home.settingsSelected + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
+   if (isPadButtonPressed(PAD_BTN_DOWN))
+      home.settingsSelected = (home.settingsSelected + 1) % SETTINGS_ROW_COUNT;
    if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
        isPadButtonPressed(PAD_BTN_RIGHT)) {
       if (home.settingsSelected == 0) {
+         int enabled = getAutoplayEnabled();
+         if (isPadButtonPressed(PAD_BTN_LEFT)) enabled = 0;
+         else if (isPadButtonPressed(PAD_BTN_RIGHT)) enabled = 1;
+         else enabled = !enabled;
+         setAutoplayEnabled(enabled);
+      } else if (home.settingsSelected == 1) {
          cycleSdScale();
          refreshScaleHint();
-      } else if (home.settingsSelected == 1) {
+      } else if (home.settingsSelected == 2) {
          int delta = isPadButtonPressed(PAD_BTN_LEFT) ? -1 : 1;
          setOverscanPercent(getOverscanPercent() + delta);
       }
@@ -576,10 +587,10 @@ static void drawSettingsPanel(void)
    int overscan = getOverscanPercent();
    if (overscan > 0) snprintf(overscanValue, sizeof overscanValue, "+%d%%", overscan);
    else              snprintf(overscanValue, sizeof overscanValue, "%d%%", overscan);
-   setLabelIfChanged(&settingsValues[0], scaleValue);
-   setLabelIfChanged(&settingsValues[1], overscanValue);
-   setLabelIfChanged(&settingsValues[2], "Coming soon");
+   setLabelIfChanged(&settingsValues[1], scaleValue);
+   setLabelIfChanged(&settingsValues[2], overscanValue);
    setLabelIfChanged(&settingsValues[3], "Coming soon");
+   setLabelIfChanged(&settingsValues[4], "Coming soon");
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
    int x = (home.screenW - panelW) / 2;
@@ -590,13 +601,39 @@ static void drawSettingsPanel(void)
    refreshLabelScale(&settingsTitle);
    drawLabelCentered(&settingsTitle, home.screenW / 2, y + 28);
 
-   for (int i = 0; i < 4; i++) {
+   int autoplayX = x + panelW - 40 - 132;
+   for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
       Label *name = &settingsLabels[i];
-      Label *value = &settingsValues[i];
       int rowY = y + SETTINGS_ROW_TOP + i * SETTINGS_ROW_STEP;
       refreshLabelScale(name);
-      refreshLabelScale(value);
+      setLabelColor(name, activeTheme->textPrimary);
+      moveLabel(name, x + 40, getCenteredLabelY(name, rowY, SETTINGS_ROW_HEIGHT));
+      drawLabel(name);
 
+      if (i == 0) {
+         // Keep the inactive track dark and draw a restrained halo around
+         // only the active selector instead of highlighting the full switch.
+         int selected = getAutoplayEnabled() ? 1 : 0;
+         int toggleY = rowY + (SETTINGS_ROW_HEIGHT - 36) / 2;
+         int selectedX = autoplayX + selected * 66;
+         fillGfxRoundedRectangle(autoplayX, toggleY, 132, 36, 8, activeTheme->surface);
+         if (i == home.settingsSelected)
+            fillGfxRoundedRectangle(selectedX - 4, toggleY - 4, 74, 44, 10, 0x38FFFFFF);
+         fillGfxRoundedRectangle(selectedX, toggleY, 66, 36, 8, activeTheme->accent);
+         for (int option = 0; option < 2; option++) {
+            Label *optionLabel = &settingsAutoplayOptions[option];
+            refreshLabelScale(optionLabel);
+            setLabelColor(optionLabel, option == selected ? activeTheme->appBg : activeTheme->textPrimary);
+            moveLabel(optionLabel,
+                      autoplayX + option * 66 + (66 - optionLabel->tt.tex.w) / 2,
+                      getCenteredLabelY(optionLabel, toggleY, 36));
+            drawLabel(optionLabel);
+         }
+         continue;
+      }
+
+      Label *value = &settingsValues[i];
+      refreshLabelScale(value);
       int valuePad = 12;
       int valueW = value->tt.tex.w + valuePad * 2;
       int minValueW = 88;
@@ -605,21 +642,16 @@ static void drawSettingsPanel(void)
       int valueY = getCenteredLabelY(value, rowY, SETTINGS_ROW_HEIGHT);
       int valueH = value->tt.tex.h + 10;
 
-      // The focus chip hugs only the value being edited. Its vertical bounds
-      // follow the actual rasterized glyph height, not the row's line box.
       if (i == home.settingsSelected)
          fillGfxRoundedRectangle(valueX, valueY - 5, valueW, valueH, 7,
                                  activeTheme->rowHighlight);
 
-      setLabelColor(name, activeTheme->textPrimary);
       setLabelColor(value, i == home.settingsSelected ? activeTheme->accent : activeTheme->textPrimary);
-      moveLabel(name, x + 40, getCenteredLabelY(name, rowY, SETTINGS_ROW_HEIGHT));
       moveLabel(value, valueX + (valueW - value->tt.tex.w) / 2, valueY);
-      drawLabel(name);
       drawLabel(value);
    }
-   refreshLabelScale(&settingsFooter);
-   drawLabelCentered(&settingsFooter, home.screenW / 2, y + panelH - 42);
+   settingsHints.y = y + panelH - 42;
+   drawButtonHints(&settingsHints, home.screenW);
 }
 
 static void drawHomeIconFixed(Icon *icon, int x, int y, uint32_t color)
@@ -678,6 +710,47 @@ static void onQueryEntered(const char *text)
    logInfo("[diag-search] home query path: cacheCurrent done; openSearchQuery begin\n");
    openSearchQuery(text);
    logInfo("[diag-search] home query path: openSearchQuery returned\n");
+}
+
+void handleHomeSidebarSelection(int picked)
+{
+   switch (picked) {
+      case SIDEBAR_SEARCH:
+         oskInputBegin("Search YouTube", "", onQueryEntered);
+         break;
+      case SIDEBAR_RECOMMENDED:
+         selectAccountFeed(ACCOUNT_FEED_HOME);
+         break;
+      case SIDEBAR_ACCOUNT_SUBSCRIPTIONS:
+         selectAccountFeed(ACCOUNT_FEED_SUBSCRIPTIONS);
+         break;
+      case SIDEBAR_ACCOUNT_HISTORY:
+         selectAccountFeed(ACCOUNT_FEED_HISTORY);
+         break;
+      case SIDEBAR_ACCOUNT_WATCH_LATER:
+         selectAccountFeed(ACCOUNT_FEED_WATCH_LATER);
+         break;
+      case SIDEBAR_TRENDING:
+         if (home.category >= TREND_COUNT) switchToCategory(TREND_GAMING);
+         break;
+      case SIDEBAR_PS3_SUBSCRIPTIONS:
+         switchToCategory(HOME_SUBS);
+         break;
+      case SIDEBAR_PS3_HISTORY:
+         switchToCategory(HOME_LOCAL_HISTORY);
+         break;
+      case SIDEBAR_PS3_WATCH_LATER:
+         switchToCategory(HOME_WATCHLATER);
+         break;
+      case SIDEBAR_ACCOUNT:
+         openAccountPanel();
+         break;
+      case SIDEBAR_SETTINGS:
+         openSettingsPanel();
+         break;
+      default:
+         break;
+   }
 }
 
 static void initHome(void)
@@ -747,14 +820,26 @@ static void initHome(void)
    initLabel(&panelCode,   &uiFont, 0, 0, accountTextW, AUTO, 56, activeTheme->textPrimary,   TEXT_NOWRAP, "");
    initLabel(&panelFooter, &uiFont, 0, 0, accountTextW, AUTO, 20, activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabel(&settingsTitle, &uiFont, 0, 0, settingsTextW - 48, AUTO, 24, activeTheme->textPrimary, TEXT_NOWRAP, "Settings");
-   static const char *settingNames[4] = { "UI Scaling", "Overscan", "Content Region", "SponsorBlock" };
-   for (int i = 0; i < 4; i++) {
+   static const char *settingNames[SETTINGS_ROW_COUNT] = {
+      "Autoplay", "UI Scaling", "Overscan", "Content Region", "SponsorBlock"
+   };
+   for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
       initLabel(&settingsLabels[i], &uiFont, 0, 0, settingsTextW - 220, AUTO, 20,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, settingNames[i]);
       initLabel(&settingsValues[i], &uiFont, 0, 0, 160, AUTO, 22,
                 activeTheme->textPrimary, TEXT_NOWRAP, "");
    }
-   initLabel(&settingsFooter, &uiFont, 0, 0, settingsTextW - 48, AUTO, 15, activeTheme->textSecondary, TEXT_NOWRAP, "X / LEFT / RIGHT: Change     O: Close");
+   initLabel(&settingsAutoplayOptions[0], &uiFont, 0, 0, 60, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, "OFF");
+   initLabel(&settingsAutoplayOptions[1], &uiFont, 0, 0, 60, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, "ON");
+   // Use native PS3 controller glyphs instead of textual button names.
+   // The three action glyphs are grouped before their shared "Change" caption.
+   initButtonHints(&settingsHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
+   addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_CROSS), "");
+   addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_DPAD_LEFT), "");
+   addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Change");
+   addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_CIRCLE), "Close");
    // Settings is a compact control panel; keep its typography at a stable
    // physical size even when the rest of the UI uses the 1.5x SD font scale.
    for (int i = 0; i < TREND_COUNT; i++) {
@@ -813,43 +898,7 @@ static void updateHome(void)
    }
    if (isSidebarActive()) {
       int picked = updateSidebar();
-      if (picked >= 0) {
-         switch (picked) {
-            case SIDEBAR_SEARCH:
-               oskInputBegin("Search YouTube", "", onQueryEntered);
-               break;
-            case SIDEBAR_RECOMMENDED:
-               selectAccountFeed(ACCOUNT_FEED_HOME);
-               break;
-            case SIDEBAR_ACCOUNT_SUBSCRIPTIONS:
-               selectAccountFeed(ACCOUNT_FEED_SUBSCRIPTIONS);
-               break;
-            case SIDEBAR_ACCOUNT_HISTORY:
-               selectAccountFeed(ACCOUNT_FEED_HISTORY);
-               break;
-            case SIDEBAR_ACCOUNT_WATCH_LATER:
-               selectAccountFeed(ACCOUNT_FEED_WATCH_LATER);
-               break;
-            case SIDEBAR_TRENDING:
-               if (home.category >= TREND_COUNT) switchToCategory(TREND_GAMING);
-               break;
-            case SIDEBAR_PS3_SUBSCRIPTIONS:
-               switchToCategory(HOME_SUBS);
-               break;
-            case SIDEBAR_PS3_HISTORY:
-               switchToCategory(HOME_LOCAL_HISTORY);
-               break;
-            case SIDEBAR_PS3_WATCH_LATER:
-               switchToCategory(HOME_WATCHLATER);
-               break;
-            case SIDEBAR_ACCOUNT:
-               openAccountPanel();
-               break;
-            case SIDEBAR_SETTINGS:
-               openSettingsPanel();
-               break;
-         }
-      }
+      if (picked >= 0) handleHomeSidebarSelection(picked);
       return;
    }
 
@@ -989,11 +1038,13 @@ static void termHome(void)
    freeLabel(&panelCode);
    freeLabel(&panelFooter);
    freeLabel(&settingsTitle);
-   for (int i = 0; i < 4; i++) {
+   for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
       freeLabel(&settingsLabels[i]);
       freeLabel(&settingsValues[i]);
    }
-   freeLabel(&settingsFooter);
+   freeLabel(&settingsAutoplayOptions[0]);
+   freeLabel(&settingsAutoplayOptions[1]);
+   termButtonHints(&settingsHints);
    for (int i = 0; i < TREND_COUNT; i++) {
       freeLabel(&trendingChipLabels[i]);
       freeIcon(&trendingChipIcons[i]);
