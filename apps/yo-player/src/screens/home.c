@@ -23,6 +23,7 @@
 #include "font.h"
 #include "ui/label.h"
 #include "screen-manager.h"
+#include "button-repeat.h"
 #include "osk-input.h"
 #include "string-utilities.h"   // strCopy
 #include "dbg.h"
@@ -98,6 +99,10 @@ static struct {
    int       accountOpen;   // the sign-in / account panel is showing
    int       settingsOpen;  // the settings window is showing
    int       settingsSelected;
+   int       regionOpen;
+   int       regionSelected;
+   int       regionTop;
+   int       regionVisible;
    int       pendingAccountCategory; // account feed selected before signing in, or -1
 } home;
 
@@ -172,6 +177,17 @@ static int         panelConfirmHint, panelBackHint;
 static Label settingsTitle, settingsLabels[SETTINGS_ROW_COUNT], settingsValues[SETTINGS_ROW_COUNT];
 static ButtonHints settingsHints;
 static Label settingsAutoplayOptions[2];
+#define REGION_MAX_ROWS 40
+#define REGION_PANEL_W 620
+#define REGION_PANEL_H 440
+#define REGION_ROW_H 34
+#define REGION_LIST_TOP 78
+#define REGION_FOOTER_H 52
+static Label regionTitle, regionDescription, regionPosition;
+static Label regionNames[REGION_MAX_ROWS], regionCodes[REGION_MAX_ROWS];
+static ButtonHints regionHints;
+static ButtonRepeat regionNavigateRepeat, regionPageRepeat;
+static unsigned regionRevisionSeen;
 
 // Trending's feeds remain separate pages, presented as one page with three
 // persistent category chips in the header (matching TEE Vanced's layout).
@@ -537,6 +553,134 @@ static void drawAccountPanel(void)
    drawButtonHints(&panelHints, home.screenW);
 }
 
+static int getRegionPanelWidth(void)
+{
+   int width = home.screenW - 48;
+   return width < REGION_PANEL_W ? width : REGION_PANEL_W;
+}
+
+static int getRegionPanelHeight(void)
+{
+   int height = home.screenH - 48;
+   return height < REGION_PANEL_H ? height : REGION_PANEL_H;
+}
+
+static void clampRegionTop(void)
+{
+   int maxTop = getContentRegionCount() - home.regionVisible;
+   if (maxTop < 0) maxTop = 0;
+   if (home.regionTop > maxTop) home.regionTop = maxTop;
+   if (home.regionTop < 0) home.regionTop = 0;
+}
+
+static void followRegionSelection(void)
+{
+   if (home.regionSelected < home.regionTop) home.regionTop = home.regionSelected;
+   if (home.regionSelected >= home.regionTop + home.regionVisible)
+      home.regionTop = home.regionSelected - home.regionVisible + 1;
+   clampRegionTop();
+}
+
+static void openRegionPicker(void)
+{
+   int count = getContentRegionCount();
+   if (count <= 0) return;
+   home.regionOpen = 1;
+   home.regionSelected = getContentRegionIndex();
+   int panelH = getRegionPanelHeight();
+   int available = panelH - REGION_LIST_TOP - REGION_FOOTER_H;
+   home.regionVisible = available / REGION_ROW_H;
+   if (home.regionVisible < 1) home.regionVisible = 1;
+   if (home.regionVisible > count) home.regionVisible = count;
+   home.regionTop = home.regionSelected - home.regionVisible / 2;
+   clampRegionTop();
+   uint64_t now = sys_time_get_system_time();
+   regionNavigateRepeat.timer = now; regionNavigateRepeat.repeats = 0;
+   regionPageRepeat.timer = now; regionPageRepeat.repeats = 0;
+}
+
+static void updateRegionPicker(void)
+{
+   int count = getContentRegionCount();
+   if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.regionOpen = 0; return; }
+   if (count <= 0) return;
+
+   if      (isRepeatDue(&regionNavigateRepeat, getPadButtonState(PAD_BTN_DOWN))) {
+      home.regionSelected = (home.regionSelected + 1) % count;
+      followRegionSelection();
+   } else if (isRepeatDue(&regionNavigateRepeat, getPadButtonState(PAD_BTN_UP))) {
+      home.regionSelected = (home.regionSelected + count - 1) % count;
+      followRegionSelection();
+   }
+
+   if (isRepeatDue(&regionPageRepeat, getPadButtonState(PAD_BTN_R2))) {
+      home.regionSelected += home.regionVisible;
+      if (home.regionSelected >= count) home.regionSelected = count - 1;
+      followRegionSelection();
+   } else if (isRepeatDue(&regionPageRepeat, getPadButtonState(PAD_BTN_L2))) {
+      home.regionSelected -= home.regionVisible;
+      if (home.regionSelected < 0) home.regionSelected = 0;
+      followRegionSelection();
+   }
+
+   if (isPadButtonPressed(PAD_BTN_CROSS)) {
+      setContentRegionIndex(home.regionSelected);
+      home.regionOpen = 0;
+   }
+}
+
+static void drawRegionPicker(void)
+{
+   int panelW = getRegionPanelWidth(), panelH = getRegionPanelHeight();
+   int x = (home.screenW - panelW) / 2, y = (home.screenH - panelH) / 2;
+   int count = getContentRegionCount();
+   int current = getContentRegionIndex();
+   char position[24];
+
+   fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRoundedRectangle(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangle(x, y, panelW, 4, 2, activeTheme->accent);
+
+   refreshLabelScale(&regionTitle);
+   refreshLabelScale(&regionDescription);
+   refreshLabelScale(&regionPosition);
+   drawLabelCentered(&regionTitle, home.screenW / 2, y + 27);
+   moveLabel(&regionDescription, x + 28, y + 52);
+   setLabelColor(&regionDescription, activeTheme->textSecondary);
+   drawLabel(&regionDescription);
+   snprintf(position, sizeof position, "%d / %d", home.regionSelected + 1, count);
+   setLabelIfChanged(&regionPosition, position);
+   moveLabel(&regionPosition, x + panelW - 28 - regionPosition.tt.tex.w, y + 52);
+   setLabelColor(&regionPosition, activeTheme->textSecondary);
+   drawLabel(&regionPosition);
+
+   int end = home.regionTop + home.regionVisible;
+   if (end > count) end = count;
+   for (int row = home.regionTop; row < end; row++) {
+      int rowY = y + REGION_LIST_TOP + (row - home.regionTop) * REGION_ROW_H;
+      int selected = row == home.regionSelected;
+      int inUse = row == current;
+      refreshLabelScale(&regionNames[row]);
+      refreshLabelScale(&regionCodes[row]);
+      int labelY = getCenteredLabelY(&regionNames[row], rowY, REGION_ROW_H - 3);
+      if (selected)
+         fillGfxRoundedRectangle(x + 18, labelY - 5, panelW - 36,
+                                 regionNames[row].tt.tex.h + 10, 7, activeTheme->rowHighlight);
+      if (inUse)
+         fillGfxRoundedRectangle(x + 28, rowY + 7, 3, REGION_ROW_H - 17, 2, activeTheme->accent);
+      setLabelColor(&regionNames[row], inUse ? activeTheme->accent :
+                    (selected ? activeTheme->textPrimary : activeTheme->textSecondary));
+      setLabelColor(&regionCodes[row], selected ? activeTheme->textPrimary : activeTheme->textSecondary);
+      moveLabel(&regionNames[row], x + 44, labelY);
+      moveLabel(&regionCodes[row], x + panelW - 42 - regionCodes[row].tt.tex.w,
+                getCenteredLabelY(&regionCodes[row], rowY, REGION_ROW_H - 3));
+      drawLabel(&regionNames[row]);
+      drawLabel(&regionCodes[row]);
+   }
+   regionHints.y = y + panelH - 40;
+   drawButtonHints(&regionHints, home.screenW);
+}
+
 static void openSettingsPanel(void)
 {
    home.settingsOpen = 1;
@@ -545,6 +689,7 @@ static void openSettingsPanel(void)
 
 static void updateSettingsPanel(void)
 {
+   if (home.regionOpen) { updateRegionPicker(); return; }
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.settingsOpen = 0; return; }
    if (isPadButtonPressed(PAD_BTN_UP))
       home.settingsSelected = (home.settingsSelected + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
@@ -563,6 +708,8 @@ static void updateSettingsPanel(void)
       } else if (home.settingsSelected == 2) {
          int delta = isPadButtonPressed(PAD_BTN_LEFT) ? -1 : 1;
          setOverscanPercent(getOverscanPercent() + delta);
+      } else if (home.settingsSelected == 3 && isPadButtonPressed(PAD_BTN_CROSS)) {
+         openRegionPicker();
       }
    }
 }
@@ -579,7 +726,8 @@ static void drawSettingsPanel(void)
    else              snprintf(overscanValue, sizeof overscanValue, "%d%%", overscan);
    setLabelIfChanged(&settingsValues[1], scaleValue);
    setLabelIfChanged(&settingsValues[2], overscanValue);
-   setLabelIfChanged(&settingsValues[3], "Coming soon");
+   const ContentRegion *region = getContentRegionAt(getContentRegionIndex());
+   setLabelIfChanged(&settingsValues[3], region ? region->name : getContentRegionCode());
    setLabelIfChanged(&settingsValues[4], "Coming soon");
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
@@ -748,6 +896,8 @@ static void initHome(void)
    home.pendingAccountCategory = -1;
    home.settingsOpen = 0;
    home.settingsSelected = 0;
+   home.regionOpen = 0;
+   regionRevisionSeen = getContentRegionRevision();
    loadSdScale();
    home.screenW = getGfxScreenWidth();
    home.screenH = getGfxScreenHeight();
@@ -823,6 +973,28 @@ static void initHome(void)
              activeTheme->textPrimary, TEXT_NOWRAP, "OFF");
    initLabel(&settingsAutoplayOptions[1], &uiFont, 0, 0, 60, AUTO, 20,
              activeTheme->textPrimary, TEXT_NOWRAP, "ON");
+   initLabel(&regionTitle, &uiFont, 0, 0, getRegionPanelWidth() - 48, AUTO, 24,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Content Region");
+   initLabel(&regionDescription, &uiFont, 0, 0, getRegionPanelWidth() - 150, AUTO, 15,
+             activeTheme->textSecondary, TEXT_NOWRAP, "Country used for YouTube content lists");
+   initLabel(&regionPosition, &uiFont, 0, 0, 80, AUTO, 15,
+             activeTheme->textSecondary, TEXT_NOWRAP, "1 / 33");
+   for (int i = 0; i < getContentRegionCount() && i < REGION_MAX_ROWS; i++) {
+      const ContentRegion *region = getContentRegionAt(i);
+      initLabel(&regionNames[i], &uiFont, 0, 0, getRegionPanelWidth() - 150, AUTO, 18,
+                activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, region ? region->name : "");
+      initLabel(&regionCodes[i], &uiFont, 0, 0, 48, AUTO, 18,
+                activeTheme->textSecondary, TEXT_NOWRAP, region ? region->code : "");
+      setLabelScaleWithUi(&regionNames[i], 1);
+      setLabelScaleWithUi(&regionCodes[i], 1);
+   }
+   initButtonHints(&regionHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
+   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_CROSS), "Choose");
+   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_DPAD_UP), "");
+   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Move");
+   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_L2), "");
+   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_R2), "Page");
+   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
    // Use native PS3 controller glyphs instead of textual button names.
    // The three action glyphs are grouped before their shared "Change" caption.
    initButtonHints(&settingsHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
@@ -867,6 +1039,14 @@ static void updateHome(void)
    updateDownloadOverlay();
    updateSignIn();
    if (getAccountRevision() != accountRevisionSeen) applyAccountChange();
+   if (getContentRegionRevision() != regionRevisionSeen) {
+      regionRevisionSeen = getContentRegionRevision();
+      for (int c = 0; c < TREND_COUNT; c++) categoryCached[c] = 0;
+      categoryCached[HOME_ACCOUNT + ACCOUNT_FEED_HOME] = 0;
+      logInfo("[home] content region changed to %s; regional feeds invalidated\n", getContentRegionCode());
+      if (home.category < TREND_COUNT || home.category == HOME_ACCOUNT + ACCOUNT_FEED_HOME)
+         refreshCurrentCategory();
+   }
    if (home.accountOpen) { updateAccountPanel(); return; }
    if (home.settingsOpen) { updateSettingsPanel(); return; }
    if (oskInputActive()) return;
@@ -974,7 +1154,7 @@ static void drawHome(void)
    drawDownloadOverlay(home.screenW);
    if (!home.accountOpen && !home.settingsOpen) drawSidebar();
    if (home.accountOpen) drawAccountPanel();
-   if (home.settingsOpen) drawSettingsPanel();
+   if (home.settingsOpen) { drawSettingsPanel(); if (home.regionOpen) drawRegionPicker(); }
 }
 
 static void suspendHome(void) { stopVideoGrid(&home.grid); }   // free the http pools for the pushed screen
@@ -1028,6 +1208,11 @@ static void termHome(void)
    freeLabel(&settingsAutoplayOptions[0]);
    freeLabel(&settingsAutoplayOptions[1]);
    termButtonHints(&settingsHints);
+   freeLabel(&regionTitle);
+   freeLabel(&regionDescription);
+   freeLabel(&regionPosition);
+   for (int i = 0; i < REGION_MAX_ROWS; i++) { freeLabel(&regionNames[i]); freeLabel(&regionCodes[i]); }
+   termButtonHints(&regionHints);
    for (int i = 0; i < TREND_COUNT; i++) {
       freeLabel(&trendingChipLabels[i]);
       freeIcon(&trendingChipIcons[i]);

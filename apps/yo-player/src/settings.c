@@ -8,15 +8,18 @@
 #include "dbg.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 #define SETTINGS_PATH CRTUBE_DATA_DIR "/settings.txt"
 
 // the file written on first launch: each setting at its default, with a comment explaining the values.
 static const char *DEFAULT_SETTINGS =
-   "# yo-player settings - Autoplay applies immediately; other startup settings apply on the next launch\n"
+   "# yo-player settings - Autoplay, overscan and content region apply immediately; theme applies on next launch\n"
    "\n"
    "autoplay=on\n"
    "# on = play the next recommendation when a video ends; off = return to the library\n"
+   "region=US\n"
+   "# country used for YouTube content lists (two-letter gl code); default US\n"
    "\n"
    "sponsorblock-mode=ads\n"
    "# off = never skip anything, ads = skip paid promotions only (sponsors, self-promo,\n"
@@ -33,10 +36,60 @@ static SponsorblockMode sponsorblockMode = SPONSORBLOCK_ADS;
 static int autoplayEnabled = 1;
 static int overscanPercent = 0;
 
+static const ContentRegion REGIONS[] = {
+   { "DE", "Germany" }, { "AT", "Austria" }, { "CH", "Switzerland" },
+   { "AU", "Australia" }, { "BE", "Belgium" }, { "BR", "Brazil" },
+   { "BG", "Bulgaria" }, { "CA", "Canada" }, { "HR", "Croatia" },
+   { "CZ", "Czechia" }, { "DK", "Denmark" }, { "FI", "Finland" },
+   { "FR", "France" }, { "GR", "Greece" }, { "HU", "Hungary" },
+   { "IE", "Ireland" }, { "IT", "Italy" }, { "JP", "Japan" },
+   { "MX", "Mexico" }, { "NL", "Netherlands" }, { "NO", "Norway" },
+   { "PL", "Poland" }, { "PT", "Portugal" }, { "RO", "Romania" },
+   { "RU", "Russia" }, { "RS", "Serbia" }, { "KR", "South Korea" },
+   { "ES", "Spain" }, { "SE", "Sweden" }, { "TR", "Turkey" },
+   { "UA", "Ukraine" }, { "GB", "United Kingdom" }, { "US", "United States" }
+};
+#define REGION_COUNT ((int)(sizeof REGIONS / sizeof REGIONS[0]))
+static volatile int regionIndex = -1;
+static unsigned regionRevision;
+static int regionUnsaved;
+
+static int defaultRegionIndex(void)
+{
+   for (int i = 0; i < REGION_COUNT; i++) if (strcmp(REGIONS[i].code, "US") == 0) return i;
+   return 0;
+}
+
+int getContentRegionCount(void) { return REGION_COUNT; }
+const ContentRegion *getContentRegionAt(int index)
+{
+   return index >= 0 && index < REGION_COUNT ? &REGIONS[index] : NULL;
+}
+int getContentRegionIndex(void)
+{
+   int index = regionIndex;
+   return index >= 0 && index < REGION_COUNT ? index : defaultRegionIndex();
+}
+const char *getContentRegionCode(void) { return REGIONS[getContentRegionIndex()].code; }
+unsigned getContentRegionRevision(void) { return regionRevision; }
+
+static int parseRegion(const char *value)
+{
+   if (!value || !value[0] || !value[1]) return -1;
+   for (int i = 0; i < REGION_COUNT; i++) {
+      if (value[0] == REGIONS[i].code[0] && value[1] == REGIONS[i].code[1] &&
+          (value[2] == 0 || value[2] == '\r' || value[2] == '\n' || value[2] == ' ' || value[2] == '\t')) return i;
+   }
+   return -1;
+}
+
 void loadSettings(void)
 {
    char text[2048];
    overscanPercent = 0;
+   regionIndex = defaultRegionIndex();
+   regionRevision = 0;
+   regionUnsaved = 0;
    if (loadSettingsFile(SETTINGS_PATH, DEFAULT_SETTINGS, text, sizeof text) == 1)
       logInfo("[settings] created %s with defaults\n", SETTINGS_PATH);
 
@@ -51,6 +104,18 @@ void loadSettings(void)
       autoplayEnabled = 1;
       if (rewriteSettingKey(SETTINGS_PATH, "autoplay", "on") != 0)
          logWarn("[settings] couldn't add autoplay default to %s\n", SETTINGS_PATH);
+   }
+
+   const char *region = findSettingValue(text, "region");
+   int parsedRegion = parseRegion(region);
+   if (parsedRegion >= 0) {
+      regionIndex = parsedRegion;
+      logInfo("[settings] content region %s (%s)\n", REGIONS[parsedRegion].code, REGIONS[parsedRegion].name);
+   } else {
+      regionIndex = defaultRegionIndex();
+      if (region) logWarn("[settings] unknown content region, using US\n");
+      if (!region && rewriteSettingKey(SETTINGS_PATH, "region", "US") != 0)
+         logWarn("[settings] could not add default content region\n");
    }
 
    const char *mode = findSettingValue(text, "sponsorblock-mode");
@@ -118,5 +183,21 @@ int setOverscanPercent(int percent)
    overscanPercent = percent;
    setGfxOverscan(overscanPercent);
    logInfo("[settings] overscan set to %d%%\n", overscanPercent);
+   return 0;
+}
+
+int setContentRegionIndex(int index)
+{
+   if (index < 0 || index >= REGION_COUNT) return -1;
+   int old = getContentRegionIndex();
+   if (index == old && !regionUnsaved) return 0;
+   if (index != old) { regionIndex = index; regionRevision++; }
+   if (rewriteSettingKey(SETTINGS_PATH, "region", REGIONS[index].code) != 0) {
+      regionUnsaved = 1;
+      logWarn("[settings] could not persist region=%s\n", REGIONS[index].code);
+      return -1;
+   }
+   regionUnsaved = 0;
+   logInfo("[settings] content region %s -> %s\n", REGIONS[old].code, REGIONS[index].code);
    return 0;
 }

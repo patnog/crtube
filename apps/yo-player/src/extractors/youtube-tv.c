@@ -10,12 +10,13 @@
 #include "youtube-tv.h"
 #include "json.h"               // decodeJsonString
 #include "string-utilities.h"   // strCopy
+#include "settings.h"           // getContentRegionCode
 
 #include <string.h>
 #include <stdio.h>
 
-#define TV_CONTEXT \
-   "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\",\"clientVersion\":\"" TV_CLIENT_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"}}"
+#define TV_CONTEXT_FMT \
+   "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\",\"clientVersion\":\"" TV_CLIENT_VERSION "\",\"hl\":\"en\",\"gl\":\"%s\"}}"
 
 // order matches AccountFeed
 static const char *ACCOUNT_FEED_IDS[ACCOUNT_FEED_COUNT] = { "FEwhat_to_watch", "FEsubscriptions", "FEhistory", "VLWL" };
@@ -23,8 +24,9 @@ static const char *ACCOUNT_FEED_IDS[ACCOUNT_FEED_COUNT] = { "FEwhat_to_watch", "
 int buildTvBrowseBody(char *out, int cap, AccountFeed feed, const char *continuation)
 {
    if (feed < 0 || feed >= ACCOUNT_FEED_COUNT) return -1;
-   int length = continuation ? snprintf(out, cap, TV_CONTEXT ",\"continuation\":\"%s\"}", continuation)
-                             : snprintf(out, cap, TV_CONTEXT ",\"browseId\":\"%s\"}", ACCOUNT_FEED_IDS[feed]);
+   const char *gl = getContentRegionCode();
+   int length = continuation ? snprintf(out, cap, TV_CONTEXT_FMT ",\"continuation\":\"%s\"}", gl, continuation)
+                             : snprintf(out, cap, TV_CONTEXT_FMT ",\"browseId\":\"%s\"}", gl, ACCOUNT_FEED_IDS[feed]);
    return (length < 0 || length >= cap) ? -1 : length;
 }
 

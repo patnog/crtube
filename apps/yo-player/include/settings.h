@@ -23,3 +23,12 @@ int setAutoplayEnabled(int enabled);
 // Uniform display overscan in percent (-10..+10). Changes are saved immediately to settings.txt.
 int getOverscanPercent(void);
 int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails
+
+// YouTube content region (gl): changes the country used by browse/search list requests.
+typedef struct { const char *code; const char *name; } ContentRegion;
+int getContentRegionCount(void);
+const ContentRegion *getContentRegionAt(int index);
+int getContentRegionIndex(void);
+const char *getContentRegionCode(void);
+int setContentRegionIndex(int index);
+unsigned getContentRegionRevision(void);

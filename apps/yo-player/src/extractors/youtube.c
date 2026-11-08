@@ -17,6 +17,7 @@
 #include "vfs.h"                // readFile/writeFile/deleteFile (persist the visitor session)
 #include "account.h"            // getAccessToken (signed-in feeds)
 #include "account-oauth.h"      // OAUTH_ACCESS_TOKEN_MAX
+#include "settings.h"           // getContentRegionCode: region for list requests
 #include "youtube-tv.h"         // parseTvTiles
 
 #include <stdlib.h>
@@ -51,8 +52,8 @@
    "\"clientName\":\"VISIONOS\",\"clientVersion\":\"" PLAYER_VERSION "\"," \
    "\"deviceMake\":\"Apple\",\"deviceModel\":\"RealityDevice17,1\"," \
    "\"osName\":\"visionOS\",\"osVersion\":\"26.5.23O471\",\"hl\":\"en\",\"gl\":\"US\""
-#define WEB_CONTEXT \
-   "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"}}"
+#define WEB_CONTEXT_FMT \
+   "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"%s\"}}"
 
 static const char *PLAYER_UA =
    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
@@ -77,21 +78,21 @@ static const char *LIVE_UA =
 static const char *LIVE_BODY_FMT =
    "{\"context\":{\"client\":{" LIVE_CLIENT ",\"visitorData\":\"%s\"}},\"videoId\":\"%s\",\"contentCheckOk\":true,\"racyCheckOk\":true}";
 
-static const char *VISITOR_BODY   = WEB_CONTEXT "}";   // WEB_CONTEXT leaves the root object open; close it
+static const char *VISITOR_BODY   = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"}}}";   // visitor session stays on its original fixed region
 // search params combine the "Videos" filter (drops the Shorts shelf, channels and playlists) with a sort
-// order. index by SortOrder. canonical values from youtube's own filter menu. two %s: escaped query, params.
+// order. index by SortOrder. canonical values from youtube's own filter menu. three %s: gl, escaped query, params.
 static const char *SEARCH_SORT_PARAMS[SORT_COUNT] = {
    "EgIQAQ==",   // SORT_RELEVANCE (youtube's default)
    "CAMSAhAB",   // SORT_VIEWS (popularity / view count, highest first)
 };
-static const char *SEARCH_BODY_FMT = WEB_CONTEXT ",\"query\":\"%s\",\"params\":\"%s\"}";
+#define SEARCH_BODY_FMT WEB_CONTEXT_FMT ",\"query\":\"%s\",\"params\":\"%s\"}"
 // trending feed. YouTube retired the aggregated Trending page in 2025 (FEtrending now redirects to an empty
 // home feed); NewPipe/FreeTube/Invidious replaced it with per-category channel-tab browses that still work
-// logged-out. two %s: browseId, params. see TRENDING_CATEGORIES for the ids.
-static const char *TRENDING_BODY_FMT = WEB_CONTEXT ",\"browseId\":\"%s\",\"params\":\"%s\"}";
-static const char *CONTINUATION_BODY_FMT = WEB_CONTEXT ",\"continuation\":\"%s\"}";   // next page of any feed
+// logged-out. three %s: gl, browseId, params. see TRENDING_CATEGORIES for the ids.
+#define TRENDING_BODY_FMT WEB_CONTEXT_FMT ",\"browseId\":\"%s\",\"params\":\"%s\"}"
+#define CONTINUATION_BODY_FMT WEB_CONTEXT_FMT ",\"continuation\":\"%s\"}"   // gl, continuation token
 #define NEXT_URL "https://www.youtube.com/youtubei/v1/next?prettyPrint=false"
-#define NEXT_BODY_FMT "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"%s\"}"
+#define NEXT_BODY_FMT "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},\"videoId\":\"%s\"}"
 
 static int hex4(const char *p)
 {
@@ -918,7 +919,7 @@ int getNextVideoId(const char *videoId, char *nextVideoId, int nextVideoIdCap, c
    if (nextTitle && nextTitleCap > 0) nextTitle[0] = 0;
 
    char body[512];
-   int bodyLen = snprintf(body, sizeof body, NEXT_BODY_FMT, WEB_VERSION, videoId);
+   int bodyLen = snprintf(body, sizeof body, NEXT_BODY_FMT, WEB_VERSION, getContentRegionCode(), videoId);
    if (bodyLen <= 0 || bodyLen >= (int)sizeof body) return -1;
 
    char *resp = malloc(RESP_CAP);
@@ -1339,14 +1340,15 @@ static int postAndParse(const char *url, const char *body, int bodyLen, SearchRe
 
 static int search(const char *query, SortOrder sort, const char *continuation, SearchResults *out)
 {
+   const char *gl = getContentRegionCode();
    char body[MAX_CONTINUATION + 512];
    int bodyLen;
-   if (continuation) bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, continuation);
+   if (continuation) bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, gl, continuation);
    else {
       char escaped[256];
       jsonEscape(query, escaped, sizeof escaped);
       if (sort < 0 || sort >= SORT_COUNT) sort = SORT_RELEVANCE;
-      bodyLen = snprintf(body, sizeof body, SEARCH_BODY_FMT, escaped, SEARCH_SORT_PARAMS[sort]);
+      bodyLen = snprintf(body, sizeof body, SEARCH_BODY_FMT, gl, escaped, SEARCH_SORT_PARAMS[sort]);
    }
    return postAndParse(SEARCH_URL, body, bodyLen, out);
 }
@@ -1361,10 +1363,11 @@ static const struct { const char *browseId, *params; } TRENDING_FEEDS[TREND_COUN
 static int fetchTrending(TrendingCategory category, const char *continuation, SearchResults *out)
 {
    if (category < 0 || category >= TREND_COUNT) return -1;
+   const char *gl = getContentRegionCode();
    char body[MAX_CONTINUATION + 512];
    int bodyLen;
-   if (continuation) bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, continuation);
-   else bodyLen = snprintf(body, sizeof body, TRENDING_BODY_FMT, TRENDING_FEEDS[category].browseId, TRENDING_FEEDS[category].params);
+   if (continuation) bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, gl, continuation);
+   else bodyLen = snprintf(body, sizeof body, TRENDING_BODY_FMT, gl, TRENDING_FEEDS[category].browseId, TRENDING_FEEDS[category].params);
    return postAndParse(BROWSE_URL, body, bodyLen, out);
 }
 
@@ -1373,10 +1376,11 @@ static int fetchTrending(TrendingCategory category, const char *continuation, Se
 #define CHANNEL_VIDEOS_PARAMS "EgZ2aWRlb3PyBgQKAjoA"
 static int getChannel(const char *channelId, const char *token, SearchResults *out)
 {
+   const char *gl = getContentRegionCode();
    char body[MAX_CONTINUATION + 512];
    int bodyLen;
-   if (token) bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, token);
-   else       bodyLen = snprintf(body, sizeof body, TRENDING_BODY_FMT, channelId, CHANNEL_VIDEOS_PARAMS);
+   if (token) bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, gl, token);
+   else       bodyLen = snprintf(body, sizeof body, TRENDING_BODY_FMT, gl, channelId, CHANNEL_VIDEOS_PARAMS);
    return postAndParse(BROWSE_URL, body, bodyLen, out);
 }
 
