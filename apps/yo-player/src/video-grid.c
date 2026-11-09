@@ -208,15 +208,17 @@ static void worker(uint64_t arg)
       grid->stage = (rc == 0 && grid->results.count > 0) ? GRID_READY : GRID_EMPTY;
       __sync_synchronize();
       grid->searchParsed = 1;
-      if (grid->stage == GRID_READY) {
+      if (grid->stage == GRID_READY && !grid->backgroundPaused) {
          int index = nextVisibleThumbnail(grid);
          if (index >= 0) fetchThumbnailsRange(grid, index, index + 1);
       }
       break;
    }
    case JOB_CACHE: {   // cached results are shown immediately; fetch one current-viewport thumbnail
-      int index = nextVisibleThumbnail(grid);
-      if (index >= 0) fetchThumbnailsRange(grid, index, index + 1);
+      if (!grid->backgroundPaused) {
+         int index = nextVisibleThumbnail(grid);
+         if (index >= 0) fetchThumbnailsRange(grid, index, index + 1);
+      }
       break;
    }
    case JOB_THUMBS: {  // one item per worker; the next index is chosen again from the live viewport
@@ -607,6 +609,9 @@ void stopVideoGrid(VideoGrid *grid)
    cancelGridDecode(grid);
 }
 
+void pauseVideoGrid(VideoGrid *grid) { grid->backgroundPaused = 1; }
+void resumeVideoGrid(VideoGrid *grid) { grid->backgroundPaused = 0; }
+
 void updateVideoGrid(VideoGrid *grid)
 {
    // reap a finished worker; a deferred source swap then resets and starts the new feed
@@ -620,10 +625,12 @@ void updateVideoGrid(VideoGrid *grid)
    evictPlaylistThumbCache(grid);
    decodeWindowThumbnails(grid);
 
-   if      (isRepeatDue(&grid->horizontalRepeat, getPadButtonState(PAD_BTN_RIGHT))) moveSelection(grid, 1);
-   else if (isRepeatDue(&grid->horizontalRepeat, getPadButtonState(PAD_BTN_LEFT)))  moveSelection(grid, -1);
-   if      (isRepeatDue(&grid->verticalRepeat,   getPadButtonState(PAD_BTN_DOWN)))  moveSelection(grid, grid->columns);
-   else if (isRepeatDue(&grid->verticalRepeat,   getPadButtonState(PAD_BTN_UP)))    moveSelection(grid, -grid->columns);
+   if (!grid->backgroundPaused) {
+      if      (isRepeatDue(&grid->horizontalRepeat, getPadButtonState(PAD_BTN_RIGHT))) moveSelection(grid, 1);
+      else if (isRepeatDue(&grid->horizontalRepeat, getPadButtonState(PAD_BTN_LEFT)))  moveSelection(grid, -1);
+      if      (isRepeatDue(&grid->verticalRepeat,   getPadButtonState(PAD_BTN_DOWN)))  moveSelection(grid, grid->columns);
+      else if (isRepeatDue(&grid->verticalRepeat,   getPadButtonState(PAD_BTN_UP)))    moveSelection(grid, -grid->columns);
+   }
 
    int selRow = grid->selected / grid->columns;
    if (selRow < grid->scrollRow)                            grid->scrollRow = selRow;
@@ -631,7 +638,7 @@ void updateVideoGrid(VideoGrid *grid)
 
    // Rebuild thumbnail priority from the current viewport after every completed request. Only one
    // thumbnail request is in flight; a scroll during that request changes the very next item selected.
-   if (!grid->threadActive && !grid->reloadPending) {
+   if (!grid->backgroundPaused && !grid->threadActive && !grid->reloadPending) {
       int thumbnailIndex = nextVisibleThumbnail(grid);
       if (thumbnailIndex >= 0) {
          grid->thumbRequestIndex = thumbnailIndex;

@@ -114,6 +114,12 @@ static struct {
    int       pendingAccountCategory; // account feed selected before signing in, or -1
    char      playlistId[64];
    char      playlistTitle[160];
+   SearchResult channelLookupItem;
+   sys_ppu_thread_t channelLookupTid;
+   volatile int channelLookupPending;
+   volatile int channelLookupActive;
+   volatile int channelLookupDone;
+   int channelLookupResult;
 } home;
 
 static Font        uiFont;
@@ -300,6 +306,17 @@ static int fetchLocalHistory(SearchResults *out)
    // Return the persisted video IDs unchanged. VideoGrid uses the same lazy
    // thumbnail worker as every other tab (i.ytimg.com/vi/<videoId>/mqdefault.jpg).
    return getLocalHistory(out) > 0 ? 0 : -1;
+}
+
+static void channelLookupWorker(uint64_t arg)
+{
+   (void)arg;
+   home.channelLookupResult = getVideoChannelId(home.channelLookupItem.videoId,
+                                                 home.channelLookupItem.channelId,
+                                                 sizeof home.channelLookupItem.channelId);
+   __sync_synchronize();
+   home.channelLookupDone = 1;
+   exitThread();
 }
 
 static int homeLiveFetchStopped(void)
@@ -1368,6 +1385,38 @@ static void updateHome(void)
           home.category == HOME_ACCOUNT + ACCOUNT_FEED_HOME)
          refreshCurrentCategory();
    }
+   if (home.channelLookupPending) {
+      updateVideoGrid(&home.grid);   // reap the previous grid job; pauseVideoGrid prevents another one
+      if (!home.channelLookupActive && !home.channelLookupDone && !home.grid.threadActive) {
+         if (spawnJoinableThread(&home.channelLookupTid, channelLookupWorker, 0,
+                                 THREAD_PRIORITY_LOW, THREAD_STACK_SIZE_64KB, "yt-channel-id") == 0)
+            home.channelLookupActive = 1;
+         else {
+            home.channelLookupResult = -1;
+            home.channelLookupDone = 1;
+         }
+      }
+      if (home.channelLookupDone) {
+         if (home.channelLookupActive) {
+            joinThread(home.channelLookupTid);
+            home.channelLookupActive = 0;
+         }
+         home.channelLookupPending = 0;
+         resumeVideoGrid(&home.grid);
+         if (home.channelLookupResult == 0 && home.channelLookupItem.channelId[0]) {
+            SearchResult channelItem = home.channelLookupItem;
+            logInfo("[home] Triangle: async channel lookup resolved %s\n", channelItem.channelId);
+            cacheCurrent();
+            openChannelFor(&channelItem);
+         } else {
+            logWarn("[home] Triangle: async channel lookup failed video=%s\n",
+                    home.channelLookupItem.videoId);
+         }
+         return;
+      }
+      return;
+   }
+
    if (home.accountOpen) { updateAccountPanel(); return; }
    if (home.settingsOpen) { updateSettingsPanel(); return; }
    if (home.exitConfirmOpen) { updateExitConfirmation(); return; }
@@ -1444,12 +1493,14 @@ static void updateHome(void)
          (int)strlen(selected->channelId), (int)strlen(selected->author));
       SearchResult channelItem = *selected;
       if (!channelItem.channelId[0]) {
-         logInfo("[home] Triangle: resolving channel for video=%s\n", channelItem.videoId);
-         if (getVideoChannelId(channelItem.videoId, channelItem.channelId, sizeof channelItem.channelId) != 0) {
-            logError("[home] Triangle: channel lookup failed; navigation skipped video=%s\n", channelItem.videoId);
-            return;
-         }
-         logInfo("[home] Triangle: resolved channelId=%s\n", channelItem.channelId);
+         logInfo("[home] Triangle: scheduling async channel lookup for video=%s\n", channelItem.videoId);
+         home.channelLookupItem = channelItem;
+         home.channelLookupResult = -1;
+         home.channelLookupDone = 0;
+         home.channelLookupActive = 0;
+         home.channelLookupPending = 1;
+         pauseVideoGrid(&home.grid);
+         return;
       }
 
       logInfo("[diag-triangle] home cacheCurrent begin\n");
@@ -1533,6 +1584,10 @@ static void resumeHome(void)
 
 static void termHome(void)
 {
+   if (home.channelLookupActive) {
+      joinThread(home.channelLookupTid);
+      home.channelLookupActive = 0;
+   }
    termVideoGrid(&home.grid);
    termSidebar();
    termButtonHints(&hints);

@@ -20,7 +20,7 @@
 
 #define HISTORY_CAP    1000     // watched videos kept (oldest dropped past this)
 #define VIDEO_ID_LEN   12       // 11 chars + NUL
-#define ENTRY_LINE_MAX 24       // "videoId seconds\n"
+#define ENTRY_LINE_MAX 40       // "videoId position duration\n"
 #define HISTORY_BUFFER_BYTES (HISTORY_CAP * ENTRY_LINE_MAX + 16)   // whole-file load/save buffer
 #define LOCAL_HISTORY_CAP          50
 #define LOCAL_HISTORY_LINE_MAX     240
@@ -29,7 +29,7 @@
 // watch history held in memory; the file is the durable copy. a plain ring: once full, the oldest slot is
 // overwritten (rare - 1000 videos), and the file is rewritten from the live set. each entry also carries the
 // last playback position for resume; a completed video stores its full duration.
-typedef struct { char id[VIDEO_ID_LEN]; int position; } WatchEntry;
+typedef struct { char id[VIDEO_ID_LEN]; int position; int duration; } WatchEntry;
 static WatchEntry watched[HISTORY_CAP];
 static int        watchedCount;
 static int        watchedNext;  // next slot to write when the ring is full
@@ -47,10 +47,11 @@ static void loadHistory(void)
    if (length > 0) {
       buffer[length] = 0;
       for (char *line = strtok(buffer, "\r\n"); line && watchedCount < HISTORY_CAP; line = strtok(NULL, "\r\n")) {
-         char id[VIDEO_ID_LEN]; int position = 0;
-         if (line[0] && sscanf(line, "%11s %d", id, &position) >= 1) {   // second field optional (old files)
+         char id[VIDEO_ID_LEN]; int position = 0, duration = 0;
+         if (line[0] && sscanf(line, "%11s %d %d", id, &position, &duration) >= 1) {
             strCopy(watched[watchedCount].id, VIDEO_ID_LEN, id);
             watched[watchedCount].position = position;
+            watched[watchedCount].duration = duration;
             watchedCount++;
          }
       }
@@ -141,8 +142,23 @@ int getLocalHistory(SearchResults *out)
    if (!out) return 0;
    memset(out, 0, sizeof *out);
    out->count = localHistoryCount;
-   if (out->count > 0)
+   if (out->count > 0) {
       memcpy(out->items, localHistory, (size_t)out->count * sizeof out->items[0]);
+      for (int i = 0; i < out->count; i++) {
+         int duration = getWatchedDuration(out->items[i].videoId);
+         if (duration > 0) {
+            int hours = duration / 3600;
+            int minutes = (duration / 60) % 60;
+            int seconds = duration % 60;
+            if (hours > 0)
+               snprintf(out->items[i].duration, sizeof out->items[i].duration,
+                        "%d:%02d:%02d", hours, minutes, seconds);
+            else
+               snprintf(out->items[i].duration, sizeof out->items[i].duration,
+                        "%d:%02d", minutes, seconds);
+         }
+      }
+   }
    return out->count;
 }
 
@@ -194,6 +210,7 @@ static WatchEntry *addWatched(const char *videoId)
    else { entry = &watched[watchedNext]; watchedNext = (watchedNext + 1) % HISTORY_CAP; }
    strCopy(entry->id, VIDEO_ID_LEN, videoId);
    entry->position = 0;
+   entry->duration = 0;
    return entry;
 }
 
@@ -374,14 +391,20 @@ int getWatchedPosition(const char *videoId)
    return entry ? entry->position : 0;
 }
 
-// rewrite history.txt from the in-memory set (one "id position" per line).
+int getWatchedDuration(const char *videoId)
+{
+   WatchEntry *entry = findWatched(videoId);
+   return entry ? entry->duration : 0;
+}
+
+// rewrite history.txt from the in-memory set ("id position duration"; older two-field files remain valid).
 static void saveHistory(void)
 {
    char *buffer = malloc(HISTORY_BUFFER_BYTES);
    if (!buffer) return;
    int length = 0;
    for (int i = 0; i < watchedCount; i++)
-      length += snprintf(buffer + length, ENTRY_LINE_MAX + 1, "%s %d\n", watched[i].id, watched[i].position);
+      length += snprintf(buffer + length, ENTRY_LINE_MAX + 1, "%s %d %d\n", watched[i].id, watched[i].position, watched[i].duration);
    writeFile(HISTORY_PATH, buffer, length);
    free(buffer);
 }
@@ -397,5 +420,14 @@ void setWatchedPosition(const char *videoId, int seconds)
    WatchEntry *entry = findWatched(videoId);
    if (!entry) entry = addWatched(videoId);
    entry->position = seconds;
+   saveHistory();
+}
+
+void setWatchedDuration(const char *videoId, int durationSeconds)
+{
+   if (!isHistoryKey(videoId) || durationSeconds <= 0) return;
+   WatchEntry *entry = findWatched(videoId);
+   if (!entry) entry = addWatched(videoId);
+   entry->duration = durationSeconds;
    saveHistory();
 }

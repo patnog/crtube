@@ -303,6 +303,9 @@ void parseTvPlaylistVideos(const char *resp, int respLen, SearchResults *out)
          if (length && length < blockEnd) readText(length, blockEnd, item->duration, sizeof item->duration);
          const char *byline = strstr(block, "\"shortBylineText\":");
          if (byline && byline < blockEnd) readText(byline, blockEnd, item->author, sizeof item->author);
+         const char *channel = strstr(block, "\"browseId\":\"UC");
+         if (channel && channel < blockEnd)
+            jsonString(channel, blockEnd, "browseId", item->channelId, sizeof item->channelId);
          if (item->title[0]) out->count++;
       }
       block = next;

@@ -72,6 +72,7 @@ typedef struct {
    int              thumbRequestIndex;                     // next visible thumbnail selected by the priority scheduler
    int              decodeIndex;                           // thumbnail currently decoding asynchronously, or -1
    int              threadActive, reloadPending;
+   volatile int     backgroundPaused;
    sys_ppu_thread_t workerTid;
    volatile int     thumbNext, thumbEnd;          // bounded range for the single active thumbnail worker
 
@@ -99,6 +100,8 @@ void setGridCached(VideoGrid *grid, const SearchResults *cached, GridFetchFn fet
 void updateVideoGrid(VideoGrid *grid);   // nav + scroll + window + decode + infinite scroll; call each frame
 void drawVideoGrid(VideoGrid *grid);
 void stopVideoGrid(VideoGrid *grid);     // block until the worker stops (before playback / teardown)
+void pauseVideoGrid(VideoGrid *grid);     // let the active job finish, but do not schedule another
+void resumeVideoGrid(VideoGrid *grid);
 
 GridStage            gridStage(const VideoGrid *grid);
 int                  gridBusy(const VideoGrid *grid);       // a fetch worker is running (results may still be growing)

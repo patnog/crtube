@@ -1045,14 +1045,15 @@ static void worker(uint64_t arg)
                         findPreferredSubtitleTrack(getSubtitleLanguage()) : -1;
    lastSubtitlePick = state.subtitlePick;
 
-   // resume where we left off. seekVideoPlayer only posts the target; the decode thread does the
-   // reconnect + fragment reload. drawPlay keeps the "Loading..." status up until the first frame is
-   // presented, so that reload is covered rather than showing a black screen. storage returns 0 for a
-   // typed url (never a history key), so this no-ops for anything but a bare videoId.
+   // Resume by the canonical video ID, including when playback was started from a pasted YouTube URL.
+   // The same ID is used by local history and by the saved position table.
    {
-      int resumeAt = state.isLive ? 0 : getWatchedPosition(requestedInput);
+      char resumeId[12];
+      int resumeAt = (!state.isLive && extractPlaybackId(requestedInput, resumeId))
+                   ? getWatchedPosition(resumeId) : 0;
       float duration = getVideoDurationSeconds(state.pendingPlayer);
-      if (resumeAt > 3 && (duration <= 0 || resumeAt < duration - 10)) seekVideoPlayer(state.pendingPlayer, (float)resumeAt);
+      if (resumeAt > 3 && (duration <= 0 || resumeAt < duration - 10))
+         seekVideoPlayer(state.pendingPlayer, (float)resumeAt);
    }
 
 done:
@@ -1634,8 +1635,13 @@ static int startResolutionSwitch(int target, int automaticFallback)
       strCopy(state.resolutionSwitchOldAudioUrl, sizeof state.resolutionSwitchOldAudioUrl, state.fallbackAudioUrl);
 
    setVideoPaused(state.player, 1);
-   if (state.firstFrameSeen && !state.isLive)
-      setWatchedPosition(requestedInput, (int)state.resolutionSwitchPosition);
+   if (state.firstFrameSeen && !state.isLive) {
+      char historyId[12];
+      if (extractPlaybackId(requestedInput, historyId)) {
+         setWatchedDuration(historyId, (int)(getVideoDurationSeconds(state.player) + 0.5f));
+         setWatchedPosition(historyId, (int)state.resolutionSwitchPosition);
+      }
+   }
    finishGfx();   // retire the displayed frame before the worker frees its RSX-visible buffers
    state.retiringResolutionPlayer = state.player;
    state.player = NULL;
@@ -3439,8 +3445,11 @@ static void drawPlay(void)
             showControls();   // bring up the HUD as playback starts; it auto-hides as usual
             if (!state.historyRecorded) {
                char videoId[12];
-               if (extractPlaybackId(requestedInput, videoId))
+               if (extractPlaybackId(requestedInput, videoId)) {
+                  int duration = (int)(getVideoDurationSeconds(state.player) + 0.5f);
+                  if (duration > 0) setWatchedDuration(videoId, duration);
                   recordLocalHistory(videoId, state.title, state.author);
+               }
                state.historyRecorded = 1;
             }
          }
@@ -3516,9 +3525,13 @@ static void termPlay(void)
    // render a 100% progress line; the resume path already treats positions near the end as completed.
    // Only save after a frame played, and keep typed URLs out of the ID-keyed history.
    if (state.player && state.firstFrameSeen && !state.isLive) {
-      int savedPosition = isVideoEnded(state.player) ? (int)(getVideoDurationSeconds(state.player) + 0.5f)
-                                                    : (int)getVideoPositionSeconds(state.player);
-      setWatchedPosition(requestedInput, savedPosition);
+      char historyId[12];
+      if (extractPlaybackId(requestedInput, historyId)) {
+         int savedPosition = isVideoEnded(state.player) ? (int)(getVideoDurationSeconds(state.player) + 0.5f)
+                                                       : (int)getVideoPositionSeconds(state.player);
+         setWatchedDuration(historyId, (int)(getVideoDurationSeconds(state.player) + 0.5f));
+         setWatchedPosition(historyId, savedPosition);
+      }
    }
    if (state.player || state.pendingPlayer || state.pendingResolutionPlayer || state.retiringResolutionPlayer)
       finishGfx();   // RSX may still be sampling a frame buffer

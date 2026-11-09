@@ -20,7 +20,9 @@ void markWatched(const char *videoId);
 // getWatchedPosition returns 0 if unknown; a finished video stores its duration, which the player
 // recognizes as too close to the end to resume.
 int  getWatchedPosition(const char *videoId);
+int  getWatchedDuration(const char *videoId);
 void setWatchedPosition(const char *videoId, int seconds);
+void setWatchedDuration(const char *videoId, int durationSeconds);
 
 #define CHANNEL_ID_LEN    32
 #define MAX_SUBSCRIPTIONS 128
