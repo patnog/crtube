@@ -15,6 +15,7 @@
 #include "image-loader.h"
 #include "dbg.h"
 #include "string-utilities.h"   // strCopy
+#include "account.h"            // getAccountRevision
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,13 +27,203 @@
 #define DUR_SIZE    19
 #define WATCHLATER_BADGE_SIZE DUR_SIZE
 #define MARGIN_ROWS 2           // rows kept materialised above and below the visible band
+#define THUMB_LOOKAHEAD_ROWS 2  // fetch two rows below the visible band before the user scrolls
 #define DECODES_PER_FRAME 1
 #define THUMB_CAP   (96 * 1024) // one mqdefault jpeg fits easily
 #define THUMB_UA    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+#define MEMBERS_ONLY_CACHE_CAP 512
 
 #define WATCHED_ALPHA 70        // label alpha for already-watched tiles
 #define WATCH_PROGRESS_H 4      // red resume indicator along the thumbnail bottom edge
 #define WATCH_PROGRESS_COLOR 0xFFFF0000
+
+// Positive Members-only results are reused across grids/screens for the current account session.
+// IDs are kept in FIFO order; a sorted slot index provides binary-search lookups without duplicating IDs.
+// Negative and failed checks are deliberately not cached.
+static char memberOnlyIdCache[MEMBERS_ONLY_CACHE_CAP][12];
+static uint16_t memberOnlySortedSlots[MEMBERS_ONLY_CACHE_CAP];
+static volatile int memberOnlyIdCacheCount;
+static int memberOnlyIdCacheHead;
+static int memberOnlyCacheAccountRevision = -1;
+static volatile int memberOnlyCacheLock;
+#define MEMBERS_ONLY_INFLIGHT_CAP 64
+
+typedef struct {
+   char videoId[12];
+   int accountRevision;
+} MemberOnlyInFlight;
+static MemberOnlyInFlight memberOnlyInFlight[MEMBERS_ONLY_INFLIGHT_CAP];
+static int memberOnlyInFlightCount;
+#define MEMBER_IDLE_FRAMES 30
+
+static void lockMemberOnlyCache(void)
+{
+   while (__sync_lock_test_and_set(&memberOnlyCacheLock, 1)) {}
+}
+
+static void unlockMemberOnlyCache(void)
+{
+   __sync_lock_release(&memberOnlyCacheLock);
+}
+
+// Returns the lower-bound position in the sorted slot index and whether the ID exists.
+static int findMemberOnlyIdPosition(const char *videoId, int *found)
+{
+   int low = 0;
+   int high = memberOnlyIdCacheCount;
+   while (low < high) {
+      int mid = low + (high - low) / 2;
+      int slot = memberOnlySortedSlots[mid];
+      int cmp = strcmp(memberOnlyIdCache[slot], videoId);
+      if (cmp < 0) low = mid + 1;
+      else high = mid;
+   }
+   *found = low < memberOnlyIdCacheCount &&
+            strcmp(memberOnlyIdCache[memberOnlySortedSlots[low]], videoId) == 0;
+   return low;
+}
+
+static void syncMemberOnlyCacheAccountLocked(void)
+{
+   int revision = getAccountRevision();
+   if (revision != memberOnlyCacheAccountRevision) {
+      memberOnlyIdCacheCount = 0;
+      memberOnlyIdCacheHead = 0;
+      memberOnlyInFlightCount = 0;
+      __sync_synchronize();
+      memberOnlyCacheAccountRevision = revision;
+   }
+}
+
+static int isMemberOnlyIdCached(const char *videoId)
+{
+   if (!videoId || !videoId[0]) return 0;
+   lockMemberOnlyCache();
+   syncMemberOnlyCacheAccountLocked();
+   int found = 0;
+   findMemberOnlyIdPosition(videoId, &found);
+   unlockMemberOnlyCache();
+   return found;
+}
+
+static int isMemberOnlyCheckInFlight(const char *videoId)
+{
+   if (!videoId || !videoId[0]) return 0;
+   lockMemberOnlyCache();
+   syncMemberOnlyCacheAccountLocked();
+   int revision = memberOnlyCacheAccountRevision;
+   int found = 0;
+   for (int i = 0; i < memberOnlyInFlightCount; i++) {
+      if (memberOnlyInFlight[i].accountRevision == revision &&
+          strcmp(memberOnlyInFlight[i].videoId, videoId) == 0) {
+         found = 1;
+         break;
+      }
+   }
+   unlockMemberOnlyCache();
+   return found;
+}
+
+// Reserve an ID before spawning a worker so separate grids cannot issue duplicate lookups.
+static int claimMemberOnlyCheck(const char *videoId, int *accountRevision)
+{
+   if (!videoId || !videoId[0]) return 0;
+   lockMemberOnlyCache();
+   syncMemberOnlyCacheAccountLocked();
+   int revision = memberOnlyCacheAccountRevision;
+   for (int i = 0; i < memberOnlyInFlightCount; i++) {
+      if (memberOnlyInFlight[i].accountRevision == revision &&
+          strcmp(memberOnlyInFlight[i].videoId, videoId) == 0) {
+         unlockMemberOnlyCache();
+         return 0;
+      }
+   }
+   if (memberOnlyInFlightCount >= MEMBERS_ONLY_INFLIGHT_CAP) {
+      unlockMemberOnlyCache();
+      return 0;
+   }
+   int slot = memberOnlyInFlightCount++;
+   strCopy(memberOnlyInFlight[slot].videoId, sizeof memberOnlyInFlight[slot].videoId, videoId);
+   memberOnlyInFlight[slot].accountRevision = revision;
+   if (accountRevision) *accountRevision = revision;
+   unlockMemberOnlyCache();
+   return 1;
+}
+
+static int isMemberOnlyAccountRevisionCurrent(int accountRevision)
+{
+   lockMemberOnlyCache();
+   syncMemberOnlyCacheAccountLocked();
+   int current = memberOnlyCacheAccountRevision == accountRevision;
+   unlockMemberOnlyCache();
+   return current;
+}
+
+static void releaseMemberOnlyCheck(const char *videoId, int accountRevision)
+{
+   if (!videoId || !videoId[0]) return;
+   lockMemberOnlyCache();
+   for (int i = 0; i < memberOnlyInFlightCount; i++) {
+      if (memberOnlyInFlight[i].accountRevision == accountRevision &&
+          strcmp(memberOnlyInFlight[i].videoId, videoId) == 0) {
+         int last = --memberOnlyInFlightCount;
+         if (i != last) memberOnlyInFlight[i] = memberOnlyInFlight[last];
+         break;
+      }
+   }
+   unlockMemberOnlyCache();
+}
+
+static void cacheMemberOnlyId(const char *videoId)
+{
+   if (!videoId || !videoId[0] || strlen(videoId) >= sizeof memberOnlyIdCache[0]) return;
+   lockMemberOnlyCache();
+   syncMemberOnlyCacheAccountLocked();
+
+   int found = 0;
+   int position = findMemberOnlyIdPosition(videoId, &found);
+   if (found) {
+      unlockMemberOnlyCache();
+      return;
+   }
+
+   int slot;
+   int count = memberOnlyIdCacheCount;
+   if (count == MEMBERS_ONLY_CACHE_CAP) {
+      // Evict the oldest ID, then reuse its ring slot.
+      slot = memberOnlyIdCacheHead;
+      int oldPosition = findMemberOnlyIdPosition(memberOnlyIdCache[slot], &found);
+      if (found && oldPosition < count - 1)
+         memmove(&memberOnlySortedSlots[oldPosition],
+                 &memberOnlySortedSlots[oldPosition + 1],
+                 (size_t)(count - oldPosition - 1) * sizeof memberOnlySortedSlots[0]);
+      memberOnlyIdCacheHead = (memberOnlyIdCacheHead + 1) % MEMBERS_ONLY_CACHE_CAP;
+      memberOnlyIdCacheCount = --count;
+      position = findMemberOnlyIdPosition(videoId, &found);
+   } else {
+      slot = (memberOnlyIdCacheHead + count) % MEMBERS_ONLY_CACHE_CAP;
+   }
+
+   strCopy(memberOnlyIdCache[slot], sizeof memberOnlyIdCache[slot], videoId);
+   if (position < count)
+      memmove(&memberOnlySortedSlots[position + 1], &memberOnlySortedSlots[position],
+              (size_t)(count - position) * sizeof memberOnlySortedSlots[0]);
+   memberOnlySortedSlots[position] = (uint16_t)slot;
+   __sync_synchronize();
+   memberOnlyIdCacheCount = count + 1;
+   unlockMemberOnlyCache();
+}
+
+static void applyMemberOnlyCacheRange(VideoGrid *grid, int start, int end)
+{
+   if (end > grid->results.count) end = grid->results.count;
+   for (int i = start; i < end; i++) {
+      if (!grid->results.items[i].isPlaylist &&
+          isMemberOnlyIdCached(grid->results.items[i].videoId))
+         grid->membersOnly[i] = GRID_MEMBER_YES;
+   }
+   __sync_synchronize();
+}
 
 // ---- thumbnail fetch (worker side) ----
 
@@ -46,18 +237,21 @@ static void thumbFetchThread(uint64_t arg)
          int i = __sync_fetch_and_add(&grid->thumbNext, 1);
          if (i >= grid->thumbEnd || grid->stopWorker) break;
 
+         if (grid->thumbs[i].state != THUMB_NONE) continue;
          SearchResult *item = &grid->results.items[i];
          const char *thumbnailVideoId = item->videoId;
          if (item->isPlaylist) {
-            // Resolve the playlist's first video on this thumbnail worker. The UI thread never waits
-            // for the authenticated browse request, and videoId remains reserved for playable videos.
-            SearchResults *playlistPage = (SearchResults *)malloc(sizeof *playlistPage);
-            if (playlistPage) {
-               if (getAccountPlaylistVideos(item->playlistId, NULL, playlistPage) == 0 &&
-                   playlistPage->count > 0 && playlistPage->items[0].videoId[0])
-                  strCopy(item->thumbnailVideoId, sizeof item->thumbnailVideoId,
-                          playlistPage->items[0].videoId);
-               free(playlistPage);
+            // Resolve a playlist's first video off the UI thread. Cached playlist results retain
+            // thumbnailVideoId, so revisiting the Playlists page does not repeat this browse call.
+            if (!item->thumbnailVideoId[0]) {
+               SearchResults *playlistPage = (SearchResults *)malloc(sizeof *playlistPage);
+               if (playlistPage) {
+                  if (getAccountPlaylistVideos(item->playlistId, NULL, playlistPage) == 0 &&
+                      playlistPage->count > 0 && playlistPage->items[0].videoId[0])
+                     strCopy(item->thumbnailVideoId, sizeof item->thumbnailVideoId,
+                             playlistPage->items[0].videoId);
+                  free(playlistPage);
+               }
             }
             thumbnailVideoId = item->thumbnailVideoId;
             if (grid->stopWorker) {
@@ -96,29 +290,36 @@ static void thumbFetchThread(uint64_t arg)
       }
       free(buffer);
    } else {
-      for (int i = grid->thumbNext; i < grid->thumbEnd && i < grid->results.count; i++)
-         grid->thumbs[i].state = THUMB_FAILED;
+      for (;;) {
+         int i = __sync_fetch_and_add(&grid->thumbNext, 1);
+         if (i >= grid->thumbEnd || grid->stopWorker) break;
+         if (grid->thumbs[i].state == THUMB_NONE) grid->thumbs[i].state = THUMB_FAILED;
+      }
    }
    exitThread();
 }
 
-// Fetch a bounded range on the thumbnail worker. The priority scheduler passes one index at a time.
+// Fetch the current visible/lookahead range on bounded thumbnail workers.
 static void fetchThumbnailsRange(VideoGrid *grid, int from, int to)
 {
    if (to <= from) return;
    logInfo("[grid] fetching %d thumbnails from %d\n", to - from, from);
    grid->thumbNext = from;
    grid->thumbEnd = to;
+   int threadLimit = GRID_THREADS;
+   for (int i = from; i < to; i++) {
+      if (grid->results.items[i].isPlaylist) { threadLimit = 1; break; }
+   }
    sys_ppu_thread_t threads[GRID_THREADS];
    int spawned = 0;
-   for (int t = 0; t < GRID_THREADS; t++)
+   for (int t = 0; t < threadLimit; t++)
       if (spawnJoinableThread(&threads[spawned], thumbFetchThread, (uint64_t)(uintptr_t)grid,
                               THREAD_PRIORITY_LOW, 128 * 1024, "yt-thumb") == 0)
          spawned++;
    for (int t = 0; t < spawned; t++) joinThread(threads[t]);
    if (spawned == 0) {
       for (int i = from; i < to && i < grid->results.count; i++)
-         grid->thumbs[i].state = THUMB_FAILED;
+         if (grid->thumbs[i].state == THUMB_NONE) grid->thumbs[i].state = THUMB_FAILED;
    }
    logInfo("[grid] thumbnail batch finished\n");
 }
@@ -149,8 +350,8 @@ static void appendPage(VideoGrid *grid, const SearchResults *page)
 }
 
 // The thumbnail queue is rebuilt from the current viewport whenever a worker becomes idle. The selected
-// tile wins, then the remaining visible tiles are ordered by distance from the selection. No off-screen
-// item is queued, so navigation naturally reprioritizes pending work without storing a stale queue.
+// tile wins, then the remaining visible/lookahead tiles are ordered by distance from the selection.
+// Navigation naturally reprioritizes pending work without storing a stale queue.
 static int isTileVisible(const VideoGrid *grid, int index)
 {
    int row = index / grid->columns;
@@ -158,11 +359,31 @@ static int isTileVisible(const VideoGrid *grid, int index)
           row >= grid->scrollRow && row < grid->scrollRow + grid->visibleRows;
 }
 
-static int nextVisibleThumbnail(const VideoGrid *grid)
+static int thumbnailFetchEnd(const VideoGrid *grid)
 {
+   int end = (grid->scrollRow + grid->visibleRows + THUMB_LOOKAHEAD_ROWS) * grid->columns;
+   if (end > grid->results.count) end = grid->results.count;
+   return end;
+}
+
+static int hasPendingVisibleThumbnailDecode(const VideoGrid *grid)
+{
+   if (grid->decodeIndex >= 0) return 1;
    int start = grid->scrollRow * grid->columns;
    int end = (grid->scrollRow + grid->visibleRows) * grid->columns;
    if (end > grid->results.count) end = grid->results.count;
+   for (int i = start; i < end; i++) {
+      if (grid->thumbs[i].state == THUMB_DECODING ||
+          (grid->thumbs[i].state == THUMB_FETCHED && !grid->thumbs[i].tex.offset))
+         return 1;
+   }
+   return 0;
+}
+
+static int nextVisibleThumbnail(const VideoGrid *grid)
+{
+   int start = grid->scrollRow * grid->columns;
+   int end = thumbnailFetchEnd(grid);
    int best = -1;
    int bestDistance = 0x7fffffff;
    for (int i = start; i < end; i++) {
@@ -205,26 +426,30 @@ static void worker(uint64_t arg)
       logInfo("[diag-grid] JOB_LOAD fetch begin grid=%p\n", grid);
       int rc = grid->fetch(NULL, &grid->results, grid->fetchUser);
       logInfo("[diag-grid] JOB_LOAD fetch returned rc=%d count=%d\n", rc, grid->results.count);
+      if (rc == 0) applyMemberOnlyCacheRange(grid, 0, grid->results.count);
+      // Publish the metadata before thumbnail work starts. drawVideoGrid() can render placeholders
+      // immediately while the independent thumbnail workers fill the visible band and lookahead.
       grid->stage = (rc == 0 && grid->results.count > 0) ? GRID_READY : GRID_EMPTY;
       __sync_synchronize();
       grid->searchParsed = 1;
       if (grid->stage == GRID_READY && !grid->backgroundPaused) {
          int index = nextVisibleThumbnail(grid);
-         if (index >= 0) fetchThumbnailsRange(grid, index, index + 1);
+         if (index >= 0) fetchThumbnailsRange(grid, index, thumbnailFetchEnd(grid));
       }
       break;
    }
    case JOB_CACHE: {   // cached results are shown immediately; fetch one current-viewport thumbnail
       if (!grid->backgroundPaused) {
          int index = nextVisibleThumbnail(grid);
-         if (index >= 0) fetchThumbnailsRange(grid, index, index + 1);
+         if (index >= 0) fetchThumbnailsRange(grid, index, thumbnailFetchEnd(grid));
       }
       break;
    }
    case JOB_THUMBS: {  // one item per worker; the next index is chosen again from the live viewport
       int index = grid->thumbRequestIndex;
-      if (isTileVisible(grid, index) && grid->thumbs[index].state == THUMB_NONE)
-         fetchThumbnailsRange(grid, index, index + 1);
+      int end = grid->thumbRequestEnd;
+      if (index >= 0 && index < end && index < grid->results.count)
+         fetchThumbnailsRange(grid, index, end);
       break;
    }
    case JOB_MORE: {    // append the next page; its thumbnails are picked up lazily by a later JOB_THUMBS
@@ -232,6 +457,7 @@ static void worker(uint64_t arg)
       if (page && grid->fetch(grid->results.continuation, page, grid->fetchUser) == 0) {
          int base = grid->results.count;
          appendPage(grid, page);
+         applyMemberOnlyCacheRange(grid, base, grid->results.count);
          if (grid->results.count == base) grid->results.continuation[0] = 0;   // nothing new: stop paging
       }
       free(page);
@@ -240,19 +466,25 @@ static void worker(uint64_t arg)
    case JOB_MEMBER_CHECK: {
       int i = grid->memberCheckIndex;
       if (i >= 0 && i < grid->results.count && !grid->results.items[i].isPlaylist) {
-         if (grid->stopWorker || !isTileVisible(grid, i)) {
+         const char *videoId = grid->results.items[i].videoId;
+         int rc = -1;
+         if (!grid->stopWorker) {
+            const Extractor *extractor = findExtractor(videoId);
+            rc = extractor && extractor->isVideoMembersOnly
+                 ? extractor->isVideoMembersOnly(videoId) : -1;
+         }
+         if (grid->stopWorker) {
             grid->membersOnly[i] = GRID_MEMBER_UNKNOWN;
          } else {
-            const Extractor *extractor = findExtractor(grid->results.items[i].videoId);
-            int rc = extractor && extractor->isVideoMembersOnly
-                     ? extractor->isVideoMembersOnly(grid->results.items[i].videoId) : -1;
             grid->membersOnly[i] = rc > 0 ? GRID_MEMBER_YES
                                  : rc == 0 ? GRID_MEMBER_NO : GRID_MEMBER_FAILED;
+            if (rc > 0 && isMemberOnlyAccountRevisionCurrent(grid->memberCheckAccountRevision))
+               cacheMemberOnlyId(videoId);
             __sync_synchronize();
             logInfo("[grid] members-only check %s result=%s\n",
-                    grid->results.items[i].videoId,
-                    rc > 0 ? "yes" : rc == 0 ? "no" : "unavailable");
+                    videoId, rc > 0 ? "yes" : rc == 0 ? "no" : "unavailable");
          }
+         releaseMemberOnlyCheck(videoId, grid->memberCheckAccountRevision);
       }
       break;
    }
@@ -303,8 +535,10 @@ static void resetFeed(VideoGrid *grid)
    grid->stage = GRID_RUNNING;
    grid->searchParsed = grid->workerDone = 0;
    grid->thumbRequestIndex = -1;
+   grid->thumbRequestEnd = 0;
    memset(grid->membersOnly, 0, sizeof grid->membersOnly);
    grid->memberCheckIndex = -1;
+   grid->memberIdleFrames = 0;
    grid->decodeIndex = -1;
    grid->selected = grid->scrollRow = grid->winStart = grid->winEnd = 0;
 }
@@ -313,6 +547,7 @@ static void beginFeed(VideoGrid *grid)
 {
    logInfo("[diag-grid] beginFeed grid=%p job=%d threadActive=%d\n", grid, grid->job, grid->threadActive);
    if (grid->job == JOB_CACHE) {   // results already in hand: show immediately, worker only fetches thumbnails
+      applyMemberOnlyCacheRange(grid, 0, grid->results.count);
       grid->stage = GRID_READY;
       __sync_synchronize();
       grid->searchParsed = 1;
@@ -353,25 +588,67 @@ static void loadThumbnails(VideoGrid *grid)
    }
 }
 
-// Schedule one low-priority members-only lookup at a time. Feed paging and
-// thumbnail fetches always take priority, so these checks never stall scrolling.
-static int nextMemberCheck(const VideoGrid *grid)
+// Members-only checks run after thumbnail and paging work. The selected tile is checked first,
+// followed by visible tiles ordered by distance. Off-screen checks are only eligible after the
+// visible band is complete and navigation has been idle for MEMBER_IDLE_FRAMES.
+static int hasVisibleMemberCheckInFlight(const VideoGrid *grid)
 {
    int start = grid->scrollRow * grid->columns;
    int end = (grid->scrollRow + grid->visibleRows) * grid->columns;
    if (end > grid->results.count) end = grid->results.count;
-   for (int i = start; i < end; i++)
-      if (!grid->results.items[i].isPlaylist && grid->membersOnly[i] == GRID_MEMBER_UNKNOWN) return i;
-   return -1;
+   for (int i = start; i < end; i++) {
+      if (grid->results.items[i].isPlaylist || grid->membersOnly[i] != GRID_MEMBER_UNKNOWN) continue;
+      if (isMemberOnlyCheckInFlight(grid->results.items[i].videoId)) return 1;
+   }
+   return 0;
+}
+
+static int nextMemberCheck(VideoGrid *grid, int visibleOnly)
+{
+   int best = -1;
+   int bestDistance = 0x7fffffff;
+
+   if (visibleOnly && isTileVisible(grid, grid->selected)) {
+      int i = grid->selected;
+      if (!grid->results.items[i].isPlaylist && grid->membersOnly[i] == GRID_MEMBER_UNKNOWN) {
+         const char *id = grid->results.items[i].videoId;
+         if (isMemberOnlyIdCached(id)) grid->membersOnly[i] = GRID_MEMBER_YES;
+         else if (!isMemberOnlyCheckInFlight(id)) return i;
+      }
+   }
+
+   for (int i = 0; i < grid->results.count; i++) {
+      int visible = isTileVisible(grid, i);
+      if (visibleOnly != visible || grid->results.items[i].isPlaylist ||
+          grid->membersOnly[i] != GRID_MEMBER_UNKNOWN) continue;
+      const char *id = grid->results.items[i].videoId;
+      if (isMemberOnlyIdCached(id)) {
+         grid->membersOnly[i] = GRID_MEMBER_YES;
+         continue;
+      }
+      if (isMemberOnlyCheckInFlight(id)) continue;
+      int distance = i > grid->selected ? i - grid->selected : grid->selected - i;
+      if (distance < bestDistance) {
+         best = i;
+         bestDistance = distance;
+      }
+   }
+   return best;
 }
 
 static void loadMemberCheck(VideoGrid *grid, int index)
 {
+   if (index < 0 || index >= grid->results.count || grid->results.items[index].isPlaylist) return;
+   int accountRevision = -1;
+   const char *videoId = grid->results.items[index].videoId;
+   if (!claimMemberOnlyCheck(videoId, &accountRevision)) return;
    grid->memberCheckIndex = index;
+   grid->memberCheckAccountRevision = accountRevision;
    grid->membersOnly[index] = GRID_MEMBER_CHECKING;
    grid->job = JOB_MEMBER_CHECK;
    if (!spawnWorker(grid)) {
-      grid->membersOnly[index] = GRID_MEMBER_FAILED;
+      grid->membersOnly[index] = GRID_MEMBER_UNKNOWN;
+      releaseMemberOnlyCheck(videoId, accountRevision);
       grid->workerDone = 1;
    }
 }
@@ -477,19 +754,37 @@ static void decodeWindowThumbnails(VideoGrid *grid)
       if (rc > 0) freeImageBuffer(&decoded);
    }
 
-   for (int i = grid->winStart; i < grid->winEnd; i++) {
-      int row = i / grid->columns;
-      if (row < grid->scrollRow || row >= grid->scrollRow + grid->visibleRows) continue;
-      if (grid->thumbs[i].state != THUMB_FETCHED || !grid->thumbs[i].jpeg || grid->thumbs[i].tex.offset) continue;
-      if (requestImageMemAsync(grid->thumbs[i].jpeg, (uint32_t)grid->thumbs[i].jpegLen) == 0) {
-         grid->thumbs[i].state = THUMB_DECODING;
-         grid->decodeIndex = i;
-         logInfo("[grid] thumbnail %s decode queued\n", grid->results.items[i].videoId);
-      } else {
-         grid->thumbs[i].state = THUMB_FAILED;
-         logWarn("[grid] thumbnail %s decode queue failed\n", grid->results.items[i].videoId);
+   // Decode the selected tile first when its JPEG is ready, then the nearest ready visible tile.
+   // Keep the global image-loader strictly serial: only one asynchronous decode may be outstanding.
+   int next = -1;
+   int selected = grid->selected;
+   if (selected >= grid->winStart && selected < grid->winEnd &&
+       isTileVisible(grid, selected) &&
+       grid->thumbs[selected].state == THUMB_FETCHED &&
+       grid->thumbs[selected].jpeg && !grid->thumbs[selected].tex.offset) {
+      next = selected;
+   } else {
+      int bestDistance = 0x7fffffff;
+      for (int i = grid->winStart; i < grid->winEnd; i++) {
+         if (!isTileVisible(grid, i) || grid->thumbs[i].state != THUMB_FETCHED ||
+             !grid->thumbs[i].jpeg || grid->thumbs[i].tex.offset) continue;
+         int distance = i > selected ? i - selected : selected - i;
+         if (distance < bestDistance) {
+            next = i;
+            bestDistance = distance;
+         }
       }
-      break;  // one image decoder job at a time
+   }
+
+   if (next >= 0) {
+      if (requestImageMemAsync(grid->thumbs[next].jpeg, (uint32_t)grid->thumbs[next].jpegLen) == 0) {
+         grid->thumbs[next].state = THUMB_DECODING;
+         grid->decodeIndex = next;
+         logInfo("[grid] thumbnail %s decode queued\n", grid->results.items[next].videoId);
+      } else {
+         grid->thumbs[next].state = THUMB_FAILED;
+         logWarn("[grid] thumbnail %s decode queue failed\n", grid->results.items[next].videoId);
+      }
    }
 }
 
@@ -630,6 +925,19 @@ void updateVideoGrid(VideoGrid *grid)
       else if (isRepeatDue(&grid->horizontalRepeat, getPadButtonState(PAD_BTN_LEFT)))  moveSelection(grid, -1);
       if      (isRepeatDue(&grid->verticalRepeat,   getPadButtonState(PAD_BTN_DOWN)))  moveSelection(grid, grid->columns);
       else if (isRepeatDue(&grid->verticalRepeat,   getPadButtonState(PAD_BTN_UP)))    moveSelection(grid, -grid->columns);
+
+      PadButtonState right = getPadButtonState(PAD_BTN_RIGHT);
+      PadButtonState left  = getPadButtonState(PAD_BTN_LEFT);
+      PadButtonState down  = getPadButtonState(PAD_BTN_DOWN);
+      PadButtonState up    = getPadButtonState(PAD_BTN_UP);
+      int navigating = right == PAD_BUTTON_STATE_PRESSED || right == PAD_BUTTON_STATE_HELD ||
+                       left == PAD_BUTTON_STATE_PRESSED || left == PAD_BUTTON_STATE_HELD ||
+                       down == PAD_BUTTON_STATE_PRESSED || down == PAD_BUTTON_STATE_HELD ||
+                       up == PAD_BUTTON_STATE_PRESSED || up == PAD_BUTTON_STATE_HELD;
+      if (navigating) grid->memberIdleFrames = 0;
+      else if (grid->memberIdleFrames < MEMBER_IDLE_FRAMES) grid->memberIdleFrames++;
+   } else {
+      grid->memberIdleFrames = 0;
    }
 
    int selRow = grid->selected / grid->columns;
@@ -642,17 +950,21 @@ void updateVideoGrid(VideoGrid *grid)
       int thumbnailIndex = nextVisibleThumbnail(grid);
       if (thumbnailIndex >= 0) {
          grid->thumbRequestIndex = thumbnailIndex;
+         grid->thumbRequestEnd = thumbnailFetchEnd(grid);
          loadThumbnails(grid);
-      } else if (grid->results.continuation[0] && grid->results.count < MAX_SEARCH_RESULTS) {
-         int lastRow = (grid->results.count - 1) / grid->columns;
-         if (selRow >= lastRow - 1) loadMore(grid);
-         else {
-            int memberIndex = nextMemberCheck(grid);
+      } else if (grid->results.continuation[0] && grid->results.count < MAX_SEARCH_RESULTS &&
+                 selRow >= ((grid->results.count - 1) / grid->columns) - 1) {
+         loadMore(grid);
+      } else if (!hasPendingVisibleThumbnailDecode(grid)) {
+         int memberIndex = nextMemberCheck(grid, 1);
+         if (memberIndex >= 0) {
+            loadMemberCheck(grid, memberIndex);
+         } else if (grid->memberIdleFrames >= MEMBER_IDLE_FRAMES &&
+                    !hasVisibleMemberCheckInFlight(grid)) {
+            // No visible member checks or thumbnail work remain; fill the cache gradually in idle time.
+            memberIndex = nextMemberCheck(grid, 0);
             if (memberIndex >= 0) loadMemberCheck(grid, memberIndex);
          }
-      } else {
-         int memberIndex = nextMemberCheck(grid);
-         if (memberIndex >= 0) loadMemberCheck(grid, memberIndex);
       }
    }
 }

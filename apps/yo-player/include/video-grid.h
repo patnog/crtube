@@ -15,7 +15,7 @@
 #include <stdint.h>
 
 #define GRID_COLS_WIDE 3
-#define GRID_THREADS  1         // serialize TLS/JPEG network pressure on PS3
+#define GRID_THREADS  4         // bounded parallel thumbnail requests; BearSSL has a per-connection pool
 
 typedef enum { GRID_RUNNING, GRID_READY, GRID_EMPTY } GridStage;
 
@@ -61,6 +61,8 @@ typedef struct {
    Label            membersOnlyBadge;                       // shared "*Members only" tag drawn on restricted tiles
    volatile GridMemberState membersOnly[MAX_SEARCH_RESULTS];
    int              memberCheckIndex;
+   int              memberCheckAccountRevision;
+   int              memberIdleFrames;
 
    int              selected, scrollRow, winStart, winEnd;
    ButtonRepeat     horizontalRepeat, verticalRepeat;
@@ -69,7 +71,8 @@ typedef struct {
    volatile GridStage stage;
    volatile int     searchParsed, workerDone, stopWorker;
    GridJob          job;
-   int              thumbRequestIndex;                     // next visible thumbnail selected by the priority scheduler
+   int              thumbRequestIndex;                     // first thumbnail index selected by the priority scheduler
+   int              thumbRequestEnd;                       // exclusive end of the current viewport/lookahead batch
    int              decodeIndex;                           // thumbnail currently decoding asynchronously, or -1
    int              threadActive, reloadPending;
    volatile int     backgroundPaused;

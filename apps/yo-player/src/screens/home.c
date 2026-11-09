@@ -62,6 +62,7 @@ static const char *AccountNames[ACCOUNT_FEED_COUNT] = { "Recommended", "Subscrip
 #define HOME_LIVE         (HOME_LOCAL_HISTORY + 1)               // entered from the sidebar; never in the home L1/R1 ring
 #define HOME_PLAYLISTS    (HOME_LIVE + 1)                        // signed-in library; sidebar only, not in L1/R1 ring
 #define HOME_PLAYLIST_CONTENTS (HOME_PLAYLISTS + 1)              // opened from a playlist tile
+#define HOME_CACHE_COUNT (HOME_PLAYLISTS + 1)
 #define SUBS_PER_CHANNEL 8      // latest videos pulled from each subscribed channel
 #define LIVE_MAX_AGE_US (10ULL * 60 * 1000000)
 
@@ -75,20 +76,22 @@ static const int SignedInOrder[]  = {
    TREND_GAMING, TREND_SPORTS, TREND_PODCASTS,
 };
 
-// each category's fully-loaded results, so returning to a tab skips the feed fetch (thumbnails still refetch).
-static SearchResults categoryCache[HOME_CAT_COUNT];
-static int           categoryCached[HOME_CAT_COUNT];
+// each cached category's fully-loaded results, so returning to a tab skips the feed fetch (thumbnails still refetch).
+static SearchResults categoryCache[HOME_CACHE_COUNT];
+static int           categoryCached[HOME_CACHE_COUNT];
 static int           subsRevisionSeen;         // subscriptions revision the cached HOME_SUBS feed was built at
 static int           watchLaterRevisionSeen;   // watch-later revision the cached HOME_WATCHLATER feed was built at
 static int           accountRevisionSeen;      // sign-in state the category order + account caches belong to
 static uint64_t      accountFeedRefreshUs[ACCOUNT_FEED_COUNT];
+static uint64_t      playlistRefreshUs;
 
-// Account feeds refresh periodically while visible. History is deliberately excluded here: it is
-// fetched fresh every time its tab is entered, regardless of its previous cache age.
+// Account feeds refresh periodically while visible. History and the playlist library use short TTLs
+// so returning to them is immediate without keeping stale data indefinitely.
 #define ACCOUNT_HOME_REFRESH_US          (15ULL * 60 * 1000000)
 #define ACCOUNT_SUBSCRIPTIONS_REFRESH_US (10ULL * 60 * 1000000)
 #define ACCOUNT_HISTORY_REFRESH_US       (5ULL * 60 * 1000000)
 #define ACCOUNT_WATCH_LATER_REFRESH_US   (5ULL * 60 * 1000000)
+#define PLAYLISTS_REFRESH_US              (5ULL * 60 * 1000000)
 static const uint64_t AccountFeedRefreshIntervals[ACCOUNT_FEED_COUNT] = {
    ACCOUNT_HOME_REFRESH_US, ACCOUNT_SUBSCRIPTIONS_REFRESH_US,
    ACCOUNT_HISTORY_REFRESH_US, ACCOUNT_WATCH_LATER_REFRESH_US
@@ -358,7 +361,8 @@ static void setHeading(void)
 
 static void refreshCurrentCategory(void)
 {
-   if (home.category < HOME_CAT_COUNT) categoryCached[home.category] = 0;
+   if (home.category < HOME_CACHE_COUNT) categoryCached[home.category] = 0;
+   if (home.category == HOME_PLAYLISTS) playlistRefreshUs = getTimeUs();
    if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY) {
       int feed = home.category - HOME_ACCOUNT;
       accountFeedRefreshUs[feed] = getTimeUs();
@@ -372,18 +376,29 @@ static void loadCategory(void)
 {
    setHeading();
    if (home.category == HOME_LOCAL_HISTORY || home.category == HOME_LIVE ||
-       home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS) {
+       home.category == HOME_PLAYLIST_CONTENTS) {
       if (home.category == HOME_LIVE) home.liveLoadedUs = getTimeUs();
       setGridSource(&home.grid, homeFetch, NULL);
+      return;
+   }
+   if (home.category == HOME_PLAYLISTS) {
+      uint64_t now = getTimeUs();
+      if (!playlistRefreshUs || now - playlistRefreshUs >= PLAYLISTS_REFRESH_US ||
+          !categoryCached[HOME_PLAYLISTS]) {
+         categoryCached[HOME_PLAYLISTS] = 0;
+         playlistRefreshUs = now;
+         setGridSource(&home.grid, homeFetch, NULL);
+      } else {
+         setGridCached(&home.grid, &categoryCache[HOME_PLAYLISTS], homeFetch, NULL);
+      }
       return;
    }
    if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY) {
       int feed = home.category - HOME_ACCOUNT;
       uint64_t now = getTimeUs();
       uint64_t last = accountFeedRefreshUs[feed];
-      int forceHistory = feed == ACCOUNT_FEED_HISTORY;
       int expired = !last || now - last >= AccountFeedRefreshIntervals[feed];
-      if (forceHistory || expired || !categoryCached[home.category]) {
+      if (expired || !categoryCached[home.category]) {
          categoryCached[home.category] = 0;
          accountFeedRefreshUs[feed] = now;
          setGridSource(&home.grid, homeFetch, NULL);
@@ -400,8 +415,13 @@ static void loadCategory(void)
 static void cacheCurrent(void)
 {
    if (home.category == HOME_LOCAL_HISTORY || home.category == HOME_LIVE ||
-       home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS) return;
+       home.category == HOME_PLAYLIST_CONTENTS) return;
    if (gridStage(&home.grid) != GRID_READY || gridBusy(&home.grid)) return;   // don't copy mid-append
+   if (home.grid.threadActive) {
+      const SearchResults *results = gridResults(&home.grid);
+      for (int i = 0; i < results->count; i++)
+         if (results->items[i].isPlaylist) return;   // playlist thumbnail workers resolve IDs in-place
+   }
    categoryCache[home.category] = *gridResults(&home.grid);
    categoryCached[home.category] = 1;
 }
@@ -475,6 +495,8 @@ static void applyAccountChange(void)
       categoryCached[HOME_ACCOUNT + feed] = 0;
       accountFeedRefreshUs[feed] = 0;
    }
+   categoryCached[HOME_PLAYLISTS] = 0;
+   playlistRefreshUs = 0;
    home.category = isSignedIn() ? HOME_ACCOUNT + ACCOUNT_FEED_HOME : HOME_SUBS;
    loadCategory();
    setSidebarForCategory();
@@ -1458,7 +1480,7 @@ static void updateHome(void)
        gridStage(&home.grid) == GRID_READY && !home.grid.threadActive) {
       int feed = home.category - HOME_ACCOUNT;
       uint64_t now = getTimeUs();
-      if (feed != ACCOUNT_FEED_HISTORY && accountFeedRefreshUs[feed] &&
+      if (accountFeedRefreshUs[feed] &&
           now - accountFeedRefreshUs[feed] >= AccountFeedRefreshIntervals[feed]) {
          refreshCurrentCategory();
          return;
@@ -1558,10 +1580,6 @@ static void resumeHome(void)
       return;
    }
    if (home.category == HOME_LOCAL_HISTORY) {
-      loadCategory();
-      return;
-   }
-   if (home.category == HOME_ACCOUNT + ACCOUNT_FEED_HISTORY) {
       loadCategory();
       return;
    }
