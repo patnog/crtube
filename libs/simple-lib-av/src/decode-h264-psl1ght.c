@@ -41,6 +41,7 @@ struct H264Decoder {
    volatile int picPending;
    volatile int seqDone;
    volatile int errored;
+   volatile int callbacksInFlight;
    int auRejectedCount;
    int picIncompleteCount;
    int diagAuBeginLogged;
@@ -70,6 +71,7 @@ static u32 vdecCallbackPsl(u32 handle, u32 type, u32 data, u32 arg)
    H264Decoder *decoder = (H264Decoder *)(uintptr_t)arg;
    if (!decoder) return 0;
 
+   __sync_add_and_fetch(&decoder->callbacksInFlight, 1);
    lock(&decoder->lock);
    switch (type) {
       case VDEC_CALLBACK_AUDONE:
@@ -97,6 +99,7 @@ static u32 vdecCallbackPsl(u32 handle, u32 type, u32 data, u32 arg)
          break;
    }
    unlock(&decoder->lock);
+   __sync_sub_and_fetch(&decoder->callbacksInFlight, 1);
    return 0;
 }
 
@@ -442,16 +445,56 @@ void destroyH264Decoder(H264Decoder *decoder)
       free(decoder);
       return;
    }
+   if (decoder->handle) {
+      s32 endResult = 0;
+      int tries = 0;
+      do {
+         endResult = vdecEndSequence(decoder->handle);
+         if (endResult == (s32)VDEC_ERROR_BUSY) sleepMs(1);
+      } while (endResult == (s32)VDEC_ERROR_BUSY && ++tries < 2000);
+
+      if (endResult != 0) {
+         logWarn("[vdec] EndSequence during destroy failed rc=0x%x\n", endResult);
+      } else {
+         vdecPictureFormat format = { VDEC_PICFMT_YUV420P, VDEC_COLOR_MATRIX_BT709, 0xff };
+         for (tries = 0; !decoder->seqDone && tries < 3000; tries++) {
+            discardReportedPictures(decoder, &format);
+            sleepMs(1);
+         }
+         discardReportedPictures(decoder, &format);
+         if (!decoder->seqDone)
+            logWarn("[vdec] SEQDONE timeout during destroy\n");
+      }
+
+      s32 closeResult = 0;
+      tries = 0;
+      do {
+         closeResult = vdecClose(decoder->handle);
+         if (closeResult == (s32)VDEC_ERROR_BUSY) sleepMs(1);
+      } while (closeResult == (s32)VDEC_ERROR_BUSY && ++tries < 2000);
+
+      if (closeResult != 0) {
+         logError("[vdec] Close during destroy failed rc=0x%x; retaining decoder resources\n",
+                  closeResult);
+         return;
+      }
+      decoder->handle = 0;
+
+      for (tries = 0; decoder->callbacksInFlight != 0 && tries < 5000; tries++)
+         sleepMs(1);
+      if (decoder->callbacksInFlight != 0) {
+         logError("[vdec] callback drain timeout active=%d; retaining decoder resources\n",
+                  decoder->callbacksInFlight);
+         return;
+      }
+   }
    if (decoder->backend != H264_BACKEND_TEE) {
-      logInfo("[vdec-diag] decoder summary fed=%d done=%d picout=%d incomplete=%d firstAuDone=%d firstPicout=%d firstGetPicItem=%d firstGetPicture=%d\n",
+      int callbacks = __sync_fetch_and_add(&decoder->callbacksInFlight, 0);
+      logInfo("[vdec-diag] decoder summary fed=%d done=%d picout=%d incomplete=%d firstAuDone=%d firstPicout=%d firstGetPicItem=%d firstGetPicture=%d callbacks=%d\n",
               decoder->auFedCount, decoder->auDoneCount, decoder->picoutWrite,
               decoder->picIncompleteCount, decoder->diagFirstAuDoneLogged,
               decoder->diagFirstPicoutLogged, decoder->diagGetPicItemLogged,
-              decoder->diagGetPictureLogged);
-   }
-   if (decoder->handle) {
-      (void)vdecEndSequence(decoder->handle);
-      (void)vdecClose(decoder->handle);
+              decoder->diagGetPictureLogged, callbacks);
    }
    free(decoder->workMemory);
    destroyLock(&decoder->lock);

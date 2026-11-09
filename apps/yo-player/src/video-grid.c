@@ -15,6 +15,8 @@
 #include "image-loader.h"
 #include "dbg.h"
 #include "string-utilities.h"   // strCopy
+#include "vfs.h"                // HDD thumbnail cache
+#include "thread.h"             // cache mutex
 #include "account.h"            // getAccountRevision
 #include <string.h>
 #include <stdio.h>
@@ -31,6 +33,363 @@
 #define DECODES_PER_FRAME 1
 #define THUMB_CAP   (96 * 1024) // one mqdefault jpeg fits easily
 #define THUMB_UA    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+
+
+// Persistent thumbnail cache. JPEG payloads are capped at 10 MiB; the small
+// FIFO index is stored separately and sorted in RAM for binary-search lookups.
+#define THUMB_CACHE_DIR       "/dev_hdd0/tmp/crtube/thumbnail_cache"
+#define THUMB_CACHE_INDEX     THUMB_CACHE_DIR "/index.txt"
+#define THUMB_CACHE_INDEX_TMP THUMB_CACHE_DIR "/index.tmp"
+#define THUMB_CACHE_LIMIT     (10u * 1024u * 1024u)
+#define THUMB_CACHE_MAX_ITEMS 1000
+#define THUMB_CACHE_INDEX_CAP 20480
+
+typedef struct {
+   char id[12];
+   uint32_t size;
+} ThumbCacheEntry;
+
+static ThumbCacheEntry thumbCacheFifo[THUMB_CACHE_MAX_ITEMS];
+static char thumbCacheSorted[THUMB_CACHE_MAX_ITEMS][12];
+static int thumbCacheCount;
+static uint64_t thumbCacheBytes;
+static int thumbCacheLoaded;
+static int thumbCacheDirty;
+static sys_lwmutex_t thumbCacheLock;
+static volatile int thumbCacheLockState;
+static char thumbCacheIndexBuffer[THUMB_CACHE_INDEX_CAP];
+
+static int thumbCacheValidId(const char *id)
+{
+   if (!id || strlen(id) != 11) return 0;
+   for (int i = 0; i < 11; i++) {
+      char c = id[i];
+      if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-')) return 0;
+   }
+   return 1;
+}
+
+static int thumbCacheEnsureLock(void)
+{
+   int state = __sync_val_compare_and_swap(&thumbCacheLockState, 0, 1);
+   if (state == 0) {
+      int rc = createLock(&thumbCacheLock);
+      __sync_synchronize();
+      thumbCacheLockState = rc == 0 ? 2 : -1;
+   } else {
+      while (thumbCacheLockState == 1) yieldThread();
+   }
+   return thumbCacheLockState == 2;
+}
+
+static int thumbCacheFindSorted(const char *id)
+{
+   int low = 0, high = thumbCacheCount - 1;
+   while (low <= high) {
+      int mid = low + (high - low) / 2;
+      int cmp = strcmp(thumbCacheSorted[mid], id);
+      if (cmp == 0) return mid;
+      if (cmp < 0) low = mid + 1;
+      else high = mid - 1;
+   }
+   return -1;
+}
+
+static void thumbCacheInsertSorted(const char *id)
+{
+   int low = 0, high = thumbCacheCount;
+   while (low < high) {
+      int mid = low + (high - low) / 2;
+      if (strcmp(thumbCacheSorted[mid], id) < 0) low = mid + 1;
+      else high = mid;
+   }
+   if (low < thumbCacheCount)
+      memmove(&thumbCacheSorted[low + 1], &thumbCacheSorted[low],
+              (size_t)(thumbCacheCount - low) * sizeof thumbCacheSorted[0]);
+   strCopy(thumbCacheSorted[low], sizeof thumbCacheSorted[low], id);
+}
+
+static void thumbCacheRemoveSorted(const char *id)
+{
+   int index = thumbCacheFindSorted(id);
+   if (index < 0) return;
+   if (index + 1 < thumbCacheCount)
+      memmove(&thumbCacheSorted[index], &thumbCacheSorted[index + 1],
+              (size_t)(thumbCacheCount - index - 1) * sizeof thumbCacheSorted[0]);
+}
+
+static void thumbCacheRemoveOldestLocked(void)
+{
+   if (thumbCacheCount <= 0) return;
+   char path[160];
+   snprintf(path, sizeof path, THUMB_CACHE_DIR "/%s.jpg", thumbCacheFifo[0].id);
+   deleteFile(path);
+   thumbCacheBytes -= thumbCacheFifo[0].size;
+   thumbCacheRemoveSorted(thumbCacheFifo[0].id);
+   if (thumbCacheCount > 1)
+      memmove(&thumbCacheFifo[0], &thumbCacheFifo[1],
+              (size_t)(thumbCacheCount - 1) * sizeof thumbCacheFifo[0]);
+   thumbCacheCount--;
+   thumbCacheDirty = 1;
+}
+
+static void thumbCacheSaveIndexLocked(void)
+{
+   if (!thumbCacheDirty) return;
+   size_t used = 0;
+   for (int i = 0; i < thumbCacheCount; i++) {
+      int n = snprintf(thumbCacheIndexBuffer + used, sizeof thumbCacheIndexBuffer - used,
+                       "%s %u\n", thumbCacheFifo[i].id, (unsigned)thumbCacheFifo[i].size);
+      if (n < 0 || (size_t)n >= sizeof thumbCacheIndexBuffer - used) return;
+      used += (size_t)n;
+   }
+   if (writeFile(THUMB_CACHE_INDEX_TMP, thumbCacheIndexBuffer, used) != 0) {
+      deleteFile(THUMB_CACHE_INDEX_TMP);
+      logWarn("[grid-cache] could not write thumbnail index\n");
+      return;
+   }
+   deleteFile(THUMB_CACHE_INDEX);
+   if (renamePath(THUMB_CACHE_INDEX_TMP, THUMB_CACHE_INDEX) != 0) {
+      deleteFile(THUMB_CACHE_INDEX_TMP);
+      logWarn("[grid-cache] could not publish thumbnail index\n");
+      return;
+   }
+   thumbCacheDirty = 0;
+}
+
+static void thumbCacheCleanupOrphansLocked(void)
+{
+   VfsDir dir;
+   if (openDir(THUMB_CACHE_DIR, &dir) != 0) return;
+   char name[256];
+   VfsEntryType type;
+   while (readDir(&dir, name, sizeof name, &type) > 0) {
+      if (type != VFS_ENTRY_FILE) continue;
+      size_t n = strlen(name);
+      if (n > 4 && strcmp(name + n - 4, ".tmp") == 0) {
+         char path[320];
+         snprintf(path, sizeof path, THUMB_CACHE_DIR "/%s", name);
+         deleteFile(path);
+      } else if (n == 15 && strcmp(name + 11, ".jpg") == 0) {
+         char id[12];
+         memcpy(id, name, 11); id[11] = 0;
+         if (thumbCacheFindSorted(id) < 0) {
+            char path[160];
+            snprintf(path, sizeof path, THUMB_CACHE_DIR "/%s", name);
+            deleteFile(path);
+         }
+      }
+   }
+   closeDir(&dir);
+}
+
+static void thumbCacheLoadLocked(void)
+{
+   if (thumbCacheLoaded) return;
+   thumbCacheLoaded = 1;
+   makeDir("/dev_hdd0/tmp");
+   makeDir("/dev_hdd0/tmp/crtube");
+   if (makeDir(THUMB_CACHE_DIR) != 0) {
+      logWarn("[grid-cache] thumbnail cache directory unavailable\n");
+      return;
+   }
+
+   // Read only the tail of the index. This also migrates older, larger indexes:
+   // parsing the newest records first preserves the FIFO entries that matter.
+   int bytes = -1;
+   int64_t indexOffset = 0;
+   VfsFile indexFile;
+   if (openFs(THUMB_CACHE_INDEX, VFS_O_RDONLY, &indexFile) == 0) {
+      int64_t indexSize = seekFs(&indexFile, 0, VFS_SEEK_END);
+      if (indexSize >= 0) {
+         if (indexSize >= (int64_t)sizeof thumbCacheIndexBuffer)
+            indexOffset = indexSize - (int64_t)(sizeof thumbCacheIndexBuffer - 1);
+         if (seekFs(&indexFile, indexOffset, VFS_SEEK_SET) >= 0) {
+            int64_t got = readFs(&indexFile, thumbCacheIndexBuffer,
+                                 sizeof thumbCacheIndexBuffer - 1);
+            if (got >= 0) bytes = (int)got;
+         }
+      }
+      closeFs(&indexFile);
+   }
+
+   if (bytes > 0) {
+      thumbCacheIndexBuffer[bytes] = 0;
+      char *line = thumbCacheIndexBuffer;
+      char *limit = thumbCacheIndexBuffer + bytes;
+
+      // If the read began in the middle of an old record, discard that fragment.
+      if (indexOffset > 0) {
+         char *firstNewline = memchr(line, '\n', (size_t)(limit - line));
+         line = firstNewline ? firstNewline + 1 : limit;
+      }
+
+      while (line < limit) {
+         char *next = memchr(line, '\n', (size_t)(limit - line));
+         if (!next) next = limit;
+         char saved = *next;
+         *next = 0;
+         char *space = strchr(line, ' ');
+         if (space) {
+            *space++ = 0;
+            char *end = NULL;
+            unsigned long size = strtoul(space, &end, 10);
+            if (thumbCacheValidId(line) && end != space && size > 0 && size <= THUMB_CAP &&
+                thumbCacheFindSorted(line) < 0) {
+               char path[160];
+               VfsStat st;
+               snprintf(path, sizeof path, THUMB_CACHE_DIR "/%s.jpg", line);
+               if (statPath(path, &st) == 0 && !st.isDir && st.size > 0 && st.size <= THUMB_CAP) {
+                  uint32_t actualSize = (uint32_t)st.size;
+                  while (thumbCacheCount > 0 &&
+                         (thumbCacheCount >= THUMB_CACHE_MAX_ITEMS ||
+                          thumbCacheBytes + actualSize > THUMB_CACHE_LIMIT))
+                     thumbCacheRemoveOldestLocked();
+                  if (thumbCacheBytes + actualSize <= THUMB_CACHE_LIMIT) {
+                     strCopy(thumbCacheFifo[thumbCacheCount].id,
+                             sizeof thumbCacheFifo[thumbCacheCount].id, line);
+                     thumbCacheFifo[thumbCacheCount].size = actualSize;
+                     thumbCacheInsertSorted(line);
+                     thumbCacheCount++;
+                     thumbCacheBytes += actualSize;
+                     if (actualSize != size) thumbCacheDirty = 1;
+                  }
+               }
+            }
+         }
+         *next = saved;
+         line = next < limit ? next + 1 : limit;
+      }
+   } else if (bytes < 0) {
+      thumbCacheDirty = 1;
+   }
+   thumbCacheCleanupOrphansLocked();
+   if (thumbCacheDirty) thumbCacheSaveIndexLocked();
+   logInfo("[grid-cache] loaded %d thumbnails (%u bytes)\n",
+           thumbCacheCount, (unsigned)thumbCacheBytes);
+}
+
+
+// Cache lookup and file I/O run only on thumbnail workers, never on the UI thread.
+static int thumbCacheRead(const char *id, uint8_t *buffer, int *length)
+{
+   if (!thumbCacheValidId(id) || !thumbCacheEnsureLock()) return 0;
+   lock(&thumbCacheLock);
+   thumbCacheLoadLocked();
+   int index = thumbCacheFindSorted(id);
+   if (index < 0) { unlock(&thumbCacheLock); return 0; }
+
+   char path[160];
+   snprintf(path, sizeof path, THUMB_CACHE_DIR "/%s.jpg", id);
+   VfsStat st;
+   if (statPath(path, &st) != 0 || st.isDir || st.size <= 0 || st.size > THUMB_CAP) {
+      thumbCacheRemoveSorted(id);
+      for (int i = 0; i < thumbCacheCount; i++) {
+         if (strcmp(thumbCacheFifo[i].id, id) == 0) {
+            thumbCacheBytes -= thumbCacheFifo[i].size;
+            if (i + 1 < thumbCacheCount)
+               memmove(&thumbCacheFifo[i], &thumbCacheFifo[i + 1],
+                       (size_t)(thumbCacheCount - i - 1) * sizeof thumbCacheFifo[0]);
+            thumbCacheCount--;
+            break;
+         }
+      }
+      thumbCacheDirty = 1;
+      unlock(&thumbCacheLock);
+      return 0;
+   }
+
+   VfsFile file;
+   int ok = 0;
+   if (openFs(path, VFS_O_RDONLY, &file) == 0) {
+      int64_t got = readFs(&file, buffer, st.size);
+      int closeRc = closeFs(&file);
+      if (got == (int64_t)st.size && closeRc == 0) {
+         *length = (int)got;
+         ok = 1;
+         for (int i = 0; i < thumbCacheCount; i++) {
+            if (strcmp(thumbCacheFifo[i].id, id) == 0 &&
+                thumbCacheFifo[i].size != (uint32_t)got) {
+               thumbCacheBytes -= thumbCacheFifo[i].size;
+               thumbCacheFifo[i].size = (uint32_t)got;
+               thumbCacheBytes += (uint32_t)got;
+               thumbCacheDirty = 1;
+               break;
+            }
+         }
+      }
+   }
+   if (!ok) {
+      deleteFile(path);
+      thumbCacheRemoveSorted(id);
+      for (int i = 0; i < thumbCacheCount; i++) {
+         if (strcmp(thumbCacheFifo[i].id, id) == 0) {
+            thumbCacheBytes -= thumbCacheFifo[i].size;
+            if (i + 1 < thumbCacheCount)
+               memmove(&thumbCacheFifo[i], &thumbCacheFifo[i + 1],
+                       (size_t)(thumbCacheCount - i - 1) * sizeof thumbCacheFifo[0]);
+            thumbCacheCount--;
+            break;
+         }
+      }
+      thumbCacheDirty = 1;
+   }
+   unlock(&thumbCacheLock);
+   return ok;
+}
+
+static void thumbCacheStore(const char *id, const uint8_t *data, int length)
+{
+   if (!thumbCacheValidId(id) || !data || length <= 0 ||
+       (uint32_t)length > THUMB_CACHE_LIMIT || !thumbCacheEnsureLock()) return;
+   lock(&thumbCacheLock);
+   thumbCacheLoadLocked();
+   if (thumbCacheFindSorted(id) >= 0) { unlock(&thumbCacheLock); return; }
+
+   while (thumbCacheCount > 0 &&
+          (thumbCacheCount >= THUMB_CACHE_MAX_ITEMS ||
+           thumbCacheBytes + (uint32_t)length > THUMB_CACHE_LIMIT))
+      thumbCacheRemoveOldestLocked();
+   if (thumbCacheBytes + (uint32_t)length > THUMB_CACHE_LIMIT) {
+      unlock(&thumbCacheLock);
+      return;
+   }
+
+   char tempPath[160], finalPath[160];
+   snprintf(tempPath, sizeof tempPath, THUMB_CACHE_DIR "/%s.tmp", id);
+   snprintf(finalPath, sizeof finalPath, THUMB_CACHE_DIR "/%s.jpg", id);
+   deleteFile(tempPath);
+   if (writeFile(tempPath, (const char *)data, (uint64_t)length) != 0) {
+      deleteFile(tempPath);
+      unlock(&thumbCacheLock);
+      return;
+   }
+   deleteFile(finalPath); // remove an orphan left by an interrupted previous index update
+   if (renamePath(tempPath, finalPath) != 0) {
+      deleteFile(tempPath);
+      unlock(&thumbCacheLock);
+      return;
+   }
+
+   strCopy(thumbCacheFifo[thumbCacheCount].id,
+           sizeof thumbCacheFifo[thumbCacheCount].id, id);
+   thumbCacheFifo[thumbCacheCount].size = (uint32_t)length;
+   thumbCacheInsertSorted(id);
+   thumbCacheCount++;
+   thumbCacheBytes += (uint32_t)length;
+   thumbCacheDirty = 1;
+   unlock(&thumbCacheLock);
+}
+
+static void thumbCacheSaveIndex(void)
+{
+   if (!thumbCacheEnsureLock()) return;
+   lock(&thumbCacheLock);
+   thumbCacheLoadLocked();
+   thumbCacheSaveIndexLocked();
+   unlock(&thumbCacheLock);
+}
 #define MEMBERS_ONLY_CACHE_CAP 512
 
 #define WATCHED_ALPHA 70        // label alpha for already-watched tiles
@@ -263,29 +622,40 @@ static void thumbFetchThread(uint64_t arg)
             grid->thumbs[i].state = THUMB_FAILED;
             continue;
          }
-         char url[128];
-         snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/mqdefault.jpg", thumbnailVideoId);
-         int length = 0, status = 0;
-         int rc = fetchHttp("GET", url, headers, 2, NULL, 0, (char *)buffer, THUMB_CAP, &length, &status);
+         int length = 0;
+         int fromCache = thumbCacheRead(thumbnailVideoId, buffer, &length);
          if (grid->stopWorker) {
             grid->thumbs[i].state = THUMB_NONE;
             break;
          }
-         if (rc == 0 && status == 200 && length > 0) {
-            uint8_t *copy = (uint8_t *)malloc(length);
-            if (copy) {
-               memcpy(copy, buffer, length);
-               grid->thumbs[i].jpeg = copy; grid->thumbs[i].jpegLen = length;
-               __sync_synchronize();
-               grid->thumbs[i].state = THUMB_FETCHED;
-               logInfo("[grid] thumbnail %s fetched (%d bytes)\n", thumbnailVideoId, length);
-            } else {
-               grid->thumbs[i].state = THUMB_FAILED;
-               logWarn("[grid] thumbnail %s skipped (out of memory)\n", thumbnailVideoId);
+         if (!fromCache) {
+            char url[128];
+            snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/mqdefault.jpg", thumbnailVideoId);
+            int status = 0;
+            int rc = fetchHttp("GET", url, headers, 2, NULL, 0, (char *)buffer, THUMB_CAP, &length, &status);
+            if (grid->stopWorker) {
+               grid->thumbs[i].state = THUMB_NONE;
+               break;
             }
+            if (rc != 0 || status != 200 || length <= 0) {
+               grid->thumbs[i].state = THUMB_FAILED;
+               logWarn("[grid] thumbnail %s failed rc=%d status=%d bytes=%d\n", thumbnailVideoId, rc, status, length);
+               continue;
+            }
+            thumbCacheStore(thumbnailVideoId, buffer, length);
+         }
+
+         uint8_t *copy = (uint8_t *)malloc(length);
+         if (copy) {
+            memcpy(copy, buffer, length);
+            grid->thumbs[i].jpeg = copy; grid->thumbs[i].jpegLen = length;
+            __sync_synchronize();
+            grid->thumbs[i].state = THUMB_FETCHED;
+            logInfo("[grid] thumbnail %s %s (%d bytes)\n", thumbnailVideoId,
+                    fromCache ? "loaded from HDD cache" : "fetched", length);
          } else {
             grid->thumbs[i].state = THUMB_FAILED;
-            logWarn("[grid] thumbnail %s failed rc=%d status=%d bytes=%d\n", thumbnailVideoId, rc, status, length);
+            logWarn("[grid] thumbnail %s skipped (out of memory)\n", thumbnailVideoId);
          }
       }
       free(buffer);
@@ -321,6 +691,7 @@ static void fetchThumbnailsRange(VideoGrid *grid, int from, int to)
       for (int i = from; i < to && i < grid->results.count; i++)
          if (grid->thumbs[i].state == THUMB_NONE) grid->thumbs[i].state = THUMB_FAILED;
    }
+   thumbCacheSaveIndex();
    logInfo("[grid] thumbnail batch finished\n");
 }
 
