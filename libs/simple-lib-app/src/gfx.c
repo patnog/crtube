@@ -72,11 +72,10 @@ static int       surfaceW = 0;
 static int       surfaceH = 0;
 static int       targetIsDisplay = 0;   // drawing to the screen buffer (vs an offscreen target)
 
-// One tuning knob for every 480-line output (480i and 480p), regardless of the
-// configured 4:3/16:9 aspect ratio. Keep at 1.0 to disable. This CPU-side transform
-// affects display-target UI geometry only; video frames and offscreen rasterisation
-// stay at 1.0. Global overscan is separate and is applied later by the display
-// viewport to all output, including video frames.
+// User-selected UI scale. The legacy sdUiScale name is retained to avoid changing
+// existing callers and the saved preference format, but the transform applies at
+// every output resolution. It affects display-target UI geometry only; video frames
+// and offscreen rasterisation stay at 1.0. Global overscan is a separate transform.
 static float     sdUiScale = 1.15f;
 static int       sdVideoOutput = 0;
 static int       gfxOverscanPercent = 0;
@@ -111,16 +110,17 @@ void setGfxOverscan(int percent)
 
 static float uiScale(void)
 {
-   return targetIsDisplay && sdVideoOutput ? sdUiScale : 1.0f;
+   // Keep the transform limited to the display target, but do not gate it by
+   // resolution: the same 1.0x/1.5x UI zoom is available in SD and HD modes.
+   return targetIsDisplay ? sdUiScale : 1.0f;
 }
 
-// Public query for layout/rasterisation code that needs the selected 480-line scale
-// even before a display draw call has started. This is based on output height, not
-// aspect ratio: anamorphic 16:9 SD is eligible too. Actual geometry drawing still
-// uses uiScale(), which additionally requires the display render target.
+// Public query for layout/rasterisation code that needs the selected UI scale
+// before a display draw call has started. Use isGfxSdVideoOutput() separately
+// when making resolution-specific layout decisions.
 float getGfxUiScaleFactor(void)
 {
-   return sdVideoOutput ? sdUiScale : 1.0f;
+   return sdUiScale;
 }
 
 static float scaleUiX(float x)

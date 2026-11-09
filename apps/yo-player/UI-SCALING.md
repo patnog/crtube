@@ -7,15 +7,16 @@ separate properties.
 
 ## 1. When scaling is available
 
-The graphics layer sets `sdVideoOutput` when the active video output resolution is 480 lines
-(`res.height == 480`). This covers 480i and 480p, regardless of whether the PS3 output aspect
-is 4:3 or anamorphic 16:9.
+UI Scaling is available at every output resolution. The user can select **1.0x** or **1.5x**
+in Home → Settings, and the selected factor is applied to display-target UI geometry in both
+SD and HD modes.
 
 | PS3 output | UI Scaling setting | Effective scale | Layout |
 |---|---|---:|---|
 | 480i/480p, 4:3 | Available: 1.0x / 1.5x | Selected value | CRT-oriented 4:3 layout |
 | 480i/480p, 16:9 | Available: 1.0x / 1.5x | Selected value | Standard widescreen layout |
-| 720p/1080p, 16:9 | Unavailable | 1.0x | Standard widescreen layout |
+| 720p, 16:9 | Available: 1.0x / 1.5x | Selected value | Standard widescreen layout |
+| 1080p, 16:9 | Available: 1.0x / 1.5x | Selected value | Standard widescreen layout |
 
 The aspect ratio is read separately from `videoState.displayMode.aspect` and selects the
 virtual canvas width. A 720x480 framebuffer does **not** imply 4:3: it can represent
@@ -28,8 +29,8 @@ from the other settings:
 - PSL1GHT: `/dev_hdd0/tmp/crtube/sd-ui-scale.txt`
 - Sony SDK: `/dev_hdd0/tmp/crtube_sdk/sd-ui-scale.txt`
 
-There is no L2 shortcut for changing the scale. On HD output, Settings displays the option
-as unavailable and the effective scale remains 1.0x.
+There is no L2 shortcut for changing the scale. The selected value is retained when the
+console changes output resolution; it is not reset when switching between SD and HD.
 
 ## 2. Graphics-layer behavior
 
@@ -37,12 +38,12 @@ Relevant implementation: `libs/simple-lib-app/src/gfx.c` and `libs/simple-lib-ap
 
 - `isGfxSdVideoOutput()` reports whether the active output is 480 lines.
 - `getGfxSdUiScale()` returns the stored selection, even when the current output is HD.
-- `getGfxUiScaleFactor()` returns the selected scale on 480-line output and 1.0 otherwise.
+- `getGfxUiScaleFactor()` returns the selected scale at every output resolution.
 - `setGfxSdUiScale()` accepts values from 1.0 through 1.5. The app's Settings UI currently
   exposes only 1.0x and 1.5x.
-- The internal `uiScale()` transform is active only when drawing to the display target and
-  when the output is 480 lines. It scales UI geometry around the center of the current
-  logical target (`targetW / 2`, `targetH / 2`).
+- The internal `uiScale()` transform is active whenever drawing to the display target.
+  It is not gated by output resolution. It scales UI geometry around the center of the
+  current logical target (`targetW / 2`, `targetH / 2`); the transform math is unchanged.
 - Offscreen render targets do not receive this geometry transform. Video frames drawn by
   `drawGfxYuvFrame()` are not enlarged by the UI scale.
 - Overscan is a separate output-viewport transform and can affect the final presentation
@@ -58,7 +59,7 @@ Relevant implementation: `libs/simple-lib-app/src/ui/label.c` and
 `libs/simple-lib-app/include/ui/label.h`.
 
 Labels do not automatically opt in. Call `setLabelScaleWithUi(&label, 1)` for labels that
-should follow the selected SD UI scale. The label renderer then re-rasterises the font at
+should follow the selected UI scale. The label renderer then re-rasterises the font at
 the selected factor. In the current label implementation, an opted-in label is drawn with
 `drawGfxTextureFixedPosition()`: its anchor is kept at the supplied `x`/`y`, and its texture
 uses the dimensions produced by the larger/smaller font raster. This avoids applying the
@@ -152,10 +153,10 @@ These are examples, not a guarantee that every element in every screen scales au
 Before merging a UI change, test on real hardware or representative output modes at both
 available scales and across the relevant aspect ratios.
 
-- [ ] 480i/480p 4:3 at 1.0x.
-- [ ] 480i/480p 4:3 at 1.5x.
-- [ ] 480i/480p anamorphic 16:9 at 1.0x.
-- [ ] 480i/480p anamorphic 16:9 at 1.5x.
+- [ ] 480i/480p 4:3 at 1.0x and 1.5x.
+- [ ] 480i/480p anamorphic 16:9 at 1.0x and 1.5x.
+- [ ] 720p 16:9 at 1.0x and 1.5x.
+- [ ] 1080p 16:9 at 1.0x and 1.5x.
 - [ ] HD 16:9 output, where the effective scale must remain 1.0x.
 - [ ] No clipped text, unexpected wrapping, overlap or off-screen controls.
 - [ ] Icons, badges, thumbnails and labels remain visually coherent.

@@ -127,14 +127,13 @@ static Label       titleLabel, statusLabel;
 static ButtonHints hints, hintsSecondRow;
 static int         sdHintsTwoRows;
 
-// UI Scaling is offered for any 480-line output (480i/480p), including both
-// 4:3 and anamorphic 16:9. The graphics layer disables it automatically on HD.
-// Keep this preference separate from settings.txt so it can be saved independently.
+// UI Scaling is available at every output resolution. Keep the legacy SD names
+// and preference path so existing installations retain their saved selection.
 #define SD_SCALE_PATH CRTUBE_DATA_DIR "/sd-ui-scale.txt"
 static const float SdScaleChoices[] = { 1.00f, 1.50f };
 #define SD_SCALE_COUNT ((int)(sizeof SdScaleChoices / sizeof SdScaleChoices[0]))
 static int sdScaleLoaded;
-static int sdScaleIndex = 1; // default 1.5x on first launch; choices apply to SD output only
+static int sdScaleIndex = 1; // default 1.5x on first launch; legacy variable name retained
 
 static void loadSdScale(void)
 {
@@ -157,10 +156,7 @@ static void loadSdScale(void)
 
 static void cycleSdScale(void)
 {
-   // The Settings row is still visible on HD, but its value is Unavailable there.
-   // This guard also prevents changing the stored SD preference from an HD mode.
-   if (!isGfxSdVideoOutput()) return;
-   // Keep this index synchronized when the channel screen changes the shared scale.
+   // Keep this index synchronized when another screen changes the shared scale.
    float current = getGfxUiScaleFactor();
    for (int i = 0; i < SD_SCALE_COUNT; i++) {
       float diff = current - SdScaleChoices[i];
@@ -942,8 +938,7 @@ static void drawSettingsPanel(void)
 {
    // Avoid printf floating-point formatting here: the PS3 runtime may be built
    // without float printf support, which can leave only the trailing "x".
-   const char *scaleValue = !isGfxSdVideoOutput() ? "Unavailable" :
-                            (getGfxUiScaleFactor() >= 1.25f ? "1.5x" : "1.0x");
+   const char *scaleValue = getGfxUiScaleFactor() >= 1.25f ? "1.5x" : "1.0x";
    char overscanValue[16];
    int overscan = getOverscanPercent();
    if (overscan > 0) snprintf(overscanValue, sizeof overscanValue, "+%d%%", overscan);
@@ -1212,7 +1207,7 @@ static void initHome(void)
    setLabelScaleWithUi(&statusLabel, 1);
 
    if (sdHintsTwoRows) {
-      // Reserve the maximum row height for both SD scaling choices so the
+      // Reserve the maximum row height for both UI scaling choices so the
       // footer and grid keep fixed positions when the setting changes.
       int maxGlyphHeight = (int)(HINT_GLYPH_H * SD_MAX_SCALE + 0.5f);
       initButtonHints(&hints, &uiFont,

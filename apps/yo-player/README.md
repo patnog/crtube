@@ -71,16 +71,15 @@ additional attribution and bundled-runtime notices are in
 The app follows the PS3's active system video output configuration. It does not force
 the console into a fixed aspect ratio or permanently switch the interface to CRT mode.
 
-- **SD output (480i/480p):** The UI Scaling option is available in the home **Settings** panel
-  for both 4:3 and anamorphic 16:9 output. The choices are **1.0x** and **1.5x**.
-- **HD output (720p/1080p):** UI scaling is unavailable and the effective scale remains **1.0x**.
+- **UI Scaling:** The home **Settings** panel offers **1.0x** and **1.5x** at every output
+  resolution, including 480p, 720p and 1080p. This applies to 4:3 SD and 16:9 SD/HD modes.
 - **4:3 aspect ratio:** Selects the dedicated CRT-oriented layout, including a two-column
   video grid and SD-specific navigation hints.
 - **16:9 aspect ratio:** Keeps the standard widescreen layout, including on 480-line SD output.
 
 Aspect ratio and output resolution are detected independently. A 720x480 framebuffer can
-represent either 4:3 or anamorphic 16:9; the 480-line mode enables UI scaling, while the
-configured aspect ratio selects the layout. The scale is changed in **Settings**, not with
+represent either 4:3 or anamorphic 16:9; UI scaling is available independently of
+resolution, while the configured aspect ratio selects the layout. The scale is changed in **Settings**, not with
 an L2 shortcut. See [UI-SCALING.md](UI-SCALING.md) for developer guidance and limitations.
 ## YouTube account sign-in
 
@@ -154,11 +153,11 @@ The app boots into the home feed. The sidebar switches between account feeds, PS
 
 Community **SponsorBlock** segments are marked on the seek bar in their category colours. Categories set to Ask can be skipped with Square. Live streams have no seek bar (there's nothing to scrub).
 
-## SD interface scaling
+## UI scaling
 
 The UI scale can be selected in the home **Settings → UI Scaling** menu. It offers **1.0x**
-and **1.5x** on 480i/480p output, including both 4:3 and anamorphic 16:9. It is unavailable
-on HD output (720p/1080p), where the effective scale remains 1.0x. The choice is saved and
+and **1.5x** at every output resolution, including 480i/480p, 720p and 1080p. The selected
+value is applied to the navigation interface in SD and HD modes. The choice is saved and
 restored on the next launch:
 
 - PSL1GHT: `/dev_hdd0/tmp/crtube/sd-ui-scale.txt`

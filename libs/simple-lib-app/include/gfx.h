@@ -33,13 +33,13 @@ typedef struct {
 
 int  initGfx(GfxVsync vsync);
 void termGfx(void);
-// 480-line-output UI scale (480i/480p, either 4:3 or anamorphic 16:9). HD output
-// always reports an effective factor of 1.0. Display-target UI geometry is transformed;
-// labels must opt into font re-rasterisation, while video frames and offscreen targets
-// remain unaffected. See apps/yo-player/UI-SCALING.md for application-level rules.
+// User-selected UI scale (1.0x/1.5x), applied to display-target UI geometry at every
+// output resolution. Labels must opt into font re-rasterisation; video frames and
+// offscreen targets remain unaffected. Use isGfxSdVideoOutput() only for SD-specific
+// layout decisions. See apps/yo-player/UI-SCALING.md for application-level rules.
 int   isGfxSdVideoOutput(void);
 float getGfxSdUiScale(void);
-float getGfxUiScaleFactor(void); // selected factor on 480-line output, otherwise 1.0
+float getGfxUiScaleFactor(void); // selected factor at every output resolution
 void  setGfxSdUiScale(float scale);
 // Uniform output zoom applied by the display viewport after all drawing and video crop calculations.
 // Range: -10..+10 percent; zero leaves the original output unchanged. Offscreen targets are unaffected.
@@ -102,7 +102,7 @@ void fillGfxRoundedRectangleFixed(int x, int y, int w, int h, int radius, uint32
 void drawGfxTriangle(float x0, float y0, uint32_t c0, float x1, float y1, uint32_t c1, float x2, float y2, uint32_t c2);
 void drawGfxLine(int x0, int y0, int x1, int y1, int thickness, uint32_t argb);
 void drawGfxTexture(int x, int y, int w, int h, GfxTexture tex, float u0, float v0, float u1, float v1, uint32_t tint, GfxFilter filter);
-// Draw a texture at its exact size and position, bypassing SD UI scaling (video thumbnails).
+// Draw a texture at its exact size and position, bypassing the global UI scaling transform (video thumbnails).
 void drawGfxTextureFixedSize(int x, int y, int w, int h, GfxTexture tex, float u0, float v0, float u1, float v1, uint32_t tint, GfxFilter filter);
 void drawGfxTextureFixedPosition(int x, int y, int w, int h, GfxTexture tex, float u0, float v0, float u1, float v1, uint32_t tint, GfxFilter filter);
 void drawGfxTextureFixedSizeScaledPosition(int x, int y, int w, int h, GfxTexture tex, float u0, float v0, float u1, float v1, uint32_t tint, GfxFilter filter);
