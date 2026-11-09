@@ -60,6 +60,8 @@ static const char *AccountNames[ACCOUNT_FEED_COUNT] = { "Recommended", "Subscrip
 #define HOME_CAT_COUNT   (HOME_ACCOUNT + ACCOUNT_FEED_COUNT)
 #define HOME_LOCAL_HISTORY (HOME_ACCOUNT + ACCOUNT_FEED_COUNT)  // persistent PS3-local playback history
 #define HOME_LIVE         (HOME_LOCAL_HISTORY + 1)               // entered from the sidebar; never in the home L1/R1 ring
+#define HOME_PLAYLISTS    (HOME_LIVE + 1)                        // signed-in library; sidebar only, not in L1/R1 ring
+#define HOME_PLAYLIST_CONTENTS (HOME_PLAYLISTS + 1)              // opened from a playlist tile
 #define SUBS_PER_CHANNEL 8      // latest videos pulled from each subscribed channel
 #define LIVE_MAX_AGE_US (10ULL * 60 * 1000000)
 
@@ -110,6 +112,8 @@ static struct {
    int       regionTop;
    int       regionVisible;
    int       pendingAccountCategory; // account feed selected before signing in, or -1
+   char      playlistId[64];
+   char      playlistTitle[160];
 } home;
 
 static Font        uiFont;
@@ -308,6 +312,9 @@ static int homeFetch(const char *token, SearchResults *out, void *user)
    (void)user;
    if (home.category == HOME_LOCAL_HISTORY) return fetchLocalHistory(out);
    if (home.category == HOME_LIVE) return getLiveFeed(home.liveCategory, token, out, homeLiveFetchStopped);
+   if (home.category == HOME_PLAYLISTS) return getAccountPlaylists(token, out);
+   if (home.category == HOME_PLAYLIST_CONTENTS)
+      return getAccountPlaylistVideos(home.playlistId, token, out);
    if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY)
       return getAccountFeed((AccountFeed)(home.category - HOME_ACCOUNT), token, out);
    if (home.category == HOME_SUBS)       return fetchSubscriptions(out);
@@ -326,6 +333,9 @@ static void setHeading(void)
    else if (home.category == HOME_SUBS)       snprintf(heading, sizeof heading, "Subscriptions%s", local);
    else if (home.category == HOME_WATCHLATER) snprintf(heading, sizeof heading, "Watch Later%s", local);
    else if (home.category == HOME_LIVE)       snprintf(heading, sizeof heading, "Live");
+   else if (home.category == HOME_PLAYLISTS)  snprintf(heading, sizeof heading, "Playlists");
+   else if (home.category == HOME_PLAYLIST_CONTENTS)
+      snprintf(heading, sizeof heading, "%s", home.playlistTitle[0] ? home.playlistTitle : "Playlist");
    else                                       snprintf(heading, sizeof heading, "Trending");
    setLabelText(&titleLabel, heading);
 }
@@ -345,7 +355,8 @@ static void refreshCurrentCategory(void)
 static void loadCategory(void)
 {
    setHeading();
-   if (home.category == HOME_LOCAL_HISTORY || home.category == HOME_LIVE) {
+   if (home.category == HOME_LOCAL_HISTORY || home.category == HOME_LIVE ||
+       home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS) {
       if (home.category == HOME_LIVE) home.liveLoadedUs = getTimeUs();
       setGridSource(&home.grid, homeFetch, NULL);
       return;
@@ -372,7 +383,8 @@ static void loadCategory(void)
 // cache the current category (only when it's fully loaded) so returning to it is instant.
 static void cacheCurrent(void)
 {
-   if (home.category == HOME_LOCAL_HISTORY || home.category == HOME_LIVE) return;
+   if (home.category == HOME_LOCAL_HISTORY || home.category == HOME_LIVE ||
+       home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS) return;
    if (gridStage(&home.grid) != GRID_READY || gridBusy(&home.grid)) return;   // don't copy mid-append
    categoryCache[home.category] = *gridResults(&home.grid);
    categoryCached[home.category] = 1;
@@ -383,7 +395,8 @@ static void openAccountPanel(void);
 
 static void setSidebarForCategory(void)
 {
-   if (home.category == HOME_LIVE) setSidebarCurrent(SIDEBAR_LIVE);
+   if (home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS) setSidebarCurrent(SIDEBAR_PLAYLISTS);
+   else if (home.category == HOME_LIVE) setSidebarCurrent(SIDEBAR_LIVE);
    else if (home.category == HOME_WATCHLATER) setSidebarCurrent(SIDEBAR_PS3_WATCH_LATER);
    else if (home.category == HOME_LOCAL_HISTORY) setSidebarCurrent(SIDEBAR_PS3_HISTORY);
    else if (home.category == HOME_SUBS) setSidebarCurrent(SIDEBAR_PS3_SUBSCRIPTIONS);
@@ -408,7 +421,8 @@ static void selectAccountFeed(AccountFeed feed)
 static void switchToCategory(int category)
 {
    if (category < 0 ||
-       (category >= HOME_CAT_COUNT && category != HOME_LOCAL_HISTORY && category != HOME_LIVE) ||
+       (category >= HOME_CAT_COUNT && category != HOME_LOCAL_HISTORY && category != HOME_LIVE &&
+        category != HOME_PLAYLISTS && category != HOME_PLAYLIST_CONTENTS) ||
        category == home.category) return;
    cacheCurrent();
    home.category = category;
@@ -418,6 +432,7 @@ static void switchToCategory(int category)
 
 static void switchCategory(int delta)
 {
+   if (home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS) return;
    if (home.category == HOME_LIVE) {
       home.liveCategory = (LiveCategory)((home.liveCategory + delta + LIVE_COUNT) % LIVE_COUNT);
       loadCategory();
@@ -493,7 +508,8 @@ static void updateAccountPanel(void)
 
    if (status.stage == SIGNIN_DONE) {
       home.accountOpen = 0;
-      if (home.pendingAccountCategory >= HOME_ACCOUNT && home.pendingAccountCategory < HOME_LOCAL_HISTORY) {
+      if ((home.pendingAccountCategory >= HOME_ACCOUNT && home.pendingAccountCategory < HOME_LOCAL_HISTORY) ||
+          home.pendingAccountCategory == HOME_PLAYLISTS) {
          int category = home.pendingAccountCategory;
          home.pendingAccountCategory = -1;
          switchToCategory(category);
@@ -875,7 +891,7 @@ static void updateSettingsPanel(void)
 {
    if (home.regionOpen) { updateRegionPicker(); return; }
    if (home.sponsorblockOpen) { updateSponsorBlockPanel(); return; }
-   if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.settingsOpen = 0; return; }
+   if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) { home.settingsOpen = 0; return; }
    if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
       home.settingsSelected = (home.settingsSelected + 1) % SETTINGS_ROW_COUNT;
    else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
@@ -1105,6 +1121,13 @@ void handleHomeSidebarSelection(int picked)
       case SIDEBAR_ACCOUNT_WATCH_LATER:
          selectAccountFeed(ACCOUNT_FEED_WATCH_LATER);
          break;
+      case SIDEBAR_PLAYLISTS:
+         if (isSignedIn()) switchToCategory(HOME_PLAYLISTS);
+         else {
+            home.pendingAccountCategory = HOME_PLAYLISTS;
+            openAccountPanel();
+         }
+         break;
       case SIDEBAR_TRENDING:
          if (home.category >= TREND_COUNT) switchToCategory(TREND_GAMING);
          break;
@@ -1319,6 +1342,7 @@ static void initHome(void)
    }
    initVideoGrid(&home.grid, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, gridHeight);
    setGridWatchedPredicate(&home.grid, isWatched);
+   setGridWatchedPosition(&home.grid, getWatchedPosition);
    setGridWatchLaterPredicate(&home.grid, isWatchLater);
 
    subsRevisionSeen = getSubscriptionsRevision();
@@ -1354,6 +1378,10 @@ static void updateHome(void)
    // the grid and must move the selection normally.
    if (!isSidebarActive()) {
       if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+         if (home.category == HOME_PLAYLIST_CONTENTS) {
+            switchToCategory(HOME_PLAYLISTS);
+            return;
+         }
          openSidebar();
          return;
       }
@@ -1393,6 +1421,14 @@ static void updateHome(void)
 
    const SearchResult *selected = gridSelected(&home.grid);
    if (!selected) return;
+   if (home.category == HOME_PLAYLISTS) {
+      if (isPadButtonPressed(PAD_BTN_CROSS) && selected->isPlaylist && selected->playlistId[0]) {
+         strCopy(home.playlistId, sizeof home.playlistId, selected->playlistId);
+         strCopy(home.playlistTitle, sizeof home.playlistTitle, selected->title);
+         switchToCategory(HOME_PLAYLIST_CONTENTS);
+      }
+      return;
+   }
    if (isPadButtonPressed(PAD_BTN_SQUARE)) {
       toggleWatchLater(selected);
       watchLaterRevisionSeen = getWatchLaterRevision();

@@ -17,7 +17,8 @@ int  isWatched(const char *videoId);
 void markWatched(const char *videoId);
 
 // resume: last playback position (seconds) per watched video, so playback picks up where it left off.
-// getWatchedPosition returns 0 if unknown; a finished video is saved as 0 so it restarts next time.
+// getWatchedPosition returns 0 if unknown; a finished video stores its duration, which the player
+// recognizes as too close to the end to resume.
 int  getWatchedPosition(const char *videoId);
 void setWatchedPosition(const char *videoId, int seconds);
 

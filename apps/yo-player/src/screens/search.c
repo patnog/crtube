@@ -254,6 +254,7 @@ static void initSearch(void)
    initVideoGrid(&search.grid, &uiFont, MARGIN_X, GRID_TOP, search.screenW - 2 * MARGIN_X, search.screenH - GRID_TOP - HINTS_BOTTOM - HINT_GLYPH_H - 24);
    logInfo("[diag-search] initSearch initVideoGrid returned\n");
    setGridWatchedPredicate(&search.grid, isWatched);
+   setGridWatchedPosition(&search.grid, getWatchedPosition);
    setGridWatchLaterPredicate(&search.grid, isWatchLater);
    reload();
 }

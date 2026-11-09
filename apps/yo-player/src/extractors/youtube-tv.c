@@ -30,6 +30,26 @@ int buildTvBrowseBody(char *out, int cap, AccountFeed feed, const char *continua
    return (length < 0 || length >= cap) ? -1 : length;
 }
 
+int buildTvLibraryBody(char *out, int cap, const char *continuation)
+{
+   const char *gl = getContentRegionCode();
+   int length = continuation ? snprintf(out, cap, TV_CONTEXT_FMT ",\"continuation\":\"%s\"}", gl, continuation)
+                             : snprintf(out, cap, TV_CONTEXT_FMT ",\"browseId\":\"FEplaylist_aggregation\"}", gl);
+   return (length < 0 || length >= cap) ? -1 : length;
+}
+
+int buildTvPlaylistBody(char *out, int cap, const char *playlistId, const char *continuation)
+{
+   if (!playlistId || !playlistId[0]) return -1;
+   char browseId[72];
+   int idLength = snprintf(browseId, sizeof browseId, "VL%s", playlistId);
+   if (idLength < 0 || idLength >= (int)sizeof browseId) return -1;
+   const char *gl = getContentRegionCode();
+   int length = continuation ? snprintf(out, cap, TV_CONTEXT_FMT ",\"continuation\":\"%s\"}", gl, continuation)
+                             : snprintf(out, cap, TV_CONTEXT_FMT ",\"browseId\":\"%s\"}", gl, browseId);
+   return (length < 0 || length >= cap) ? -1 : length;
+}
+
 // copy the json string value of "key" found within [from,end). 1 if found.
 static int jsonString(const char *from, const char *end, const char *key, char *out, int cap)
 {
@@ -137,6 +157,157 @@ void parseTvTiles(const char *resp, int respLen, SearchResults *out)
 
    // every shelf carries its own sideways "load more" token; the page-level one (sectionList on home,
    // the grid on history/playlists) closes the response, so the last token is the one that pages down.
+   static const char MORE[] = "\"nextContinuationData\":{\"continuation\":\"";
+   const char *last = NULL;
+   for (const char *hit = strstr(resp, MORE); hit && hit < end; hit = strstr(hit + 1, MORE)) last = hit;
+   if (last) jsonString(last, end, "continuation", out->continuation, sizeof out->continuation);
+}
+
+// The signed-in TV client's playlist aggregation is made of tileRenderer objects. Keep the scan
+// bounded to each JSON object: titles and counts can contain braces or renderer names as text.
+static const char *boundedFind(const char *from, const char *end, const char *needle)
+{
+   const char *hit = from ? strstr(from, needle) : NULL;
+   return hit && hit < end ? hit : NULL;
+}
+
+static const char *tvObjectEnd(const char *open, const char *end)
+{
+   int depth = 0, inString = 0;
+   for (const char *p = open; p < end; p++) {
+      char c = *p;
+      if (inString) {
+         if (c == '\\') p++;
+         else if (c == '"') inString = 0;
+      } else if (c == '"') inString = 1;
+      else if (c == '{') depth++;
+      else if (c == '}' && --depth == 0) return p + 1;
+   }
+   return end;
+}
+
+static void readTvTextObject(const char *object, const char *end, char *out, int cap)
+{
+   if (cap <= 0) return;
+   out[0] = 0;
+   const char *simple = boundedFind(object, end, "\"simpleText\":\"");
+   if (simple) {
+      readText(simple, end, out, cap);
+      return;
+   }
+
+   // Some TV titles/counts use runs instead of simpleText. Join their text in order, as the fork does.
+   int used = 0;
+   const char *scan = object;
+   while ((scan = boundedFind(scan, end, "\"text\":\"")) != NULL && used < cap - 1) {
+      char part[160];
+      if (jsonString(scan, end, "text", part, sizeof part)) {
+         int length = (int)strlen(part);
+         int room = cap - 1 - used;
+         if (length > room) length = room;
+         memcpy(out + used, part, (size_t)length);
+         used += length;
+         out[used] = 0;
+      }
+      scan += 8;
+   }
+}
+
+static int isPlaylistIdChar(char c)
+{
+   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+          (c >= '0' && c <= '9') || c == '-' || c == '_';
+}
+
+static int isValidPlaylistId(const char *id)
+{
+   int length = (int)strlen(id);
+   if (length < 2 || length > 61) return 0;
+   for (const char *p = id; *p; p++) if (!isPlaylistIdChar(*p)) return 0;
+   return 1;
+}
+
+void parseTvPlaylists(const char *resp, int respLen, SearchResults *out)
+{
+   static const char TILE[] = "\"tileRenderer\":{";
+   static const char META[] = "\"tileMetadataRenderer\":{";
+   static const char TITLE[] = "\"title\":{";
+   static const char OVERLAY[] = "\"thumbnailOverlayTimeStatusRenderer\":{";
+   static const char NEXT[] = "\"nextContinuationData\":{";
+   memset(out, 0, sizeof *out);
+   if (!resp || respLen <= 0) return;
+
+   const char *end = resp + respLen;
+   const char *at = resp;
+   while (out->count < MAX_SEARCH_RESULTS && (at = boundedFind(at, end, TILE)) != NULL) {
+      const char *open = at + sizeof TILE - 2;   // the opening brace
+      const char *close = tvObjectEnd(open, end);
+      at = close;
+      if (!boundedFind(open, close, "\"contentType\":\"TILE_CONTENT_TYPE_PLAYLIST\"")) continue;
+
+      SearchResult candidate;
+      memset(&candidate, 0, sizeof candidate);
+      if (!jsonString(open, close, "contentId", candidate.playlistId, sizeof candidate.playlistId) ||
+          !isValidPlaylistId(candidate.playlistId)) continue;
+      if (strcmp(candidate.playlistId, "WL") == 0) continue;  // Watch Later has its own sidebar entry.
+
+      const char *meta = boundedFind(open, close, META);
+      if (meta) {
+         const char *metaOpen = meta + sizeof META - 2;
+         const char *metaEnd = tvObjectEnd(metaOpen, close);
+         const char *title = boundedFind(meta, metaEnd, TITLE);
+         if (title) readTvTextObject(title, tvObjectEnd(title + sizeof TITLE - 2, metaEnd),
+                                     candidate.title, sizeof candidate.title);
+      }
+
+      const char *overlay = boundedFind(open, close, OVERLAY);
+      if (overlay) {
+         const char *overlayOpen = overlay + sizeof OVERLAY - 2;
+         readTvTextObject(overlayOpen, tvObjectEnd(overlayOpen, close),
+                          candidate.duration, sizeof candidate.duration);
+      }
+
+      if (!candidate.title[0])
+         strCopy(candidate.title, sizeof candidate.title,
+                 strcmp(candidate.playlistId, "LL") == 0 ? "Liked videos" : candidate.playlistId);
+      candidate.isPlaylist = 1;
+
+      int duplicate = 0;
+      for (int i = 0; i < out->count; i++)
+         if (strcmp(out->items[i].playlistId, candidate.playlistId) == 0) { duplicate = 1; break; }
+      if (!duplicate) out->items[out->count++] = candidate;
+   }
+
+   // The fork reads the last nextContinuationData in the response; preserve it for grid pagination.
+   const char *last = NULL;
+   for (const char *hit = resp; (hit = boundedFind(hit, end, NEXT)) != NULL; hit++) last = hit;
+   if (last) jsonString(last, end, "continuation", out->continuation, sizeof out->continuation);
+}
+
+void parseTvPlaylistVideos(const char *resp, int respLen, SearchResults *out)
+{
+   parseTvTiles(resp, respLen, out);
+   if (out->count > 0) return;
+
+   const char *end = resp + respLen;
+   const char *block = strstr(resp, "\"playlistVideoRenderer\":{");
+   while (block && block < end && out->count < MAX_SEARCH_RESULTS) {
+      const char *next = strstr(block + 1, "\"playlistVideoRenderer\":{");
+      const char *blockEnd = (next && next < end) ? next : end;
+      SearchResult *item = &out->items[out->count];
+      memset(item, 0, sizeof *item);
+      if (jsonString(block, blockEnd, "videoId", item->videoId, sizeof item->videoId)) {
+         const char *title = strstr(block, "\"title\":");
+         if (title && title < blockEnd) readText(title, blockEnd, item->title, sizeof item->title);
+         const char *length = strstr(block, "\"lengthText\":");
+         if (length && length < blockEnd) readText(length, blockEnd, item->duration, sizeof item->duration);
+         const char *byline = strstr(block, "\"shortBylineText\":");
+         if (byline && byline < blockEnd) readText(byline, blockEnd, item->author, sizeof item->author);
+         if (item->title[0]) out->count++;
+      }
+      block = next;
+   }
+
    static const char MORE[] = "\"nextContinuationData\":{\"continuation\":\"";
    const char *last = NULL;
    for (const char *hit = strstr(resp, MORE); hit && hit < end; hit = strstr(hit + 1, MORE)) last = hit;

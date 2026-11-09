@@ -3488,11 +3488,14 @@ static void termPlay(void)
    free(state.captionTracks);
    state.captionTracks = NULL;
    state.captionCount = 0;
-   // save the resume position on the way out; a finished video is saved as 0 so it restarts next time.
-   // only once a frame has actually played: a failed open or a resume seek that never landed must not
-   // clobber a good saved position with 0. storage ignores non-id keys, so typed urls no-op.
-   if (state.player && state.firstFrameSeen && !state.isLive)
-      setWatchedPosition(requestedInput, isVideoEnded(state.player) ? 0 : (int)getVideoPositionSeconds(state.player));
+   // Save the resume position on exit. A finished video stores its full duration so the grid can
+   // render a 100% progress line; the resume path already treats positions near the end as completed.
+   // Only save after a frame played, and keep typed URLs out of the ID-keyed history.
+   if (state.player && state.firstFrameSeen && !state.isLive) {
+      int savedPosition = isVideoEnded(state.player) ? (int)(getVideoDurationSeconds(state.player) + 0.5f)
+                                                    : (int)getVideoPositionSeconds(state.player);
+      setWatchedPosition(requestedInput, savedPosition);
+   }
    if (state.player || state.pendingPlayer || state.pendingResolutionPlayer || state.retiringResolutionPlayer)
       finishGfx();   // RSX may still be sampling a frame buffer
    if (state.player) { destroyVideoPlayer(state.player); state.player = NULL; }

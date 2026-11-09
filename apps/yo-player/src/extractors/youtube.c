@@ -1590,6 +1590,46 @@ static int fetchAccountFeed(AccountFeed feed, const char *continuation, SearchRe
    return 0;
 }
 
+typedef void (*TvBrowseParser)(const char *resp, int respLen, SearchResults *out);
+
+static int fetchTvCustomBrowse(const char *body, int bodyLen, SearchResults *out, TvBrowseParser parser)
+{
+   memset(out, 0, sizeof *out);
+   char accessToken[OAUTH_ACCESS_TOKEN_MAX];
+   if (getAccessToken(accessToken, sizeof accessToken, 0) != 0) return -1;
+
+   char *resp = malloc(RESP_CAP);
+   if (!resp) return -1;
+   int respLen = 0, status = 0;
+   int rc = postTvBrowse(body, bodyLen, accessToken, resp, &respLen, &status);
+   if (rc == 0 && status == 401 && getAccessToken(accessToken, sizeof accessToken, 1) == 0)
+      rc = postTvBrowse(body, bodyLen, accessToken, resp, &respLen, &status);
+   if (rc < 0 || status != 200) {
+      logError("[yt] account library browse rc=%d status=%d\n", rc, status);
+      free(resp);
+      return rc < 0 ? rc : -status;
+   }
+   parser(resp, respLen, out);
+   free(resp);
+   return 0;
+}
+
+static int fetchAccountPlaylists(const char *continuation, SearchResults *out)
+{
+   char body[MAX_CONTINUATION + 512];
+   int bodyLen = buildTvLibraryBody(body, sizeof body, continuation);
+   if (bodyLen < 0) { memset(out, 0, sizeof *out); return -1; }
+   return fetchTvCustomBrowse(body, bodyLen, out, parseTvPlaylists);
+}
+
+static int fetchAccountPlaylistVideos(const char *playlistId, const char *continuation, SearchResults *out)
+{
+   char body[MAX_CONTINUATION + 512];
+   int bodyLen = buildTvPlaylistBody(body, sizeof body, playlistId, continuation);
+   if (bodyLen < 0) { memset(out, 0, sizeof *out); return -1; }
+   return fetchTvCustomBrowse(body, bodyLen, out, parseTvPlaylistVideos);
+}
+
 
 // ---- Live feeds ----
 
@@ -1871,5 +1911,5 @@ static int fetchLive(LiveCategory category, const char *continuation, SearchResu
 const Extractor youtubeExtractor = {
    "youtube", matches, extract, search, fetchTrending, getChannel, fetchAccountFeed,
    youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly, fetchLive,
-   getChannelLive
+   getChannelLive, fetchAccountPlaylists, fetchAccountPlaylistVideos
 };

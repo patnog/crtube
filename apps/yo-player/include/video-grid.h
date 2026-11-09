@@ -20,7 +20,7 @@
 typedef enum { GRID_RUNNING, GRID_READY, GRID_EMPTY } GridStage;
 
 // what the background worker is doing this spawn. LOAD/CACHE fetch page 1 (CACHE restores kept results first);
-// MORE appends the next continuation page; THUMBS extends thumbnails to the current window frontier.
+// MORE appends the next continuation page; THUMBS fetches one item selected from the live viewport priority.
 typedef enum { JOB_LOAD, JOB_CACHE, JOB_MORE, JOB_THUMBS, JOB_MEMBER_CHECK } GridJob;
 
 typedef enum {
@@ -69,16 +69,17 @@ typedef struct {
    volatile GridStage stage;
    volatile int     searchParsed, workerDone, stopWorker;
    GridJob          job;
-   int              thumbFetched;                          // thumbnails fetched so far (contiguous from 0)
+   int              thumbRequestIndex;                     // next visible thumbnail selected by the priority scheduler
    int              decodeIndex;                           // thumbnail currently decoding asynchronously, or -1
    int              threadActive, reloadPending;
    sys_ppu_thread_t workerTid;
-   volatile int     thumbNext, thumbEnd;
+   volatile int     thumbNext, thumbEnd;          // bounded range for the single active thumbnail worker
 
    GridFetchFn      fetch;
    void            *fetchUser;
    const SearchResults *pendingCached;                     // set = next (re)load restores these instantly
    int              (*isWatched)(const char *videoId);     // fade predicate (NULL = no fade)
+   int              (*watchedPosition)(const char *videoId); // saved resume position in seconds (NULL = no progress)
    int              (*isWatchLater)(const char *videoId);  // watch-later badge predicate (NULL = no badge)
 } VideoGrid;
 
@@ -86,6 +87,7 @@ void initVideoGrid(VideoGrid *grid, Font *font, int x, int y, int width, int hei
 void termVideoGrid(VideoGrid *grid);
 
 void setGridWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *videoId));
+void setGridWatchedPosition(VideoGrid *grid, int (*watchedPosition)(const char *videoId));
 void setGridWatchLaterPredicate(VideoGrid *grid, int (*isWatchLater)(const char *videoId));
 
 // load a fresh feed from page 1. non-blocking: if a load is already running it's swapped once that finishes,

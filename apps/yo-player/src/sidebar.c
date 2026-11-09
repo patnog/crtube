@@ -31,7 +31,7 @@
 #define SIDEBAR_TITLE_Y            34
 #define SIDEBAR_ROWS_TOP          104
 #define SIDEBAR_ROWS_BOTTOM        18
-#define SIDEBAR_MAIN_ROWS          15
+#define SIDEBAR_MAIN_ROWS          16
 #define SIDEBAR_MAX_ROWS           SIDEBAR_MAIN_ROWS
 #define ROW_SECTION                 1
 
@@ -48,6 +48,7 @@ static const SidebarRow mainRows[SIDEBAR_MAIN_ROWS] = {
    { "Subscriptions",  ICON_GOOGLE,    SIDEBAR_ACCOUNT_SUBSCRIPTIONS,  0 },
    { "History",        ICON_HISTORY,   SIDEBAR_ACCOUNT_HISTORY,        0 },
    { "Watch Later",    ICON_CLOCK,     SIDEBAR_ACCOUNT_WATCH_LATER,    0 },
+   { "Playlists",      ICON_DOCS,      SIDEBAR_PLAYLISTS,              0 },
    { "Trending",       ICON_UP_BIG,    SIDEBAR_TRENDING,               0 },
    { "Live",           ICON_WIFI,      SIDEBAR_LIVE,                    0 },
    { "PS3",            0,              -1,                             ROW_SECTION },
@@ -170,7 +171,7 @@ void initSidebar(Font *font, int screenW, int screenH)
    side.uiScale = getGfxUiScaleFactor();
    if (side.uiScale < 1.0f) side.uiScale = 1.0f;
    side.panelW = getPanelWidth(screenW, side.uiScale);
-   side.selected = 5; // Trending is the initial active section.
+   side.selected = 6; // Trending is the initial active section.
 
    int contentOffset = screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
    initLabel(&side.title, font, 0, 0,
@@ -213,14 +214,15 @@ void setSidebarCurrent(SidebarItem item)
       case SIDEBAR_ACCOUNT_SUBSCRIPTIONS:   side.selected = 2; break;
       case SIDEBAR_ACCOUNT_HISTORY:         side.selected = 3; break;
       case SIDEBAR_ACCOUNT_WATCH_LATER:     side.selected = 4; break;
-      case SIDEBAR_TRENDING:                side.selected = 5; break;
-      case SIDEBAR_LIVE:                    side.selected = 6; break;
-      case SIDEBAR_PS3_SUBSCRIPTIONS:       side.selected = 8; break;
-      case SIDEBAR_PS3_HISTORY:             side.selected = 9; break;
-      case SIDEBAR_PS3_WATCH_LATER:         side.selected = 10; break;
-      case SIDEBAR_ACCOUNT:                 side.selected = 12; break;
-      case SIDEBAR_SETTINGS:                side.selected = 13; break;
-      case SIDEBAR_EXIT:                    side.selected = 14; break;
+      case SIDEBAR_PLAYLISTS:               side.selected = 5; break;
+      case SIDEBAR_TRENDING:                side.selected = 6; break;
+      case SIDEBAR_LIVE:                    side.selected = 7; break;
+      case SIDEBAR_PS3_SUBSCRIPTIONS:       side.selected = 9; break;
+      case SIDEBAR_PS3_HISTORY:             side.selected = 10; break;
+      case SIDEBAR_PS3_WATCH_LATER:         side.selected = 11; break;
+      case SIDEBAR_ACCOUNT:                 side.selected = 13; break;
+      case SIDEBAR_SETTINGS:                side.selected = 14; break;
+      case SIDEBAR_EXIT:                    side.selected = 15; break;
       default: break;
    }
    keepSelectionVisible();
@@ -377,7 +379,7 @@ static void drawMainRows(int panelX)
       int iconY = rowY + (SIDEBAR_ROW_HEIGHT - iconSize) / 2;
       int contentOffset = side.screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
       uint32_t iconColor = i == side.selected ? activeTheme->accent : activeTheme->textSecondary;
-      if (i == 14)
+      if (i == 15)
          drawExitDoorIcon(panelX + SIDEBAR_CONTENT_LEFT + contentOffset, iconY, iconColor);
       else
          drawSidebarRowIcon(&side.mainIcons[i], panelX + SIDEBAR_CONTENT_LEFT + contentOffset, iconY, iconColor);

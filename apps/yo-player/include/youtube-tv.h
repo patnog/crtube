@@ -16,7 +16,13 @@
 // the browse request body for an account feed's first page (continuation NULL) or a later page.
 // returns the length, or -1 if it did not fit cap.
 int buildTvBrowseBody(char *out, int cap, AccountFeed feed, const char *continuation);
+int buildTvLibraryBody(char *out, int cap, const char *continuation);
+int buildTvPlaylistBody(char *out, int cap, const char *playlistId, const char *continuation);
 
 // fill out->items from every playable video tile in resp (ads and non-video tiles are skipped, repeats
 // dropped) and out->continuation from the page-level "load more" token. out is cleared first.
 void parseTvTiles(const char *resp, int respLen, SearchResults *out);
+
+// Parse playlist cards from the signed-in TV library and video rows from a playlist browse response.
+void parseTvPlaylists(const char *resp, int respLen, SearchResults *out);
+void parseTvPlaylistVideos(const char *resp, int respLen, SearchResults *out);

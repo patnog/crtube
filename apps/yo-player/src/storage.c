@@ -28,7 +28,7 @@
 
 // watch history held in memory; the file is the durable copy. a plain ring: once full, the oldest slot is
 // overwritten (rare - 1000 videos), and the file is rewritten from the live set. each entry also carries the
-// last playback position for resume.
+// last playback position for resume; a completed video stores its full duration.
 typedef struct { char id[VIDEO_ID_LEN]; int position; } WatchEntry;
 static WatchEntry watched[HISTORY_CAP];
 static int        watchedCount;

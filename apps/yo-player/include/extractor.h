@@ -63,11 +63,14 @@ typedef struct {
    char videoId[16];
    char channelId[32];     // owning channel's UC id (for "open channel"); empty if not parsed
    char title[160];
-   char duration[12];      // "3:15" (empty if unknown / live)
+   char duration[24];      // "3:15" or playlist video-count badge
    char author[48];        // channel name
    char views[24];         // "6,100 views"
    char published[24];     // "1 hour ago"
    int  isLive;            // 1 = live now (no duration; shown as a red LIVE badge)
+   int  isPlaylist;        // 1 = account playlist tile; it is opened by playlistId, not videoId
+   char playlistId[64];    // YouTube playlist id, without the VL browse prefix
+   char thumbnailVideoId[16]; // first video resolved asynchronously for a playlist tile
 } SearchResult;
 
 #define MAX_CONTINUATION 4096   // youtube "load more" tokens are long base64 blobs
@@ -155,6 +158,9 @@ typedef struct Extractor {
    int (*getLive)(LiveCategory category, const char *continuation, SearchResults *out, int (*stopped)(void));
    // A channel's Streams tab, filtered to broadcasts that are live right now.
    int (*getChannelLive)(const char *channelId, SearchResults *out);
+   // Signed-in account playlists and the videos inside one playlist. Blocking; call on a worker thread.
+   int (*getAccountPlaylists)(const char *continuation, SearchResults *out);
+   int (*getAccountPlaylistVideos)(const char *playlistId, const char *continuation, SearchResults *out);
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.
@@ -178,6 +184,8 @@ int getChannelLiveVideos(const char *channelId, SearchResults *out);
 // a signed-in account feed (see AccountFeed). continuation as above. 0 ok; negative on error or when
 // signed out. blocking: call from a worker thread.
 int getAccountFeed(AccountFeed feed, const char *continuation, SearchResults *out);
+int getAccountPlaylists(const char *continuation, SearchResults *out);
+int getAccountPlaylistVideos(const char *playlistId, const char *continuation, SearchResults *out);
 
 // Resolve a video's owning channel ID on demand. Blocking network request.
 int getVideoChannelId(const char *videoId, char *channelId, int channelIdCap);

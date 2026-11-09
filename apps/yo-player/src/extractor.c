@@ -66,6 +66,24 @@ int getAccountFeed(AccountFeed feed, const char *continuation, SearchResults *ou
    return -1;
 }
 
+int getAccountPlaylists(const char *continuation, SearchResults *out)
+{
+   for (unsigned i = 0; i < sizeof registry / sizeof registry[0]; i++)
+      if (registry[i]->getAccountPlaylists)
+         return registry[i]->getAccountPlaylists(continuation, out);
+   if (out) memset(out, 0, sizeof *out);
+   return -1;
+}
+
+int getAccountPlaylistVideos(const char *playlistId, const char *continuation, SearchResults *out)
+{
+   for (unsigned i = 0; i < sizeof registry / sizeof registry[0]; i++)
+      if (registry[i]->getAccountPlaylistVideos)
+         return registry[i]->getAccountPlaylistVideos(playlistId, continuation, out);
+   if (out) memset(out, 0, sizeof *out);
+   return -1;
+}
+
 int getVideoChannelId(const char *videoId, char *channelId, int channelIdCap)
 {
    for (unsigned i = 0; i < sizeof registry / sizeof registry[0]; i++)
