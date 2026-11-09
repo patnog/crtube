@@ -13,15 +13,15 @@ This repository is a fork of [vortigauntlet/yo-player-signin](https://github.com
 ## Highlights
 
 - **Optional YouTube account sign-in:** Sign in using YouTube's device authorization flow. Approve the code on a phone or computer; no browser is required on the PS3.
-- **Account and PS3-local libraries:** Browse Recommended, account Subscriptions / History / Watch Later, and separate PS3-local Subscriptions / History / Watch Later lists. Playback itself remains on the anonymous player client.
+- **Account and PS3-local libraries:** Browse Recommended, account Subscriptions / History / Watch Later / Playlists, and separate PS3-local Subscriptions / History / Watch Later lists. Open account playlists and browse their videos; Watch Later remains a separate feed. Playback itself remains on the anonymous player client.
 - **Dynamic display layout:** The app follows the PS3's active video output. 16:9 keeps the standard widescreen UI; SD 4:3 activates a dedicated CRT layout, including a two-column video grid and adjusted navigation hints.
 - **Adjustable SD UI scale:** Configure the SD interface scale through **UI Scaling** in the home Settings panel.
 - **Improved YouTube playback handling:** VOD and live playback use separate InnerTube client paths. VOD uses the VISIONOS client; live streams use the Android VR client to obtain the DASH segment data required by the live player.
 - **VOD client fallback:** When the primary VISIONOS request explicitly reports an unplayable VOD, the extractor can retry supported alternate clients. Live streams are kept out of this fallback path.
 - **Members-only identification:** Restricted videos can be identified and marked in the video grid instead of being mistaken for ordinary playable videos.
 - **Streaming playback:** H.264 video and AAC audio are streamed during playback. The app includes the TEE H.264 decoder as an experimental option for supported 1080p50/60 streams, with Sony VDEC remaining the default.
-- **Navigation and feeds:** A sidebar provides Search, Recommended, account feeds, PS3-local lists, Trending, Live, Account, Settings and Exit. Trending has Gaming, Sports and Podcasts tabs; Live has Popular, Music, Gaming, Sports, Podcasts and News.
-- **Playback and settings:** Search, channel browsing, resume, subtitles, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, region selection and background downloads.
+- **Navigation and feeds:** A sidebar provides Search, Recommended, account feeds and Playlists, PS3-local lists, Trending, Live, Account, Settings and Exit. Playlists is a dedicated account-library page outside the L1/R1 category cycle. Trending has Gaming, Sports and Podcasts tabs; Live has Popular, Music, Gaming, Sports, Podcasts and News.
+- **Playback and settings:** Search, channel browsing, resume, customizable subtitle styling, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, region selection and background downloads.
 
 ## What this fork adds
 
@@ -36,6 +36,10 @@ The fork is based on `vortigauntlet/yo-player-signin`. In addition to the accoun
 | Restricted content | Members-only detection and a visible `*Members only` badge on affected grid items |
 | Diagnostics | Additional boot-stage and playback/extraction logging to make failures easier to diagnose on real hardware |
 | H.264 decoding | Optional TEE Decoder backend for supported 1080p50/60 H.264 streams, with automatic recovery to a lower rendition through Sony VDEC if TEE decoding fails |
+| Account playlists | Authenticated YouTube TV playlist discovery, playlist video browsing and continuation-based pagination; Watch Later remains a separate account feed |
+| Playlist thumbnails | Playlist cover images are resolved asynchronously from the first video. A single low-priority thumbnail request runs at a time; the queue is reprioritized for the current viewport and the playlist image cache is kept near the visible grid |
+| Video-grid progress | A red progress strip along a thumbnail's bottom edge shows the saved playback position for VODs with a resume point; watched items without a saved position retain the existing dimming treatment |
+| Subtitle styling | Independent subtitle text/background colors, background opacity, highlight effects and font size, with a live `Lorem Ipsum` preview in Playback Settings |
 | PSL1GHT build | An open-toolchain PSL1GHT target and build documentation alongside the Sony SDK project |
 
 The original account functionality remains optional. Without signing in, the app continues to provide its anonymous browsing and playback paths.
@@ -43,11 +47,13 @@ The original account functionality remains optional. Without signing in, the app
 ## User-facing features
 
 ### Navigation, account and feeds
-- Open the sidebar with **CIRCLE**, or press **LEFT** while the grid selection is in its first column.
-- The sidebar separates account Subscriptions / History / Watch Later from the PS3-local versions of those lists. It also links to Recommended, Trending, Live, Account, Settings and Exit.
+- Open the sidebar with **CIRCLE**, or press **LEFT** while the grid selection is in its first column. While the sidebar is open, **LEFT**, **RIGHT** or **CIRCLE** closes it.
+- The sidebar separates account Subscriptions / History / Watch Later / Playlists from the PS3-local versions of those lists. Playlists opens a dedicated account-library page and is not part of the L1/R1 category cycle. It also links to Recommended, Trending, Live, Account, Settings and Exit.
 - Open **Account** in the sidebar to sign in or sign out. Enter the device code at the verification URL on another device.
 - Access tokens are refreshed when needed. Signing out removes the locally saved token and attempts to revoke it.
-- Account authorization is used for account feeds; video playback remains separate from the signed-in account.
+- The Playlists page discovers the signed-in account's playlists, displays each playlist's name and video count, and opens its videos in the normal grid. Watch Later remains its own feed.
+- Playlist cover thumbnails are fetched asynchronously from each playlist's first video. Only one thumbnail request is active at a time; pending work is reprioritized as the visible grid changes, and off-screen playlist images are evicted from the bounded cache.
+- Account authorization is used for account feeds and playlists; video playback remains separate from the signed-in account.
 
 ### Browsing and playback
 - Browse Trending (Gaming, Sports, Podcasts) and Live (Popular, Music, Gaming, Sports, Podcasts, News), search YouTube, and open channel pages.
@@ -55,8 +61,10 @@ The original account functionality remains optional. Without signing in, the app
 - Paste or type a YouTube URL into search to open the video directly.
 - Stream H.264 video and AAC audio with hardware decoding.
 - Use pause, seek, volume, subtitles, chapter navigation, description overlay, and autoplay controls.
-- Resume videos from the last saved playback position.
+- Resume videos from the last saved playback position. VODs with a saved playback position show a red progress strip along the bottom of their thumbnail; watched items without a saved position use the watched-item dimming treatment.
 - Configure each SponsorBlock category as Skip, Ask or Keep.
+- Open **Playback Settings** from playback Options to configure subtitle appearance independently of the application theme. Text color, background color, background opacity, highlight (None / Shadow / Outline) and font size are adjustable and saved between sessions. A live `Lorem Ipsum` preview remains available even when subtitles are turned off; text wrapping keeps larger subtitle sizes within the screen width.
+- Opening playback Options also starts an asynchronous chapter lookup when description parsing did not find chapters. The chapter list itself opens only when selected.
 
 ### Personal library and downloads
 - Subscribe to channels and browse their latest uploads.
@@ -82,7 +90,7 @@ Open **Settings** from the sidebar or press **START** on the home screen. The me
 - **Enable 1080p60 (experimental)** — opt in to the TEE H.264 decoder path for supported 1080p50/60 streams. It is disabled by default; Sony VDEC remains the standard playback path.
 - **SponsorBlock** — configure each supported segment category independently as **Skip**, **Ask** or **Keep**.
 
-The Settings menu controls global preferences. Per-video options such as Quality, Audio, Subtitles, Chapters and Crop to Fill remain in the playback **Options** panel.
+The home Settings menu controls application-wide preferences. Playback **Options** contains per-video controls such as Quality, Audio, Subtitles, Chapters and Crop to Fill, plus **Playback Settings**. Open **Playback Settings → Subtitle Style** to customize subtitle text color, background color and opacity, highlight effect, and font size. Changes are previewed immediately with `Lorem Ipsum`, including when subtitles are disabled, and are saved independently of the application theme.
 
 ## Controls
 
@@ -99,8 +107,8 @@ in the app take precedence if a screen has a context-specific action.
 | **R3** (right-stick click) | Queue the selected VOD for background download; live streams cannot be downloaded |
 | **Triangle** | Open the selected video's channel; inside a channel listing, subscribe to or unsubscribe from that channel |
 | **SELECT** | Open YouTube search; entering a YouTube URL opens that video directly |
-| **START** | Open the home Settings panel; UI Scaling, Overscan, Region and other application preferences are configured there |
-| **CIRCLE** | Open the sidebar; in a nested screen, go back |
+| **START** | Open the home Settings panel; press **START** again or **CIRCLE** to close it. UI Scaling, Overscan, Region and other application preferences are configured there |
+| **CIRCLE** | Open the sidebar; in a nested screen, go back. While the sidebar is open, **LEFT**, **RIGHT** or **CIRCLE** closes it |
 | **LEFT** | From the first grid column, open the sidebar |
 | **L1 / R1** | Switch home categories |
 | **R2** | Refresh the current home category |
@@ -121,7 +129,7 @@ in the app take precedence if a screen has a context-specific action.
 | **Right Analog Stick** | While crop-to-fill is enabled, move the cropped picture horizontally and vertically to adjust which part of the image is visible |
 | **R3** (right-stick click) | Toggle playback statistics |
 | **SELECT** | Open the video description overlay; use **UP / DOWN** to scroll and **SELECT** or **CIRCLE** to close |
-| **START** | Open playback Options, including Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay |
+| **START** | Open playback Options, including Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay; press **START** again or **CIRCLE** to close the panel. Playback Settings contains Subtitle Style |
 | **CIRCLE** | Return to the video list |
 
 Live streams have no seek bar and cannot be downloaded. The description and chapter overlays temporarily take control of navigation while open. Audio tracks, quality and chapters are selected from playback Options; Square is reserved for SponsorBlock Ask actions. Background downloads are saved to the HDD locations listed above; they are not added to the XMB Video column in this release.
