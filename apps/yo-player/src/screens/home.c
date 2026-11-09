@@ -127,13 +127,14 @@ static Label       titleLabel, statusLabel;
 static ButtonHints hints, hintsSecondRow;
 static int         sdHintsTwoRows;
 
-// SD UI scaling is configured in Settings and persisted separately from
-// settings.txt so it can be updated without rewriting the other user settings.
+// UI Scaling is offered for any 480-line output (480i/480p), including both
+// 4:3 and anamorphic 16:9. The graphics layer disables it automatically on HD.
+// Keep this preference separate from settings.txt so it can be saved independently.
 #define SD_SCALE_PATH CRTUBE_DATA_DIR "/sd-ui-scale.txt"
 static const float SdScaleChoices[] = { 1.00f, 1.50f };
 #define SD_SCALE_COUNT ((int)(sizeof SdScaleChoices / sizeof SdScaleChoices[0]))
 static int sdScaleLoaded;
-static int sdScaleIndex = 1; // default 1.5x on first launch
+static int sdScaleIndex = 1; // default 1.5x on first launch; choices apply to SD output only
 
 static void loadSdScale(void)
 {
@@ -156,6 +157,8 @@ static void loadSdScale(void)
 
 static void cycleSdScale(void)
 {
+   // The Settings row is still visible on HD, but its value is Unavailable there.
+   // This guard also prevents changing the stored SD preference from an HD mode.
    if (!isGfxSdVideoOutput()) return;
    // Keep this index synchronized when the channel screen changes the shared scale.
    float current = getGfxUiScaleFactor();

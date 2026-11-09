@@ -33,11 +33,13 @@ typedef struct {
 
 int  initGfx(GfxVsync vsync);
 void termGfx(void);
-// SD-only interface scale. Text is re-rasterised at the selected font size;
-// normal UI textures grow from their existing top-left anchor. Video thumbnails/frames stay fixed.
+// 480-line-output UI scale (480i/480p, either 4:3 or anamorphic 16:9). HD output
+// always reports an effective factor of 1.0. Display-target UI geometry is transformed;
+// labels must opt into font re-rasterisation, while video frames and offscreen targets
+// remain unaffected. See apps/yo-player/UI-SCALING.md for application-level rules.
 int   isGfxSdVideoOutput(void);
 float getGfxSdUiScale(void);
-float getGfxUiScaleFactor(void); // selected factor on SD output, otherwise 1.0
+float getGfxUiScaleFactor(void); // selected factor on 480-line output, otherwise 1.0
 void  setGfxSdUiScale(float scale);
 // Uniform output zoom applied by the display viewport after all drawing and video crop calculations.
 // Range: -10..+10 percent; zero leaves the original output unchanged. Offscreen targets are unaffected.

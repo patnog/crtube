@@ -31,7 +31,10 @@ void initLabelRaw(Label *l, Font *font, int x, int y, int width, int height, int
    initLabelCommon(l, font, x, y, width, height, size, color, wrap, 1, text);
 }
 
-// re-rasterises the current text/colour into the texture (raw = no {i}/{b}/{color=} markup parsing).
+// Re-rasterises the current text/colour into the texture (raw = no {i}/{b}/{color=} markup parsing).
+// Labels opt into UI scaling explicitly: their font raster size follows the selected
+// SD scale, while their logical layout width/height remain the values supplied by
+// the caller. Recheck wrapping and available space when adding scaled labels.
 static void renderLabel(Label *l)
 {
    float scale = l->fixedRenderScale > 0.0f ? l->fixedRenderScale : (l->scaleWithUi ? getGfxUiScaleFactor() : 1.0f);

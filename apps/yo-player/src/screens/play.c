@@ -3429,8 +3429,9 @@ static void drawAutoplayNotice(void)
 
 static void drawPlay(void)
 {
-   // The SD UI zoom is intended for library/navigation screens only. Keep all playback
-   // controls and overlays at their original 1.0x geometry so the seek bar stays on-screen.
+   // The selected SD UI zoom is intended for library/navigation screens only (including
+   // 480-line anamorphic 16:9). Keep playback controls and overlays at their original
+   // 1.0x geometry so the seek bar and other HUD elements retain their designed layout.
    float selectedUiScale = getGfxSdUiScale();
    setGfxSdUiScale(1.0f);
 

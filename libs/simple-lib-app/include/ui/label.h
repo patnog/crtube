@@ -17,10 +17,10 @@ typedef struct {
    uint32_t color;
    TextWrap wrap;
    int raw;   // skip {i}/{b}/{color=} style-tag parsing - see initLabelRaw
-   int scaleWithUi; // rerasterise using the selected UI scale
+   int scaleWithUi; // opt in to font re-rasterisation using the selected 480-line UI scale
    float fixedRenderScale; // optional fixed raster scale, independent of the selected UI zoom
    int scalePositionWithUi; // scale the anchor but keep the rasterised texture dimensions fixed
-   float renderedScale; // font-scale factor used to build tt; refreshed on draw after L2 changes
+   float renderedScale; // font-scale factor used to build tt; refreshed when the selected UI scale changes
    char text[LABEL_MAX_TEXT];
 } Label;
 

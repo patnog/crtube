@@ -72,10 +72,11 @@ static int       surfaceW = 0;
 static int       surfaceH = 0;
 static int       targetIsDisplay = 0;   // drawing to the screen buffer (vs an offscreen target)
 
-// One tuning knob for SD output (480i and 480p). Keep at 1.0 to disable.
-// This CPU-side transform affects display-target UI geometry only; video frames
-// and offscreen rasterisation stay at 1.0. Global overscan is separate and is
-// applied later by the display viewport to all output, including video frames.
+// One tuning knob for every 480-line output (480i and 480p), regardless of the
+// configured 4:3/16:9 aspect ratio. Keep at 1.0 to disable. This CPU-side transform
+// affects display-target UI geometry only; video frames and offscreen rasterisation
+// stay at 1.0. Global overscan is separate and is applied later by the display
+// viewport to all output, including video frames.
 static float     sdUiScale = 1.15f;
 static int       sdVideoOutput = 0;
 static int       gfxOverscanPercent = 0;
@@ -113,8 +114,10 @@ static float uiScale(void)
    return targetIsDisplay && sdVideoOutput ? sdUiScale : 1.0f;
 }
 
-// Public query for layout code that needs the selected SD scale even before
-// a display draw call has started. Actual drawing still uses uiScale().
+// Public query for layout/rasterisation code that needs the selected 480-line scale
+// even before a display draw call has started. This is based on output height, not
+// aspect ratio: anamorphic 16:9 SD is eligible too. Actual geometry drawing still
+// uses uiScale(), which additionally requires the display render target.
 float getGfxUiScaleFactor(void)
 {
    return sdVideoOutput ? sdUiScale : 1.0f;
@@ -418,8 +421,9 @@ int initGfx(GfxVsync vsync)
 
    screenW = res.width;
    screenH = res.height;
-   // PS3 480i and 480p both use a 720x480 framebuffer. Resolution height is
-   // more portable across PSL1GHT/Sony SDK enum naming than mode constants.
+   // PS3 480i and 480p both use a 720x480 framebuffer, for either 4:3 or
+   // anamorphic 16:9. Scale eligibility therefore follows the 480-line height,
+   // while virtualW below is selected independently from displayMode.aspect.
    sdVideoOutput = (res.height == 480);
 
    // Use the configured display aspect, not the framebuffer's pixel ratio:

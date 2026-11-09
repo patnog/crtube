@@ -71,16 +71,17 @@ additional attribution and bundled-runtime notices are in
 The app follows the PS3's active system video output configuration. It does not force
 the console into a fixed aspect ratio or permanently switch the interface to CRT mode.
 
-- **16:9 output:** The app uses its standard widescreen interface and video-grid layout.
-- **SD 4:3 output:** The app detects the SD display mode and applies additional CRT-oriented
-  UI adjustments. These include a 4:3-specific two-column video grid, revised navigation
-  hints, and an adjustable interface scale.
+- **SD output (480i/480p):** The UI Scaling option is available in the home **Settings** panel
+  for both 4:3 and anamorphic 16:9 output. The choices are **1.0x** and **1.5x**.
+- **HD output (720p/1080p):** UI scaling is unavailable and the effective scale remains **1.0x**.
+- **4:3 aspect ratio:** Selects the dedicated CRT-oriented layout, including a two-column
+  video grid and SD-specific navigation hints.
+- **16:9 aspect ratio:** Keeps the standard widescreen layout, including on 480-line SD output.
 
-The extra layout and scaling options are specific to SD 4:3 output. They do not replace
-or disable the normal 16:9 interface. Changing the PS3's video output configuration
-changes which display layout the app uses. On the home screen and in a channel listing,
-**L2** cycles the SD interface scale between **1.0x** and **1.5x**.
-
+Aspect ratio and output resolution are detected independently. A 720x480 framebuffer can
+represent either 4:3 or anamorphic 16:9; the 480-line mode enables UI scaling, while the
+configured aspect ratio selects the layout. The scale is changed in **Settings**, not with
+an L2 shortcut. See [UI-SCALING.md](UI-SCALING.md) for developer guidance and limitations.
 ## YouTube account sign-in
 
 Signing in is optional. From the home screen, press **SELECT** to open the account panel. The app displays a device code and verification URL; enter the code on a phone or computer and approve access there. No web browser is needed on the PS3.
@@ -127,7 +128,6 @@ The app boots into the home feed. The sidebar switches between account feeds, PS
 - **Select** — open YouTube search. Typing a YouTube link opens it directly.
 - **Start** — open the home Settings panel.
 - **L1 / R1** (home only) — switch the current home category.
-- **L2** — on SD 4:3 output, cycle the UI scale on the home screen or in a channel listing.
 - **R2** (home only) — refresh the current category.
 - **Circle** — open the sidebar; in nested screens, back out one level.
 - **Left** — from the first grid column, open the sidebar.
@@ -154,11 +154,20 @@ The app boots into the home feed. The sidebar switches between account feeds, PS
 
 Community **SponsorBlock** segments are marked on the seek bar in their category colours. Categories set to Ask can be skipped with Square. Live streams have no seek bar (there's nothing to scrub).
 
-## SD 4:3 interface scaling
+## SD interface scaling
 
-The selected SD interface scale is saved in `/dev_hdd0/tmp/yo-player/sd-ui-scale.txt`
-and restored on the next launch. The scaling control is available only with SD 4:3
-output; it does not zoom the standard 16:9 interface.
+The UI scale can be selected in the home **Settings → UI Scaling** menu. It offers **1.0x**
+and **1.5x** on 480i/480p output, including both 4:3 and anamorphic 16:9. It is unavailable
+on HD output (720p/1080p), where the effective scale remains 1.0x. The choice is saved and
+restored on the next launch:
+
+- PSL1GHT: `/dev_hdd0/tmp/crtube/sd-ui-scale.txt`
+- Sony SDK: `/dev_hdd0/tmp/crtube_sdk/sd-ui-scale.txt`
+
+The 4:3 aspect ratio selects the CRT-oriented layout; 16:9 retains the widescreen layout.
+The scale is intended for library/navigation UI. Playback controls and overlays remain at
+1.0x, and video frames are not enlarged by this setting. Developer details are in
+[UI-SCALING.md](UI-SCALING.md).
 
 ## Downloads
 
