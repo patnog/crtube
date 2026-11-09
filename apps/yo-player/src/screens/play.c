@@ -259,6 +259,7 @@ static struct {
    char             message[128];     // failure reason (worker writes, UI reads)
    VideoPlayer     *pendingPlayer;    // built by the worker, adopted by the UI thread
    volatile int     workerDone;
+   volatile int     cancelRequested; // cooperative cancellation for the initial playback worker
    int              pauseWhenReady; // preserve Cross presses made before the first frame/player adoption
    int              threadActive;
    sys_ppu_thread_t workerTid;
@@ -275,6 +276,7 @@ static struct {
    VideoPlayer     *player;
    int              screenW, screenH;
    int              firstFrameSeen;   // a real frame has been presented (loading status ends, save is safe)
+   int              diagFirstYuvDraw;
    int              historyRecorded;  // prevents duplicates after resolution switches
    int              showStats;        // debug overlay visibility; no controller binding
    char             title[256];        // resolved video title (worker sets, UI reads after adoption)
@@ -428,8 +430,22 @@ static const StreamFormat *pickAudioForTrack(const StreamInfo *info, const char 
    return best;
 }
 
+static int playbackCancelRequested(void)
+{
+   return __sync_fetch_and_add(&state.cancelRequested, 0) != 0;
+}
+
+static void requestPlaybackCancel(void)
+{
+   __sync_lock_test_and_set(&state.cancelRequested, 1);
+   __sync_synchronize();
+   // Interrupt active resolver/stream requests before joining the playback worker.
+   setHttpRequestsCancelled(1);
+}
+
 static void fail(const char *reason)
 {
+   if (playbackCancelRequested()) return;
    logError("[yt] play failed: %s\n", reason);
    strCopy(state.message, sizeof state.message, reason);
    __sync_synchronize();   // publish message before the UI thread sees STAGE_FAILED
@@ -442,10 +458,10 @@ static void fail(const char *reason)
 static int waitForInitialPlayerReady(VideoPlayer *player, unsigned timeoutMs)
 {
    uint64_t started = sys_time_get_system_time();
-   while (player && !isVideoPlayerReady(player) &&
+   while (player && !playbackCancelRequested() && !isVideoPlayerReady(player) &&
           sys_time_get_system_time() - started < (uint64_t)timeoutMs * 1000ull)
       sleepMs(50);
-   return player && isVideoPlayerReady(player);
+   return player && !playbackCancelRequested() && isVideoPlayerReady(player);
 }
 
 static int fallbackFormatUsable(const StreamFormat *f)
@@ -477,12 +493,23 @@ static VideoPlayer *openInitialWithFallback(const StreamInfo *info,
    const StreamFormat *audio = *selectedAudio;
    const char *audioUrl = (video->hasAudio || !audio) ? NULL : audio->url;
    VideoPlayer *player;
+   int primaryReady;
 
    logInfo("[yt-fallback] primary attempt itag=%d audio=%d urlLen=%d audioUrlLen=%d\n",
            video->itag, video->hasAudio ? video->itag : (audio ? audio->itag : 0),
            (int)strlen(video->url), audioUrl ? (int)strlen(audioUrl) : 0);
-   player = createVideoPlayerSplit(video->url, audioUrl, allocGfxVideoBuffer, freeGfxVideoBuffer);
-   if (player && (!allowFallback || waitForInitialPlayerReady(player, 10000))) {
+   if (playbackCancelRequested()) return NULL;
+   player = createVideoPlayerSplitCancelable(video->url, audioUrl, allocGfxVideoBuffer, freeGfxVideoBuffer, &state.cancelRequested);
+   if (playbackCancelRequested()) {
+      if (player) destroyVideoPlayer(player);
+      return NULL;
+   }
+   primaryReady = player && (!allowFallback || waitForInitialPlayerReady(player, 10000));
+   if (playbackCancelRequested()) {
+      if (player) destroyVideoPlayer(player);
+      return NULL;
+   }
+   if (primaryReady) {
       if (allowFallback) logInfo("[yt-fallback] primary ready itag=%d\n", video->itag);
       return player;
    }
@@ -492,7 +519,7 @@ static VideoPlayer *openInitialWithFallback(const StreamInfo *info,
    } else {
       logWarn("[yt-fallback] primary open failed itag=%d\n", video->itag);
    }
-   if (!allowFallback) return NULL;
+   if (playbackCancelRequested() || !allowFallback) return NULL;
 
    // Test the known muxed and AVC renditions first, then any other compatible MP4
    // video formats. Keep the list bounded so one bad video cannot stall playback forever.
@@ -515,22 +542,33 @@ static VideoPlayer *openInitialWithFallback(const StreamInfo *info,
    }
 
    for (int i = 0; i < count; i++) {
+      if (playbackCancelRequested()) return NULL;
       const StreamFormat *candidate = attempts[i];
       const char *candidateAudio = (candidate->hasAudio || !audio) ? NULL : audio->url;
       logInfo("[yt-fallback] attempt=%d/%d videoItag=%d %dx%d fps=%d muxed=%d audioItag=%d\n",
               i + 1, count, candidate->itag, candidate->width, candidate->height,
               candidate->fps, candidate->hasAudio,
               candidate->hasAudio ? candidate->itag : (audio ? audio->itag : 0));
-      player = createVideoPlayerSplit(candidate->url, candidateAudio,
-                                      allocGfxVideoBuffer, freeGfxVideoBuffer);
+      player = createVideoPlayerSplitCancelable(candidate->url, candidateAudio,
+                                                allocGfxVideoBuffer, freeGfxVideoBuffer,
+                                                &state.cancelRequested);
+      if (playbackCancelRequested()) {
+         if (player) destroyVideoPlayer(player);
+         return NULL;
+      }
       if (!player) {
          logWarn("[yt-fallback] open failed itag=%d\n", candidate->itag);
          continue;
       }
       if (!waitForInitialPlayerReady(player, 8000)) {
-         logWarn("[yt-fallback] pre-roll timeout itag=%d after 8000ms\n", candidate->itag);
          destroyVideoPlayer(player);
+         if (playbackCancelRequested()) return NULL;
+         logWarn("[yt-fallback] pre-roll timeout itag=%d after 8000ms\n", candidate->itag);
          continue;
+      }
+      if (playbackCancelRequested()) {
+         destroyVideoPlayer(player);
+         return NULL;
       }
       *selectedVideo = candidate;
       *selectedAudio = candidate->hasAudio ? NULL : audio;
@@ -853,10 +891,12 @@ static void worker(uint64_t arg)
    (void)arg;
    StreamInfo *info = calloc(1, sizeof *info);   // large format/URL table; keep it off the stack
    const Extractor *extractor = findExtractor(requestedInput);
+   if (playbackCancelRequested()) goto done;
    if (!info || !extractor) { fail("unrecognised link or id"); goto done; }
 
    // resolve (stage stays STAGE_LOADING, set by initPlay's memset, until we adopt or fail)
    int extractResult = extractor->extract(requestedInput, info);
+   if (playbackCancelRequested()) goto done;
    if (extractResult != 0 || info->formatCount == 0) {
       fail(extractResult == -2 ? "This video is available to channel members only." : "resolve failed");
       goto done;
@@ -1016,7 +1056,15 @@ static void worker(uint64_t arg)
    // if that rendition cannot become ready, automatically test muxed/AVC alternatives.
    // Live playback keeps the existing non-blocking startup path because segmented live
    // streams have different readiness and retry behaviour.
+   if (playbackCancelRequested()) goto done;
    state.pendingPlayer = openInitialWithFallback(info, &video, &audio, !info->isLive && !video->isLiveSegmented);
+   if (playbackCancelRequested()) {
+      if (state.pendingPlayer) {
+         destroyVideoPlayer(state.pendingPlayer);
+         state.pendingPlayer = NULL;
+      }
+      goto done;
+   }
    if (!state.pendingPlayer) { fail("primary and fallback streams failed"); goto done; }
 
    // The initial pre-roll fallback may have selected a different format. Keep the live quality
@@ -1764,7 +1812,8 @@ static void handlePlaybackInput(void)
    if (state.isLive) {
       if (isPadButtonPressed(PAD_BTN_CROSS)) {
          setVideoPaused(state.player, !isVideoPaused(state.player));
-         showControls();
+         if (isVideoPaused(state.player)) showFullPlaybackHud();
+         else showControls();
       }
    } else {
       static uint64_t crossHoldStartUs;
@@ -1782,12 +1831,17 @@ static void handlePlaybackInput(void)
          showControls();
       } else if (crossState == PAD_BUTTON_STATE_RELEASED) {
          if (!crossRestartTriggered) {
-            if (isVideoEnded(state.player)) seekVideoPlayer(state.player, 0.0f);
-            else setVideoPaused(state.player, !isVideoPaused(state.player));
+            if (isVideoEnded(state.player)) {
+               seekVideoPlayer(state.player, 0.0f);
+               showControls();
+            } else {
+               setVideoPaused(state.player, !isVideoPaused(state.player));
+               if (isVideoPaused(state.player)) showFullPlaybackHud();
+               else showControls();
+            }
          }
          crossHoldStartUs = 0;
          crossRestartTriggered = 0;
-         showControls();
       }
    }
 
@@ -2739,6 +2793,14 @@ static void updatePlay(void)
 {
    if (consumeDownloadCompletion()) showToastFor("Download Complete", 3000000ULL);
 
+   // During initial loading there is no adopted VideoPlayer yet. Treat Circle as an
+   // interrupt before any HUD/paused-state query can inspect state.player.
+   if (state.stage == STAGE_LOADING && isPadButtonPressed(PAD_BTN_CIRCLE)) {
+      requestPlaybackCancel();
+      popScreen();
+      return;
+   }
+
    // an overlay owns the pad for the whole frame it was (or just became) visible, so the button that
    // closed or opened it can't leak into playback input below (e.g. cross toggling pause on the way out)
    int overlayHadPad = state.descriptionVisible || state.chaptersVisible || optionsVisible;
@@ -3128,6 +3190,7 @@ static void drawStatsOverlay(void)
 static int controlsVisible(void)
 {
    if (state.controlsDismissed) return 0;
+   if (state.stage != STAGE_PLAYING || !state.player) return 0;
    uint64_t now = sys_time_get_system_time();
    if (isVideoPaused(state.player) || isVideoEnded(state.player) || state.seeking) return 1;
    if (state.hudShownUs != 0 && now - state.hudShownUs < HUD_VISIBLE_US) return 1;
@@ -3136,7 +3199,9 @@ static int controlsVisible(void)
 
 static int fullPlaybackHudVisible(void)
 {
-   return !state.controlsDismissed && state.hudShownUs != 0 &&
+   if (state.controlsDismissed) return 0;
+   if (isVideoPaused(state.player)) return 1;
+   return state.hudShownUs != 0 &&
           sys_time_get_system_time() - state.hudShownUs < HUD_VISIBLE_US;
 }
 
@@ -3458,7 +3523,14 @@ static void drawPlay(void)
          int dx, dy, dw, dh;
          if (cropToFillEnabled) getCropToFillRect(w, h, &dx, &dy, &dw, &dh);
          else                   getGfxLetterboxRect(w, h, &dx, &dy, &dw, &dh);
+         if (!state.diagFirstYuvDraw)
+            logInfo("[video-diag] first drawGfxYuvFrame begin source=%dx%d target=%dx%d\n",
+                    w, h, dw, dh);
          drawGfxYuvFrame(dx, dy, dw, dh, frame, w, h);
+         if (!state.diagFirstYuvDraw) {
+            state.diagFirstYuvDraw = 1;
+            logInfo("[video-diag] first drawGfxYuvFrame complete\n");
+         }
       }
       measureFps(frame);
       if (state.showStats && frame) { updateStatLabels(); drawStatsOverlay(); }
@@ -3507,7 +3579,7 @@ static void termPlay(void)
    cropPanLastUpdateUs = 0;
    // Wake worker threads blocked in TLS connect/read before joining them. Without this, leaving during
    // a slow YouTube resolve can make the screen manager wait through several 10-second socket timeouts.
-   setHttpRequestsCancelled(1);
+   requestPlaybackCancel();
    state.resolutionSwitchAborting = 1;
    if (state.threadActive) { joinThread(state.workerTid); state.threadActive = 0; }
    if (state.sbThreadActive) { joinThread(state.sbWorkerTid); state.sbThreadActive = 0; }   // usually already done

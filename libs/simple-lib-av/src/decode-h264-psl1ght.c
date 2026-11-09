@@ -43,6 +43,13 @@ struct H264Decoder {
    volatile int errored;
    int auRejectedCount;
    int picIncompleteCount;
+   int diagAuBeginLogged;
+   int diagAuLogged;
+   int diagGetPicItemLogged;
+   int diagGetPictureLogged;
+   int diagFirstAuDoneLogged;
+   int diagFirstPicoutLogged;
+   int diagFirstSeqDoneLogged;
 
    uint64_t picoutUs[PICOUT_TIME_RING];
    volatile int picoutWrite;
@@ -146,11 +153,15 @@ H264Decoder *createH264Decoder(int width, int height, int level, int maxRefFrame
                               &decoder->callbackOpd);
    closure.arg = (u32)(uintptr_t)decoder;
 
+   logInfo("[vdec-diag] vdecOpen begin size=%dx%d level=%d arena=%u KB\n",
+           width, height, level, (unsigned)(decoder->workMemorySize / 1024));
    result = vdecOpen(&type, &config, &closure, &decoder->handle);
    if (result != 0) {
       logError("[decode-h264] vdecOpen failed 0x%x\n", result);
       goto fail;
    }
+   logInfo("[vdec-diag] vdecOpen complete handle=0x%x\n", decoder->handle);
+   logInfo("[vdec-diag] vdecStartSequence begin\n");
    result = vdecStartSequence(decoder->handle);
    if (result != 0) {
       logError("[decode-h264] StartSequence failed 0x%x\n", result);
@@ -158,6 +169,7 @@ H264Decoder *createH264Decoder(int width, int height, int level, int maxRefFrame
       decoder->handle = 0;
       goto fail;
    }
+   logInfo("[vdec-diag] vdecStartSequence complete\n");
 
    logInfo("[decode-h264] PSL1GHT VDEC %dx%d level %d, refs=%d, arena=%u KB\n",
            width, height, level, maxRefFrames,
@@ -233,8 +245,22 @@ int decodeAuH264(H264Decoder *decoder, const uint8_t *data, int size, uint64_t p
    u32 mode = VDEC_DECODER_MODE_NORMAL;
    if (decoder->alternateSkipEnabled && (decoder->auFedCount & 1))
       mode = VDEC_DECODER_MODE_SKIP_NON_REF;
+   if (!decoder->diagAuBeginLogged) {
+      decoder->diagAuBeginLogged = 1;
+      logInfo("[vdec-diag] first vdecDecodeAu begin bytes=%d ptsUs=%llu mode=%u\n",
+              size, (unsigned long long)ptsUs, mode);
+   }
    s32 result = vdecDecodeAu(decoder->handle, mode, &au);
-   if (result == 0) { decoder->auFedCount++; return 0; }
+   if (result == 0) {
+      decoder->auFedCount++;
+      if (decoder->auFedCount <= 10)
+         logInfo("[vdec-diag] AU accepted #%d bytes=%d\n", decoder->auFedCount, size);
+      if (!decoder->diagAuLogged) {
+         decoder->diagAuLogged = 1;
+         logInfo("[vdec-diag] first vdecDecodeAu complete\n");
+      }
+      return 0;
+   }
    if (result == (s32)VDEC_ERROR_BUSY) return 1;
    logError("[decode-h264] DecodeAu failed 0x%x\n", result);
    return -1;
@@ -283,6 +309,10 @@ int resetH264Decoder(H264Decoder *decoder)
       sleepMs(1);
    }
    discardReportedPictures(decoder, &format);
+   if (decoder->seqDone && !decoder->diagFirstSeqDoneLogged) {
+      decoder->diagFirstSeqDoneLogged = 1;
+      logInfo("[vdec-diag] first SEQDONE callback observed\n");
+   }
    if (!decoder->seqDone) return -1;
 
    decoder->auFedCount = 0;
@@ -305,11 +335,26 @@ int getFrameH264(H264Decoder *decoder, void *yuvOut, int *outWidth,
    if (decoder->backend == H264_BACKEND_TEE)
       return getH264TeeBackendFrame(decoder->tee, yuvOut, outWidth, outHeight, outPts);
    if (decoder->errored) return -1;
+   if (!decoder->diagFirstAuDoneLogged && decoder->auDoneCount > 0) {
+      decoder->diagFirstAuDoneLogged = 1;
+      logInfo("[vdec-diag] first AUDONE callback observed done=%d\n", decoder->auDoneCount);
+   }
    if (decoder->picPending <= 0) return 0;
+   if (!decoder->diagFirstPicoutLogged) {
+      decoder->diagFirstPicoutLogged = 1;
+      logInfo("[vdec-diag] first PICOUT callback observed pending=%d\n", decoder->picPending);
+   }
 
    u32 pictureAddress = 0;
-   if (vdecGetPicItem(decoder->handle, &pictureAddress) != 0 || !pictureAddress)
-      return 0;
+   if (!decoder->diagGetPicItemLogged)
+      logInfo("[vdec-diag] first vdecGetPicItem begin pending=%d\n", decoder->picPending);
+   s32 itemResult = vdecGetPicItem(decoder->handle, &pictureAddress);
+   if (!decoder->diagGetPicItemLogged) {
+      decoder->diagGetPicItemLogged = 1;
+      logInfo("[vdec-diag] first vdecGetPicItem complete rc=0x%x address=0x%x\n",
+              itemResult, pictureAddress);
+   }
+   if (itemResult != 0 || !pictureAddress) return 0;
    const vdecPicture *picture = (const vdecPicture *)(uintptr_t)pictureAddress;
 
    lock(&decoder->lock);
@@ -339,7 +384,13 @@ int getFrameH264(H264Decoder *decoder, void *yuvOut, int *outWidth,
       (void)vdecGetPicture(decoder->handle, &format, NULL);
       return 0;
    }
+   if (!decoder->diagGetPictureLogged)
+      logInfo("[vdec-diag] first vdecGetPicture begin size=%dx%d\n", width, height);
    s32 result = vdecGetPicture(decoder->handle, &format, yuvOut);
+   if (!decoder->diagGetPictureLogged) {
+      decoder->diagGetPictureLogged = 1;
+      logInfo("[vdec-diag] first vdecGetPicture complete rc=0x%x\n", result);
+   }
    if (result != 0) {
       logError("[decode-h264] GetPicture failed 0x%x\n", result);
       return -1;
@@ -362,6 +413,13 @@ void destroyH264Decoder(H264Decoder *decoder)
       closeH264TeeBackend(decoder->tee);
       free(decoder);
       return;
+   }
+   if (decoder->backend != H264_BACKEND_TEE) {
+      logInfo("[vdec-diag] decoder summary fed=%d done=%d picout=%d incomplete=%d firstAuDone=%d firstPicout=%d firstGetPicItem=%d firstGetPicture=%d\n",
+              decoder->auFedCount, decoder->auDoneCount, decoder->picoutWrite,
+              decoder->picIncompleteCount, decoder->diagFirstAuDoneLogged,
+              decoder->diagFirstPicoutLogged, decoder->diagGetPicItemLogged,
+              decoder->diagGetPictureLogged);
    }
    if (decoder->handle) {
       (void)vdecEndSequence(decoder->handle);

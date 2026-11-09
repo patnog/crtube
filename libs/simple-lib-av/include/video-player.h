@@ -23,6 +23,8 @@ VideoPlayer *createVideoPlayer(const char *path, VideoFrameAllocFn allocFrame, V
 // url plus an audio-only url). audioPath NULL means the audio is muxed into videoPath. A/V stay in
 // sync because both share one presentation timeline and the audio drives the clock.
 VideoPlayer *createVideoPlayerSplit(const char *videoPath, const char *audioPath, VideoFrameAllocFn allocFrame, VideoFrameFreeFn freeFrame);
+// Like createVideoPlayerSplit, but checks cancelRequested between blocking/open/init stages.
+VideoPlayer *createVideoPlayerSplitCancelable(const char *videoPath, const char *audioPath, VideoFrameAllocFn allocFrame, VideoFrameFreeFn freeFrame, volatile int *cancelRequested);
 void         destroyVideoPlayer(VideoPlayer *player);
 
 // returns the YUV 4:2:0 planar frame (Y then U then V, width*height*3/2 bytes) that should be shown

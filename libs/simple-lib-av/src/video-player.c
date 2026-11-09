@@ -94,6 +94,10 @@ struct VideoPlayer {
    uint64_t currentPts;           // pts of the frame currently displayed
    int      displayIndex;         // slot being displayed, or -1
    uint64_t audioWaitStartUs;     // when pre-roll first started waiting on the audio clock (0 = not yet)
+
+   // One-shot diagnostics: mark the first decoded frame, ready slot and frame handed to the renderer.
+   int diagFirstFrameReady;
+   int diagFirstFrameReturned;
 };
 
 // Keep the decoder's input rate within its measured throughput: 1080p60 is over twice the
@@ -282,11 +286,16 @@ static void decodeThread(uint64_t arg)
 
       lock(&player->lock);
       if (got == 1) {
+         int logFirstReady = !player->diagFirstFrameReady;
+         if (logFirstReady) player->diagFirstFrameReady = 1;
          player->slots[slot].pts    = pts;
          player->slots[slot].width  = width;
          player->slots[slot].height = height;
          player->slots[slot].state  = SLOT_READY;
          unlock(&player->lock);
+         if (logFirstReady)
+            logInfo("[video-diag] first decoded frame ready ptsMs=%llu size=%dx%d slot=%d\n",
+                    (unsigned long long)(pts / 1000000ull), width, height, slot);
       } else {
          player->slots[slot].state = SLOT_EMPTY;
          if (got < 0 && isH264DecoderTee(player->decoder))
@@ -472,8 +481,21 @@ VideoPlayer *createVideoPlayer(const char *path, VideoFrameAllocFn allocFrame, V
    return createVideoPlayerSplit(path, 0, allocFrame, freeFrame);
 }
 
+static int videoPlayerCancelRequested(volatile int *cancelRequested)
+{
+   return cancelRequested && __sync_fetch_and_add(cancelRequested, 0) != 0;
+}
+
 VideoPlayer *createVideoPlayerSplit(const char *videoPath, const char *audioPath, VideoFrameAllocFn allocFrame, VideoFrameFreeFn freeFrame)
 {
+   return createVideoPlayerSplitCancelable(videoPath, audioPath, allocFrame, freeFrame, NULL);
+}
+
+VideoPlayer *createVideoPlayerSplitCancelable(const char *videoPath, const char *audioPath,
+                                               VideoFrameAllocFn allocFrame, VideoFrameFreeFn freeFrame,
+                                               volatile int *cancelRequested)
+{
+   if (videoPlayerCancelRequested(cancelRequested)) return 0;
    VideoPlayer *player = (VideoPlayer *)calloc(1, sizeof *player);
    if (!player) return 0;
    player->displayIndex = -1;
@@ -483,6 +505,11 @@ VideoPlayer *createVideoPlayerSplit(const char *videoPath, const char *audioPath
    player->freeFrame = freeFrame ? freeFrame : freeFrameToHeap;
    if (!allocFrame) allocFrame = allocFrameFromHeap;
    createLock(&player->lock);
+   if (videoPlayerCancelRequested(cancelRequested)) {
+      destroyLock(&player->lock);
+      free(player);
+      return 0;
+   }
 
    // adaptive streams carry audio in a separate url; open it in parallel with the video open below.
    // failure just means silent playback, so it never fails the whole player.
@@ -499,6 +526,7 @@ VideoPlayer *createVideoPlayerSplit(const char *videoPath, const char *audioPath
    // (and its outcome adopted) before a failed video open can tear the player down
    if (audioOpening) { joinThread(audioOpenTid); player->hasAudioDemuxer = audioJob.ok; }
    else if (audioPath && audioPath[0]) player->hasAudioDemuxer = openAudioDemuxer(&player->audioDemuxer, audioPath) == 0;
+   if (videoPlayerCancelRequested(cancelRequested)) goto fail;
    player->audioExpected = player->hasAudioDemuxer;
    if (audioPath && audioPath[0] && !player->hasAudioDemuxer)
       logWarn("[video-player] separate audio stream failed to open, playing silent\n");
@@ -521,24 +549,28 @@ VideoPlayer *createVideoPlayerSplit(const char *videoPath, const char *audioPath
       player->allocW = roundUp16(player->demuxer.width);
       player->allocH = roundUp16(player->demuxer.height);
    }
+   if (videoPlayerCancelRequested(cancelRequested)) goto fail;
    player->decoder = createH264DecoderForStream(player->allocW, player->allocH, player->demuxer.level, player->demuxer.h264.maxRefFrames, getStreamFps(player));
-   if (!player->decoder) goto fail;
+   if (!player->decoder || videoPlayerCancelRequested(cancelRequested)) goto fail;
    configureDecoderForStream(player);
    logDecoderForStream(player);
 
    // YUV 4:2:0 planar frames; cellVdecGetPicture requires 128-byte alignment, size a multiple of 128
    size_t frameBytes = ((size_t)player->allocW * player->allocH * 3 / 2 + 127) & ~(size_t)127;
    for (int i = 0; i < FRAME_SLOTS; i++) {
+      if (videoPlayerCancelRequested(cancelRequested)) goto fail;
       player->slots[i].yuv = (uint8_t *)allocFrame(frameBytes);
-      if (!player->slots[i].yuv) goto fail;
+      if (!player->slots[i].yuv || videoPlayerCancelRequested(cancelRequested)) goto fail;
    }
 
+   if (videoPlayerCancelRequested(cancelRequested)) goto fail;
    player->running = 1;
    player->threadActive = (spawnJoinableThread(&player->thread, decodeThread, (uint64_t)(uintptr_t)player,
                            THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "video-player") == 0);
-   if (!player->threadActive) goto fail;
+   if (!player->threadActive || videoPlayerCancelRequested(cancelRequested)) goto fail;
 
    startAudioPipeline(player);
+   if (videoPlayerCancelRequested(cancelRequested)) goto fail;
    // hold audio silent until the video pre-roll releases: otherwise audio drains during the ~0.7s wait
    // and its clock runs ahead, so video skips to catch up at the start (the "fast start"). getVideoFrame
    // resumes the feed at the first present, so audio and video begin together. Audio buffered meanwhile
@@ -558,6 +590,8 @@ void destroyVideoPlayer(VideoPlayer *player)
    cancelVideoDemuxer(&player->demuxer);                                  // unblock a live read waiting on the edge
    if (player->hasAudioDemuxer) cancelVideoDemuxer(&player->audioDemuxer);
    if (player->threadActive) joinThread(player->thread);
+   logInfo("[video-diag] player summary firstFrameReady=%d firstFrameReturned=%d\n",
+           player->diagFirstFrameReady, player->diagFirstFrameReturned);
    releaseAudioPipeline(player);
    destroyH264Decoder(player->decoder);
    closeVideoDemuxer(&player->demuxer);
@@ -659,8 +693,21 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
 
    int idx = player->displayIndex;
    const uint8_t *buffer = 0;
-   if (idx >= 0) { buffer = player->slots[idx].yuv; *width = player->slots[idx].width; *height = player->slots[idx].height; }
+   int logFirstReturned = 0;
+   if (idx >= 0) {
+      buffer = player->slots[idx].yuv;
+      *width = player->slots[idx].width;
+      *height = player->slots[idx].height;
+      if (buffer && !player->diagFirstFrameReturned) {
+         player->diagFirstFrameReturned = 1;
+         logFirstReturned = 1;
+      }
+   }
    unlock(&player->lock);
+
+   if (logFirstReturned)
+      logInfo("[video-diag] first frame handed to renderer ptsMs=%llu size=%dx%d slot=%d\n",
+              (unsigned long long)(player->currentPts / 1000000ull), *width, *height, idx);
 
    // release the audio held through pre-roll (mixer call must run outside player->lock)
    if (releaseAudio && player->audioFeedOpen) pauseAudioPcmFeedSlot(player->audioFeedSlot, releaseAudioPaused);
@@ -782,7 +829,7 @@ void setVideoPaused(VideoPlayer *player, int paused)
    if (player->audioFeedOpen) pauseAudioPcmFeedSlot(player->audioFeedSlot, paused);
 }
 
-int isVideoPaused(const VideoPlayer *player) { return player->paused; }
+int isVideoPaused(const VideoPlayer *player) { return player ? player->paused : 0; }
 
 // post a seek target for the decode thread. landAfter=1 rounds up to the next keyframe at/after `seconds`
 // (used to skip fully past a sponsor segment); landAfter=0 lands on the keyframe covering it (normal scrub).
@@ -805,7 +852,7 @@ void seekVideoPlayerPast(VideoPlayer *player, float seconds) { postSeek(player, 
 
 int isVideoEnded(const VideoPlayer *player)
 {
-   if (!player->ended) return 0;
+   if (!player || !player->ended) return 0;
    for (int i = 0; i < FRAME_SLOTS; i++)
       if (player->slots[i].state == SLOT_READY || player->slots[i].state == SLOT_FILLING) return 0;
    return 1;
