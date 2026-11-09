@@ -1,4 +1,4 @@
-# CRTube — youtube player for PS3 with focused on CRT
+# CRTube — YT player for PS3 with focus on CRT TVs
 
 <p align="center">
   <img src="apps/yo-player/ICON0.PNG" alt="CRtube" width="180">
