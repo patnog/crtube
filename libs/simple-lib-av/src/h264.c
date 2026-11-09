@@ -2,6 +2,7 @@
 #include "h264.h"
 #include "dbg.h"
 #include <string.h>
+#include <stdio.h>
 
 static const uint8_t START_CODE[4] = { 0, 0, 0, 1 };
 
@@ -228,7 +229,10 @@ int parseAvcc(const uint8_t *avcc, int size, H264Config *config)
       if (pos + len > size || appendHeaderNal(config, avcc + pos, len) != 0) return -1;
       uint8_t *headerSps = config->header + config->headerSize - len;
       int capped = patchSpsToDpbCap(headerSps, len);
-      if (capped > 0) logWarn("[h264] SPS wants %d ref frames, over the PS3 DPB cap - patched down to %d\n", parseSpsMaxRefFrames(avcc + pos, len), capped);
+      if (capped > 0) {
+         config->spsPatched = 1;
+         logWarn("[h264] SPS wants %d ref frames, over the PS3 DPB cap - patched down to %d\n", parseSpsMaxRefFrames(avcc + pos, len), capped);
+      }
       else if (capped < 0) {   // the probe rejects such files with a user-facing reason
          config->refFramesExceedDpb = 1;
          logWarn("[h264] SPS ref frames exceed the PS3 DPB cap and can't be patched in place\n");
@@ -251,7 +255,8 @@ int parseAvcc(const uint8_t *avcc, int size, H264Config *config)
    return config->valid ? 0 : -1;
 }
 
-int avccToAnnexB(const uint8_t *in, int inSize, int nalLengthSize, uint8_t *out, int outCap, int *isIdr)
+int avccToAnnexB(const uint8_t *in, int inSize, int nalLengthSize, uint8_t *out, int outCap,
+                 int *isIdr, int *spsPatched)
 {
    int inPos = 0, outPos = 0;
    *isIdr = 0;
@@ -266,9 +271,230 @@ int avccToAnnexB(const uint8_t *in, int inSize, int nalLengthSize, uint8_t *out,
       outPos += 4;
       if ((in[inPos] & 0x1F) == 5) *isIdr = 1;   // NAL type 5 = IDR slice
       memcpy(out + outPos, in + inPos, nalLen);
-      if ((in[inPos] & 0x1F) == 7) patchSpsToDpbCap(out + outPos, nalLen);   // cap in-band SPS ref frames too
+      if ((in[inPos] & 0x1F) == 7) {
+         int capped = patchSpsToDpbCap(out + outPos, nalLen);   // cap in-band SPS ref frames too
+         if (capped > 0 && spsPatched) *spsPatched = 1;
+      }
       outPos += nalLen;
       inPos  += nalLen;
    }
    return outPos;
+}
+
+
+// TEE Decoder compatibility checks. Keep this parser separate from the Sony SPS rewriter above:
+// the latter intentionally supports streams that the TEE decoder cannot decode.
+typedef struct { uint8_t data[256]; int size; int bit; int bad; } TeeRbsp;
+
+static void teeLoadRbsp(TeeRbsp *r, const uint8_t *nal, int size)
+{
+   r->size = 0; r->bit = 0; r->bad = 0;
+   int zeros = 0;
+   for (int i = 0; i < size; i++) {
+      if (zeros >= 2 && nal[i] == 3) { zeros = 0; continue; }
+      zeros = nal[i] == 0 ? zeros + 1 : 0;
+      if (r->size >= (int)sizeof r->data) { r->bad = 1; return; }
+      r->data[r->size++] = nal[i];
+   }
+}
+
+static uint32_t teeReadBit(TeeRbsp *r)
+{
+   if (r->bit >= r->size * 8) { r->bad = 1; return 0; }
+   uint32_t value = (r->data[r->bit >> 3] >> (7 - (r->bit & 7))) & 1;
+   r->bit++;
+   return value;
+}
+
+static uint32_t teeReadBits(TeeRbsp *r, int count)
+{
+   uint32_t value = 0;
+   while (count-- > 0) value = (value << 1) | teeReadBit(r);
+   return value;
+}
+
+static uint32_t teeReadUe(TeeRbsp *r)
+{
+   int zeros = 0;
+   while (!r->bad && teeReadBit(r) == 0) {
+      if (++zeros > 31) { r->bad = 1; return 0; }
+   }
+   if (r->bad) return 0;
+   return ((1u << zeros) - 1u) + teeReadBits(r, zeros);
+}
+
+static int32_t teeReadSe(TeeRbsp *r)
+{
+   uint32_t code = teeReadUe(r);
+   return (code & 1) ? (int32_t)((code + 1) / 2) : -(int32_t)(code / 2);
+}
+
+static int teeMoreRbspData(const TeeRbsp *r)
+{
+   int last = r->size - 1;
+   while (last >= 0 && r->data[last] == 0) last--;
+   if (last < 0) return 0;
+   int low = 0;
+   while (low < 8 && !((r->data[last] >> low) & 1)) low++;
+   if (low == 8) return 0;
+   return r->bit < last * 8 + (7 - low);
+}
+
+static int teeCheckSps(TeeRbsp *r, int codedWidth, int codedHeight, char *reason, int reasonSize)
+{
+   int profile = (int)teeReadBits(r, 8);
+   teeReadBits(r, 16);                    // constraint flags and level_idc
+   teeReadUe(r);                          // seq_parameter_set_id
+   if (profile != 77 && profile != 100) {
+      snprintf(reason, (size_t)reasonSize, "profile %d (TEE supports Main and High)", profile);
+      return 0;
+   }
+   if (profile == 100) {
+      uint32_t chroma = teeReadUe(r);
+      if (chroma != 1) {
+         snprintf(reason, (size_t)reasonSize, "chroma format %u (TEE supports 4:2:0)", (unsigned)chroma);
+         return 0;
+      }
+      uint32_t lumaDepth = teeReadUe(r), chromaDepth = teeReadUe(r);
+      if (lumaDepth || chromaDepth) {
+         snprintf(reason, (size_t)reasonSize, "%u-bit video (TEE supports 8-bit)", (unsigned)(8 + lumaDepth));
+         return 0;
+      }
+      teeReadBit(r);                     // qpprime_y_zero_transform_bypass_flag
+      if (teeReadBit(r)) {
+         snprintf(reason, (size_t)reasonSize, "scaling matrices in SPS");
+         return 0;
+      }
+   }
+   teeReadUe(r);                         // log2_max_frame_num_minus4
+   uint32_t pocType = teeReadUe(r);
+   if (pocType == 0) teeReadUe(r);
+   else if (pocType != 2) {
+      snprintf(reason, (size_t)reasonSize, "picture order count type %u", (unsigned)pocType);
+      return 0;
+   }
+   teeReadUe(r);                         // max_num_ref_frames
+   if (teeReadBit(r)) {
+      snprintf(reason, (size_t)reasonSize, "frame_num gaps are enabled");
+      return 0;
+   }
+   uint32_t widthMbs = teeReadUe(r) + 1;
+   uint32_t heightUnits = teeReadUe(r) + 1;
+   if (!teeReadBit(r)) {
+      snprintf(reason, (size_t)reasonSize, "interlaced stream");
+      return 0;
+   }
+   if (widthMbs > 120 || heightUnits > 68 ||
+       widthMbs * 16u != (uint32_t)codedWidth || heightUnits * 16u != (uint32_t)codedHeight) {
+      snprintf(reason, (size_t)reasonSize, "SPS coded dimensions do not match %dx%d", codedWidth, codedHeight);
+      return 0;
+   }
+   if (r->bad) {
+      snprintf(reason, (size_t)reasonSize, "malformed or unsupported SPS");
+      return 0;
+   }
+   return 1;
+}
+
+static int teeCheckPps(TeeRbsp *r, char *reason, int reasonSize)
+{
+   teeReadUe(r); teeReadUe(r);            // pic_parameter_set_id, seq_parameter_set_id
+   if (!teeReadBit(r)) {
+      snprintf(reason, (size_t)reasonSize, "CAVLC entropy coding (TEE requires CABAC)");
+      return 0;
+   }
+   teeReadBit(r);                         // bottom_field_pic_order_in_frame_present_flag
+   if (teeReadUe(r) != 0) {
+      snprintf(reason, (size_t)reasonSize, "PPS slice groups");
+      return 0;
+   }
+   teeReadUe(r); teeReadUe(r);            // num_ref_idx_l0/l1_default_active_minus1
+   teeReadBit(r); teeReadBits(r, 2);      // weighted prediction
+   teeReadSe(r); teeReadSe(r); teeReadSe(r);
+   teeReadBit(r);                         // deblocking_filter_control_present_flag
+   if (teeReadBit(r)) {
+      snprintf(reason, (size_t)reasonSize, "constrained intra prediction");
+      return 0;
+   }
+   if (teeReadBit(r)) {
+      snprintf(reason, (size_t)reasonSize, "redundant pictures");
+      return 0;
+   }
+   if (teeMoreRbspData(r)) {
+      teeReadBit(r);                      // transform_8x8_mode_flag
+      if (teeReadBit(r)) {
+         snprintf(reason, (size_t)reasonSize, "scaling matrices in PPS");
+         return 0;
+      }
+   }
+   if (r->bad) {
+      snprintf(reason, (size_t)reasonSize, "malformed or unsupported PPS");
+      return 0;
+   }
+   return 1;
+}
+
+static int teeFindStartCode(const uint8_t *data, int size, int from, int *prefixSize)
+{
+   for (int i = from; i + 3 <= size; i++) {
+      if (data[i] || data[i + 1]) continue;
+      if (data[i + 2] == 1) { *prefixSize = 3; return i; }
+      if (i + 4 <= size && data[i + 2] == 0 && data[i + 3] == 1) {
+         *prefixSize = 4; return i;
+      }
+   }
+   return -1;
+}
+
+int isH264TeeCompatible(const H264Config *config, int codedWidth, int codedHeight,
+                        char *reason, int reasonSize)
+{
+   int spsCount = 0, ppsCount = 0, prefix = 0;
+   if (reason && reasonSize > 0) reason[0] = 0;
+   if (!config || !config->valid || config->headerSize <= 0) {
+      if (reason && reasonSize > 0) snprintf(reason, (size_t)reasonSize, "missing SPS/PPS header");
+      return 0;
+   }
+   if (config->spsPatched) {
+      if (reason && reasonSize > 0) snprintf(reason, (size_t)reasonSize, "SPS reference count was rewritten for Sony VDEC");
+      return 0;
+   }
+   if (codedWidth < 128 || codedWidth > 1920 || codedWidth % 128 || codedHeight < 32 || codedHeight > 1088) {
+      if (reason && reasonSize > 0) snprintf(reason, (size_t)reasonSize, "coded size %dx%d is outside TEE limits", codedWidth, codedHeight);
+      return 0;
+   }
+
+   int startCode = teeFindStartCode(config->header, config->headerSize, 0, &prefix);
+   while (startCode >= 0) {
+      int nalStart = startCode + prefix;
+      int nextPrefix = 0;
+      int next = teeFindStartCode(config->header, config->headerSize, nalStart, &nextPrefix);
+      int nalEnd = next >= 0 ? next : config->headerSize;
+      if (nalEnd > nalStart) {
+         int type = config->header[nalStart] & 0x1f;
+         if (type == 7 || type == 8) {
+            TeeRbsp rbsp;
+            teeLoadRbsp(&rbsp, config->header + nalStart + 1, nalEnd - nalStart - 1);
+            if (rbsp.bad) {
+               if (reason && reasonSize > 0) snprintf(reason, (size_t)reasonSize, "parameter set exceeds %d bytes", (int)sizeof rbsp.data);
+               return 0;
+            }
+            if (type == 7) {
+               spsCount++;
+               if (!teeCheckSps(&rbsp, codedWidth, codedHeight, reason, reasonSize)) return 0;
+            } else {
+               ppsCount++;
+               if (!teeCheckPps(&rbsp, reason, reasonSize)) return 0;
+            }
+         }
+      }
+      if (next < 0) break;
+      startCode = next;
+      prefix = nextPrefix;
+   }
+   if (!spsCount || !ppsCount) {
+      if (reason && reasonSize > 0) snprintf(reason, (size_t)reasonSize, "missing SPS or PPS");
+      return 0;
+   }
+   return 1;
 }

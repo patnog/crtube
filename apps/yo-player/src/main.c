@@ -26,6 +26,7 @@
 #include "storage.h"
 #include "account.h"
 #include "settings.h"
+#include "video-player.h"
 #include "downloads.h"
 #include "video-export.h"
 #include "ui/console-glyphs.h"
@@ -103,6 +104,15 @@ static void bootMark(const char *text, uint64_t length)
 #define BOOT_MARK(text) ((void)0)
 #endif
 
+static void applyPendingTeeDisableRequest(void)
+{
+   if (!consumeVideoPlayerTeeDisableRequest() || !getEnable1080p60()) return;
+   if (setEnable1080p60(0) == 0)
+      logWarn("[settings] Enable 1080p (experimental) switched OFF after TEE failure or unsafe close\n");
+   else
+      logError("[settings] TEE failure; experimental 1080p disabled in memory but could not be saved\n");
+}
+
 int main(int argc, char **argv)
 {
    (void)argc;
@@ -174,6 +184,7 @@ int main(int argc, char **argv)
 
    while (!appExitRequested) {
       appPoll();
+      applyPendingTeeDisableRequest();
       updateVideoExport();   // right after the sysutil pump, which is what delivers its results
       updatePad();
       updateScreen();
@@ -185,6 +196,7 @@ int main(int argc, char **argv)
    }
 
    changeScreen(NULL);
+   applyPendingTeeDisableRequest();
    shutdownAccount();     // stop a sign-in poll before the http layer goes away
    shutdownDownloads();   // cancel + join any in-flight download before the http/vfs layers go away
    shutdownVideoExport();

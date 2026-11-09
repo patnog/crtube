@@ -181,13 +181,33 @@ fail:
    return NULL;
 }
 
+H264Decoder *createH264SonyDecoder(int width, int height, int level, int maxRefFrames)
+{
+   if (!isH264TeeBackendIdle()) {
+      logWarn("[decode-h264] Sony VDEC start deferred: TEE still owns or may own SPU resources\n");
+      return NULL;
+   }
+   return createH264Decoder(width, height, level, maxRefFrames);
+}
+
 H264Decoder *createH264DecoderForStream(int width, int height, int level,
-                                        int maxRefFrames, int fps)
+                                        int maxRefFrames, int fps, const H264Config *config)
 {
    // TEE Decoder is reserved for progressive 1080p-class H.264 at 50/60 fps.
-   // Lower resolutions and lower frame rates retain the existing Sony path.
+   // Every SPS/PPS must pass the TEE parser; the Sony SPS-rewrite path remains untouched.
    if (fps >= 50 && width >= 1920 && height >= 1000 &&
        width <= 1920 && height <= 1088) {
+      char reason[200];
+      if (!isH264TeeCompatible(config, width, height, reason, sizeof(reason))) {
+         logInfo("[decode-h264] TEE not selected for %dx%d@%d: %s; using Sony VDEC\n",
+                 width, height, fps, reason[0] ? reason : "unsupported stream parameters");
+         return createH264SonyDecoder(width, height, level, maxRefFrames);
+      }
+      if (!isH264TeeBackendIdle()) {
+         logWarn("[decode-h264] TEE resources are still active or quarantined; refusing to start another decoder\n");
+         return NULL;
+      }
+
       H264Decoder *decoder = (H264Decoder *)calloc(1, sizeof *decoder);
       char error[200];
       if (!decoder) return NULL;
@@ -196,16 +216,18 @@ H264Decoder *createH264DecoderForStream(int width, int height, int level,
       decoder->height = height;
       decoder->tee = openH264TeeBackend(width, height, error, sizeof(error));
       if (!decoder->tee) {
-         logWarn("[decode-h264] TEE backend unavailable for %dx%d@%d: %s\n",
+         logWarn("[decode-h264] TEE backend unavailable for %dx%d@%d: %s; using Sony VDEC\n",
                  width, height, fps, error[0] ? error : "initialization failed");
          free(decoder);
-         return NULL;
+         if (!isH264TeeBackendIdle()) return NULL;
+         requestH264TeeDisableSetting("TEE initialization failed");
+         return createH264SonyDecoder(width, height, level, maxRefFrames);
       }
       logInfo("[decode-h264] selected TEE backend for %dx%d@%d\n", width, height, fps);
       return decoder;
    }
 
-   return createH264Decoder(width, height, level, maxRefFrames);
+   return createH264SonyDecoder(width, height, level, maxRefFrames);
 }
 
 int isH264DecoderTee(const H264Decoder *decoder)
@@ -272,6 +294,12 @@ int getAuBacklogH264(const H264Decoder *decoder)
    if (decoder->backend == H264_BACKEND_TEE)
       return getH264TeeBackendBacklog(decoder->tee);
    return decoder->auFedCount - decoder->auDoneCount;
+}
+
+int getH264DecoderPicturesDecoded(const H264Decoder *decoder)
+{
+   if (!decoder || decoder->backend != H264_BACKEND_TEE) return 0;
+   return getH264TeeBackendPicturesDecoded(decoder->tee);
 }
 
 static void discardReportedPictures(H264Decoder *decoder,

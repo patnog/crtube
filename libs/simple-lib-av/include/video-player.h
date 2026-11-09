@@ -10,6 +10,10 @@
 
 typedef struct VideoPlayer VideoPlayer;
 
+// Returns and clears a pending TEE safety/fallback notification. The app should
+// consume it on its main thread and persistently turn off experimental 1080p.
+int consumeVideoPlayerTeeDisableRequest(void);
+
 // frame-buffer allocator hooks. The UI supplies these so frames land in RSX-visible memory and are
 // drawn zero-copy (gfx's allocGfxVideoBuffer/freeGfxVideoBuffer); pass NULL for plain heap buffers.
 typedef void *(*VideoFrameAllocFn)(size_t size);
@@ -36,6 +40,8 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height);
 int   isVideoPlayerReady(const VideoPlayer *player);
 // True only when a TEE-backed decoder encountered a fatal decode error.
 int   isVideoPlayerTeeFailed(const VideoPlayer *player);
+// True when a decoder could not be stopped safely and its resources were quarantined.
+int   isVideoPlayerDecoderStopUnsafe(const VideoPlayer *player);
 int   isVideoPlayerUsingSeparateAudio(const VideoPlayer *player);
 int   isVideoPlayerSeparateAudioAlive(const VideoPlayer *player);
 void  setVideoPlayerAudioVolume(VideoPlayer *player, float volume);

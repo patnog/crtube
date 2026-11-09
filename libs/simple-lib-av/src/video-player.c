@@ -9,6 +9,7 @@
 #include "demux.h"
 #include "h264.h"
 #include "decode-h264.h"
+#include "decode-h264-tee.h"
 #include "decode-aac.h"
 #include "audio.h"
 #include "thread.h"
@@ -24,6 +25,9 @@
 #define AUDIO_STARTUP_PRIME_FRAMES 2048 // two typical AAC frames; avoids the old ~0.37 s audio lead-in
 #define PREROLL_AUDIO_TIMEOUT_US (5 * 1000 * 1000)   // give up waiting for audio to anchor the clock, play video alone
 #define DECODE_STALL_MS       3000   // no AU consumed and no picture produced for this long = hard error
+#define TEE_WATCHDOG_NO_FRAME_MS 2500 // no output with queued input = stalled TEE decoder
+#define TEE_WATCHDOG_MIN_BACKLOG 2
+#define TEE_WATCHDOG_MAX_DIAGNOSTICS 2
 #define END_OF_STREAM_DRAIN_MS 500   // how long to wait for the last pictures after the final AU
 
 // RETIRING holds a replaced frame for one extra present: the RSX may still be sampling it for the
@@ -53,7 +57,14 @@ struct VideoPlayer {
    int              threadActive;
    volatile int     running;      // decode thread runs while set
    volatile int     ended;        // demux hit end of stream
-   volatile int     teeFailed;    // TEE backend returned a fatal decode error
+   volatile int     teeFailed;    // TEE recovery and Sony fallback both failed
+   volatile int     decoderStopUnsafe; // decoder resources could not be stopped safely
+   int              forceSony;    // this player abandoned TEE; seeks must keep using Sony
+   uint64_t         lastTeeFailureUs;
+   uint64_t         teeWatchdogLastFrameUs;
+   uint64_t         teeWatchdogLastProgressUs;
+   int              teeWatchdogLastDecoded;
+   int              teeWatchdogDiagnostics;
 
    // audio pipeline (absent for files without an AAC track: video plays silent)
    AacDecoder      *aacDecoder;
@@ -139,6 +150,136 @@ static void configureDecoderForStream(VideoPlayer *player)
               1000000000ull / player->demuxer.frameDurationNs, player->demuxer.width, player->demuxer.height);
 }
 
+static void resetTeeWatchdog(VideoPlayer *player)
+{
+   if (!player) return;
+   if (player->decoder && isH264DecoderTee(player->decoder)) {
+      uint64_t now = sys_time_get_system_time();
+      player->teeWatchdogLastFrameUs = now;
+      player->teeWatchdogLastProgressUs = now;
+      player->teeWatchdogLastDecoded = getH264DecoderPicturesDecoded(player->decoder);
+   } else {
+      player->teeWatchdogLastFrameUs = 0;
+      player->teeWatchdogLastProgressUs = 0;
+      player->teeWatchdogLastDecoded = 0;
+   }
+}
+
+static H264Decoder *createPlayerDecoder(VideoPlayer *player)
+{
+   if (player->forceSony) {
+      if (!isH264TeeBackendIdle()) {
+         logWarn("[video-player] Sony fallback deferred: TEE resources are still active or quarantined\n");
+         return NULL;
+      }
+      return createH264SonyDecoder(player->allocW, player->allocH,
+                                   player->demuxer.level, player->demuxer.h264.maxRefFrames);
+   }
+   H264Decoder *decoder = createH264DecoderForStream(player->allocW, player->allocH,
+                                     player->demuxer.level, player->demuxer.h264.maxRefFrames,
+                                     getStreamFps(player), &player->demuxer.h264);
+   if (decoder && !isH264DecoderTee(decoder) && getStreamFps(player) >= 50 &&
+       player->allocW >= 1920 && player->allocH >= 1000 && player->allocW <= 1920 && player->allocH <= 1088)
+      player->forceSony = 1;  // this stream was rejected by TEE or its initialization failed
+   return decoder;
+}
+
+// Once TEE recovery is exhausted, close it with Patch 1's bounded path and move this player to Sony.
+// Never start Sony while a TEE flush/close worker may still own SPE resources.
+static int switchTeeToSony(VideoPlayer *player, const char *reason)
+{
+   player->forceSony = 1;
+   requestH264TeeDisableSetting(reason);
+
+   H264Decoder *oldDecoder = player->decoder;
+   player->decoder = NULL;
+   resetTeeWatchdog(player);
+   destroyH264Decoder(oldDecoder);
+   if (!isH264TeeBackendIdle()) {
+      logError("[video-player] TEE did not close safely; Sony fallback will not start concurrently\n");
+      player->decoderStopUnsafe = 1;
+      player->teeFailed = 1;
+      return 0;
+   }
+
+   player->decoder = createH264SonyDecoder(player->allocW, player->allocH,
+                                           player->demuxer.level, player->demuxer.h264.maxRefFrames);
+   if (!player->decoder) {
+      logError("[video-player] Sony VDEC could not be opened after TEE failure\n");
+      player->teeFailed = 1;
+      return 0;
+   }
+   configureDecoderForStream(player);
+   logDecoderForStream(player);
+   resetTeeWatchdog(player);
+   logWarn("[video-player] playback continuing with Sony VDEC from the next keyframe\n");
+   return 1;
+}
+
+// The first failure gets one bounded flush/restart attempt. A second failure within 30 seconds,
+// or a failed/timed-out flush, hands this player to Sony VDEC. The next keyframe is used because
+// AUs already accepted by the old decoder cannot be replayed safely.
+static int recoverTeeDecoder(VideoPlayer *player, int *startedAtKeyframe)
+{
+   if (!player->decoder || !isH264DecoderTee(player->decoder)) return 0;
+
+   uint64_t now = sys_time_get_system_time();
+   int repeated = player->lastTeeFailureUs && now - player->lastTeeFailureUs < 30000000ull;
+   player->lastTeeFailureUs = now;
+   player->hasPendingAu = 0;
+   *startedAtKeyframe = 0;
+
+   if (!repeated && resetH264Decoder(player->decoder) == 0) {
+      resetTeeWatchdog(player);
+      logWarn("[video-player] TEE failure recovered with bounded flush; resuming at the next keyframe\n");
+      return 1;
+   }
+
+   int switched = switchTeeToSony(player, repeated ? "repeated decode failures" : "decoder flush failed or timed out");
+   resetTeeWatchdog(player);
+   return switched;
+}
+
+// Detect a TEE that keeps accepting input but stops delivering pictures. The regular
+// queue-stall timeout remains as a second line of defense; this watchdog also catches
+// decoder stalls before the AU ring becomes completely full.
+static int checkTeeWatchdog(VideoPlayer *player, int *startedAtKeyframe)
+{
+   uint64_t now;
+   int backlog, decoded;
+
+   if (!player->decoder || !isH264DecoderTee(player->decoder)) return 0;
+
+   now = sys_time_get_system_time();
+   backlog = getAuBacklogH264(player->decoder);
+   decoded = getH264DecoderPicturesDecoded(player->decoder);
+   if (decoded != player->teeWatchdogLastDecoded) {
+      player->teeWatchdogLastDecoded = decoded;
+      player->teeWatchdogLastProgressUs = now;
+   }
+
+   // With fewer than two outstanding AUs, there may simply be no more network input yet.
+   // Start the no-frame interval only while the decoder has enough queued work to make progress.
+   if (backlog < TEE_WATCHDOG_MIN_BACKLOG) {
+      player->teeWatchdogLastFrameUs = now;
+      return 0;
+   }
+   if (!player->teeWatchdogLastFrameUs) player->teeWatchdogLastFrameUs = now;
+   if (now - player->teeWatchdogLastFrameUs < (uint64_t)TEE_WATCHDOG_NO_FRAME_MS * 1000ull)
+      return 0;
+
+   if (player->teeWatchdogDiagnostics < TEE_WATCHDOG_MAX_DIAGNOSTICS) {
+      uint64_t progressAge = player->teeWatchdogLastProgressUs && now >= player->teeWatchdogLastProgressUs
+         ? (now - player->teeWatchdogLastProgressUs) / 1000ull : 0;
+      player->teeWatchdogDiagnostics++;
+      logWarn("[video-player] TEE watchdog: no output frame for %d ms, backlog=%d decoded=%d progressAgeMs=%llu; starting recovery\n",
+              TEE_WATCHDOG_NO_FRAME_MS, backlog, decoded, (unsigned long long)progressAge);
+   }
+
+   if (recoverTeeDecoder(player, startedAtKeyframe)) return 1;
+   return -1;
+}
+
 // defined below the decode thread but used by performSeek's audio-revive path
 static VideoDemuxer *getAudioSource(VideoPlayer *player);
 static void audioDecodeThread(uint64_t arg);
@@ -163,11 +304,23 @@ static int claimEmptySlot(VideoPlayer *player)
 // while an AU is outstanding — the decoder can't consume input while its frame buffers are full.
 static int decodeNextFrame(VideoPlayer *player, uint8_t *yuv, int *width, int *height, uint64_t *pts, int *startedAtKeyframe)
 {
-   int stalledMs = 0;
+   int stalledMs;
+retry_decoder:
+   stalledMs = 0;
    while (stalledMs < DECODE_STALL_MS && player->running && player->seekRequestNs < 0) {
       int got = getFrameH264(player->decoder, yuv, width, height, pts);
-      if (got == 1) return 1;
-      if (got < 0) return -1;
+      if (got == 1) {
+         resetTeeWatchdog(player);
+         return 1;
+      }
+      if (got < 0) {
+         if (recoverTeeDecoder(player, startedAtKeyframe)) { stalledMs = 0; continue; }
+         return -1;
+      }
+
+      int watchdog = checkTeeWatchdog(player, startedAtKeyframe);
+      if (watchdog > 0) { stalledMs = 0; continue; }
+      if (watchdog < 0) return -1;
 
       // the demuxer rotates AU_BUFFER_COUNT buffers; keep the decoder's command queue as full as they
       // allow (the SDK notes throughput improves when the queue never runs dry) without overwriting
@@ -185,16 +338,28 @@ static int decodeNextFrame(VideoPlayer *player, uint8_t *yuv, int *width, int *h
             }
             return 0;
          }
+         if (player->demuxer.h264.spsPatched && isH264DecoderTee(player->decoder)) {
+            logWarn("[video-player] in-band SPS was rewritten for Sony DPB; leaving TEE before feeding this AU\n");
+            if (!switchTeeToSony(player, "in-band SPS required Sony DPB rewrite")) return -1;
+            *startedAtKeyframe = 0;
+         }
          if (!*startedAtKeyframe) { if (!player->pendingAu.keyframe) continue; *startedAtKeyframe = 1; }
          player->hasPendingAu = 1;
       }
 
       int fed = decodeAuH264(player->decoder, player->pendingAu.data, player->pendingAu.size, player->pendingAu.pts);
-      if (fed < 0) return -1;
+      if (fed < 0) {
+         if (recoverTeeDecoder(player, startedAtKeyframe)) { stalledMs = 0; continue; }
+         return -1;
+      }
       if (fed == 0) { player->hasPendingAu = 0; stalledMs = 0; continue; }
       sleepMs(1); stalledMs++;   // input queue full: give the decoder time, keep pulling pictures
    }
-   if (player->running && stalledMs >= DECODE_STALL_MS) { logError("[video-player] decoder stalled\n"); return -1; }
+   if (player->running && stalledMs >= DECODE_STALL_MS) {
+      logError("[video-player] decoder stalled\n");
+      if (recoverTeeDecoder(player, startedAtKeyframe)) goto retry_decoder;
+      return -1;
+   }
    return 0;
 }
 
@@ -215,14 +380,23 @@ static void performSeek(VideoPlayer *player)
    // flush the decoder; if the reset wedged it (EndSeq fatal) or it already died, rebuild it rather
    // than going dark (a NULL decoder makes decode report end-of-stream until a later seek revives it)
    if (!player->decoder || resetH264Decoder(player->decoder) != 0) {
-      logWarn("[video-player] decoder reset failed, recreating decoder\n");
-      destroyH264Decoder(player->decoder);
-      player->decoder = createH264DecoderForStream(player->allocW, player->allocH, player->demuxer.level, player->demuxer.h264.maxRefFrames, getStreamFps(player));
-      if (player->decoder) {
-         configureDecoderForStream(player);
-         logDecoderForStream(player);
+      if (player->decoder && isH264DecoderTee(player->decoder)) {
+         logWarn("[video-player] TEE reset failed during seek; switching to Sony VDEC\n");
+         player->hasPendingAu = 0;
+         if (!switchTeeToSony(player, "TEE seek flush failed")) player->teeFailed = 1;
+      } else {
+         logWarn("[video-player] decoder reset failed, recreating decoder\n");
+         destroyH264Decoder(player->decoder);
+         player->decoder = createPlayerDecoder(player);
+         if (player->decoder) {
+            configureDecoderForStream(player);
+            logDecoderForStream(player);
+         } else {
+            player->teeFailed = 1;
+         }
       }
    }
+   resetTeeWatchdog(player);
    player->hasPendingAu = 0;
    // land on the fragment keyframe covering the target - or, for a sponsor skip, the next keyframe at/after it
    uint64_t landedNs = seekVideoDemuxer(&player->demuxer, targetNs, player->seekLandAfter);
@@ -550,7 +724,7 @@ VideoPlayer *createVideoPlayerSplitCancelable(const char *videoPath, const char 
       player->allocH = roundUp16(player->demuxer.height);
    }
    if (videoPlayerCancelRequested(cancelRequested)) goto fail;
-   player->decoder = createH264DecoderForStream(player->allocW, player->allocH, player->demuxer.level, player->demuxer.h264.maxRefFrames, getStreamFps(player));
+   player->decoder = createPlayerDecoder(player);
    if (!player->decoder || videoPlayerCancelRequested(cancelRequested)) goto fail;
    configureDecoderForStream(player);
    logDecoderForStream(player);
@@ -790,6 +964,10 @@ int replaceVideoPlayerAudio(VideoPlayer *player, const char *audioPath, float po
 
 int isVideoPlayerTeeFailed(const VideoPlayer *player) {
     return player && player->teeFailed;
+}
+
+int isVideoPlayerDecoderStopUnsafe(const VideoPlayer *player) {
+    return player && player->decoderStopUnsafe;
 }
 
 int isVideoPlayerReady(const VideoPlayer *player) {

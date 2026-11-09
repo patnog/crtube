@@ -6,6 +6,7 @@
 // decoder for RGB makes it convert on the same SPUs that decode, which costs real throughput.
 
 #include <stdint.h>
+#include "h264.h"
 
 typedef struct H264Decoder H264Decoder;
 
@@ -21,11 +22,14 @@ typedef struct H264Decoder H264Decoder;
 // buffers (+1) so high-reference streams don't overflow the level's default pool. NULL on failure.
 H264Decoder *createH264Decoder(int width, int height, int level, int maxRefFrames);
 
-// Selects the TEE backend only for 1920x1080-class streams at 50/60 fps.
-// Returns NULL if that TEE backend cannot initialize; it never routes such a
-// stream to the native Sony VDEC backend.
+// Selects TEE only for 1920x1080-class 50/60 fps streams whose SPS/PPS pass
+// the TEE compatibility checks. Unsupported streams and clean TEE initialization
+// failures fall back to the native Sony VDEC backend.
 H264Decoder *createH264DecoderForStream(int width, int height, int level,
-                                        int maxRefFrames, int fps);
+                                        int maxRefFrames, int fps, const H264Config *config);
+
+// Creates the native Sony VDEC backend explicitly, bypassing TEE selection.
+H264Decoder *createH264SonyDecoder(int width, int height, int level, int maxRefFrames);
 
 // Returns non-zero when this decoder instance is using the TEE backend.
 int isH264DecoderTee(const H264Decoder *decoder);
@@ -47,6 +51,9 @@ int decodeAuH264(H264Decoder *decoder, const uint8_t *data, int size, uint64_t p
 // access units fed but not yet consumed. A caller with N rotating AU buffers may safely demux a
 // new AU while the backlog is below N.
 int getAuBacklogH264(const H264Decoder *decoder);
+
+// TEE-only progress counter: pictures completed by the decoder since open/flush.
+int getH264DecoderPicturesDecoded(const H264Decoder *decoder);
 
 // retrieves a decoded frame as YUV 4:2:0 planar into `yuvOut` (must hold codedWidth*codedHeight*3/2
 // bytes, 128-byte aligned, size a multiple of 128). frames come out in presentation order. returns 1 and

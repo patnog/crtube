@@ -6,11 +6,12 @@
 // isSyncSample: the container marked this sample a random-access point (mp4 sync sample / trun sync flag).
 // A fragment/segment can open on a non-IDR recovery-point I-frame, which carries no type-5 NAL; treat that
 // like an IDR so a freshly reset decoder gets its SPS/PPS and the post-seek decode gate starts on it.
-int buildVideoAu(const H264Config *h264, const uint8_t *sample, int sampleSize, int isSyncSample, uint8_t *auBuffer, int auCapacity, uint64_t pts, VideoAu *au)
+int buildVideoAu(H264Config *h264, const uint8_t *sample, int sampleSize, int isSyncSample, uint8_t *auBuffer, int auCapacity, uint64_t pts, VideoAu *au)
 {
    int reserve = h264->headerSize;   // room to prepend SPS/PPS ahead of a random-access frame
    int isIdr = 0;
-   int annexLen = avccToAnnexB(sample, sampleSize, h264->nalLengthSize, auBuffer + reserve, auCapacity - reserve, &isIdr);
+   int annexLen = avccToAnnexB(sample, sampleSize, h264->nalLengthSize, auBuffer + reserve,
+                               auCapacity - reserve, &isIdr, &h264->spsPatched);
    if (annexLen <= 0) return 0;
    int isKeyframe = isIdr || isSyncSample;
 

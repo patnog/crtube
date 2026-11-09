@@ -328,6 +328,11 @@ int setEnable1080p60(int enabled)
 {
    enabled = enabled ? 1 : 0;
    if (enabled == enable1080p60) return 0;
+
+   /* Fail closed: if TEE shutdown forces this option OFF, disable it in memory
+    * even when settings.txt cannot be rewritten. Enabling still requires a
+    * successful save so the UI never advertises an unsaved ON state. */
+   if (!enabled) enable1080p60 = 0;
    if (rewriteSettingKey(SETTINGS_PATH, "enable-1080p60", enabled ? "on" : "off") != 0) {
       logWarn("[settings] couldn't persist enable-1080p60=%s\n", enabled ? "on" : "off");
       return -1;

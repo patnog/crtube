@@ -322,6 +322,7 @@ static struct {
    volatile int     resolutionSwitchDone;
    int              resolutionSwitchThreadActive, resolutionSwitchWasPaused, resolutionSwitchWasFirstFrameSeen;
    int              resolutionSwitchTeeRecovery, teeRecoveryAttempted;
+   int              decoderStopWarningShown;
    int              resolutionSwitchTarget, resolutionSwitchOldIndex, resolutionSwitchRestored;
    volatile int     resolutionSwitchAborting;
    float            resolutionSwitchPosition;
@@ -2872,6 +2873,14 @@ static void updatePlay(void)
          int lowerProfile = findLowerResolutionProfile();
          if (lowerProfile >= 0) startResolutionSwitch(lowerProfile, 1);
       }
+   }
+
+   // Keep the safety warning visible long enough to read. This is latched per playback screen
+   // because the player may be destroyed during the subsequent quality fallback.
+   if (state.stage == STAGE_PLAYING && state.player && !state.decoderStopWarningShown &&
+       isVideoPlayerDecoderStopUnsafe(state.player)) {
+      showToastFor("Decoder failed to stop safely. Please restart the application.", 5000000ULL);
+      state.decoderStopWarningShown = 1;
    }
 
    // A fatal TEE decode error triggers an invisible handoff to a lower rendition.
