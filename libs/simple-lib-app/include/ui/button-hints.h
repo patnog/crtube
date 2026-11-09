@@ -41,6 +41,10 @@ void setButtonHintShown(ButtonHints *bar, int index, int shown);
 void setButtonHintGap(ButtonHints *bar, int gap);   // wider or tighter spacing than the usual
 void setButtonHintsStableLayout(ButtonHints *bar, int enabled); // do not move hint anchors when font scale changes
 void drawButtonHints(ButtonHints *bar, int screenWidth);
+// Wrap visible hints into the fewest centered rows that fit. Returns the required row count.
+int  getButtonHintsFitRows(ButtonHints *bar, int screenWidth, int maxRows);
+// Draw wrapped rows with bottomY as the top of the last row; rowGap is in final screen pixels.
+int  drawButtonHintsFitted(ButtonHints *bar, int screenWidth, int bottomY, int rowGap, int maxRows);
 // the same row starting at x rather than centred
 void drawButtonHintsAt(ButtonHints *bar, int x);
 void termButtonHints(ButtonHints *bar);

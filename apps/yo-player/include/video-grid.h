@@ -63,8 +63,12 @@ typedef struct {
    int              memberCheckIndex;
    int              memberCheckAccountRevision;
    int              memberIdleFrames;
+   int              sortMode;                           // local result ordering: relevance, views, or newest
+   int              playlistSortMode;                   // playlist ordering: newest or A-Z
+   int              sortPendingFrom;                      // first item from a page awaiting UI-thread merge
 
    int              selected, scrollRow, winStart, winEnd;
+   int              inputSuppressed, focusHidden;
    ButtonRepeat     horizontalRepeat, verticalRepeat;
 
    // background worker + thumbnail fetch cursor
@@ -93,6 +97,11 @@ void termVideoGrid(VideoGrid *grid);
 void setGridWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *videoId));
 void setGridWatchedPosition(VideoGrid *grid, int (*watchedPosition)(const char *videoId));
 void setGridWatchLaterPredicate(VideoGrid *grid, int (*isWatchLater)(const char *videoId));
+void setGridSortMode(VideoGrid *grid, SortOrder mode);
+void setGridPlaylistSortMode(VideoGrid *grid, PlaylistSortOrder mode);
+void setGridSortByPublished(VideoGrid *grid, int enabled); // compatibility wrapper for Newest
+void setGridInputSuppressed(VideoGrid *grid, int suppressed);
+void setGridFocusHidden(VideoGrid *grid, int hidden);
 
 // load a fresh feed from page 1. non-blocking: if a load is already running it's swapped once that finishes,
 // so mode/sort switches never freeze the frame.

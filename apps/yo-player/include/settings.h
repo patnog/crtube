@@ -13,6 +13,30 @@ typedef enum {
 
 void loadSettings(void);   // reads settings.txt, creating it with defaults when missing
 
+typedef enum {
+   SORT_PREF_SEARCH,
+   SORT_PREF_RECOMMENDED,
+   SORT_PREF_ACCOUNT_SUBSCRIPTIONS,
+   SORT_PREF_PS3_SUBSCRIPTIONS,
+   SORT_PREF_TRENDING_GAMING,
+   SORT_PREF_TRENDING_SPORTS,
+   SORT_PREF_TRENDING_PODCASTS,
+   SORT_PREF_LIVE_POPULAR,
+   SORT_PREF_LIVE_MUSIC,
+   SORT_PREF_LIVE_GAMING,
+   SORT_PREF_LIVE_SPORTS,
+   SORT_PREF_LIVE_PODCASTS,
+   SORT_PREF_LIVE_NEWS,
+   SORT_PREF_ACCOUNT_PLAYLISTS,
+   SORT_PREF_LOCAL_PLAYLISTS_WATCH_LATER,
+   SORT_PREF_LOCAL_PLAYLISTS_PS3,
+   SORT_PREF_COUNT
+} SortPreference;
+
+// Feed sorts use 0=Relevance, 1=Views, 2=Newest. Playlist sorts use 0=Newest, 1=A-Z.
+int getSortPreference(SortPreference setting);
+int setSortPreference(SortPreference setting, int value);
+
 SponsorblockMode getSponsorblockMode(void); // legacy global mode, retained for settings-file migration
 
 // Per-category SponsorBlock action: SPONSOR_ACTION_SKIP / ASK / KEEP.

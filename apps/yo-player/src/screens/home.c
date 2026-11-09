@@ -7,11 +7,12 @@
 #include "screens/play.h"
 #include "video-grid.h"
 #include "storage.h"
+#include "settings.h"
+#include "screens/playlist-picker.h"
 #include "extractor.h"
 #include "vfs.h"
 #include "account.h"
 #include "downloads.h"
-#include "settings.h"
 #include "sponsorblock.h"
 #include "sidebar.h"
 #include "ui/button-hints.h"
@@ -60,8 +61,10 @@ static const char *AccountNames[ACCOUNT_FEED_COUNT] = { "Recommended", "Subscrip
 #define HOME_CAT_COUNT   (HOME_ACCOUNT + ACCOUNT_FEED_COUNT)
 #define HOME_LOCAL_HISTORY (HOME_ACCOUNT + ACCOUNT_FEED_COUNT)  // persistent PS3-local playback history
 #define HOME_LIVE         (HOME_LOCAL_HISTORY + 1)               // entered from the sidebar; never in the home L1/R1 ring
-#define HOME_PLAYLISTS    (HOME_LIVE + 1)                        // signed-in library; sidebar only, not in L1/R1 ring
-#define HOME_PLAYLIST_CONTENTS (HOME_PLAYLISTS + 1)              // opened from a playlist tile
+#define HOME_PLAYLISTS    (HOME_LIVE + 1)                        // YouTube account playlist library
+#define HOME_PLAYLIST_CONTENTS (HOME_PLAYLISTS + 1)              // opened from a YouTube playlist tile
+#define HOME_LOCAL_PLAYLISTS (HOME_PLAYLIST_CONTENTS + 1)        // PS3 playlist library: Watch Later / PS3
+#define HOME_LOCAL_PLAYLIST_CONTENTS (HOME_LOCAL_PLAYLISTS + 1)  // opened from a local PS3 playlist
 #define HOME_CACHE_COUNT (HOME_PLAYLISTS + 1)
 #define SUBS_PER_CHANNEL 8      // latest videos pulled from each subscribed channel
 #define LIVE_MAX_AGE_US (10ULL * 60 * 1000000)
@@ -79,11 +82,14 @@ static const int SignedInOrder[]  = {
 // each cached category's fully-loaded results, so returning to a tab skips the feed fetch (thumbnails still refetch).
 static SearchResults categoryCache[HOME_CACHE_COUNT];
 static int           categoryCached[HOME_CACHE_COUNT];
+static SortOrder     categoryCacheSort[HOME_CACHE_COUNT];
 static int           subsRevisionSeen;         // subscriptions revision the cached HOME_SUBS feed was built at
 static int           watchLaterRevisionSeen;   // watch-later revision the cached HOME_WATCHLATER feed was built at
 static int           accountRevisionSeen;      // sign-in state the category order + account caches belong to
 static uint64_t      accountFeedRefreshUs[ACCOUNT_FEED_COUNT];
 static uint64_t      playlistRefreshUs;
+static int           localPlaylistRevisionSeen;
+static int           playlistWatchLaterRevisionSeen;
 
 // Account feeds refresh periodically while visible. History and the playlist library use short TTLs
 // so returning to them is immediate without keeping stale data indefinitely.
@@ -115,7 +121,18 @@ static struct {
    int       regionTop;
    int       regionVisible;
    int       pendingAccountCategory; // account feed selected before signing in, or -1
+   int       pendingPlaylistOpen;
+   volatile int playlistError;
+   int       playlistReturnToSearch;
+   int       playlistReturnCategory;
+   int       playlistReturnSort;
+   int       playlistReturnLocal;
+   int       localPlaylistTab; // 0 = saved YouTube playlists, 1 = local PS3 playlists
+   char      playlistReturnQuery[SEARCH_QUERY_LEN];
+   SortOrder sort;
+   PlaylistSortOrder playlistSort;
    char      playlistId[64];
+   char      localPlaylistId[LOCAL_PLAYLIST_ID_LEN];
    char      playlistTitle[160];
    SearchResult channelLookupItem;
    sys_ppu_thread_t channelLookupTid;
@@ -126,7 +143,7 @@ static struct {
 } home;
 
 static Font        uiFont;
-static Label       titleLabel, statusLabel;
+static Label       titleLabel, statusLabel, playlistErrorLabel;
 static ButtonHints hints, hintsSecondRow;
 static int         sdHintsTwoRows;
 
@@ -226,9 +243,21 @@ static unsigned regionRevisionSeen;
 #define TREND_CHIP_PAD_X 8
 #define TREND_CHIP_ICON_GAP 6
 #define TREND_CHIP_GAP 6
+#define HOME_SORT_TEXT_SIZE 20
+#define HOME_SORT_PAD_X 7
+#define HOME_SORT_GAP 4
+#define HOME_SORT_HEIGHT 40
 static Label trendingChipLabels[TREND_COUNT];
 static Icon trendingChipIcons[TREND_COUNT];
 static Label liveChipLabels[LIVE_COUNT];
+static Label homeSortLabels[SORT_COUNT];
+static Label playlistSortLabels[PLAYLIST_SORT_COUNT];
+static Label localPlaylistTabLabels[2];
+static int homeSortHint = -1;
+static int homeSquareHint = -1;
+static SearchResult squarePendingItem;
+static uint64_t squarePressedAt;
+#define SQUARE_HOLD_US 550000ULL
 static const IconId TrendingIcons[TREND_COUNT] = { ICON_MICROCHIP, ICON_STAR, ICON_VOLUME_UP };
 
 static int getSettingsPanelWidth(void)
@@ -332,8 +361,18 @@ static int homeFetch(const char *token, SearchResults *out, void *user)
    if (home.category == HOME_LOCAL_HISTORY) return fetchLocalHistory(out);
    if (home.category == HOME_LIVE) return getLiveFeed(home.liveCategory, token, out, homeLiveFetchStopped);
    if (home.category == HOME_PLAYLISTS) return getAccountPlaylists(token, out);
-   if (home.category == HOME_PLAYLIST_CONTENTS)
-      return getAccountPlaylistVideos(home.playlistId, token, out);
+   if (home.category == HOME_LOCAL_PLAYLISTS)
+      return (home.localPlaylistTab == 0 ? getPlaylistWatchLater(out) : getLocalPlaylists(out)) >= 0 ? 0 : -1;
+   if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS)
+      return getLocalPlaylistVideos(home.localPlaylistId, out) >= 0 ? 0 : -1;
+   if (home.category == HOME_PLAYLIST_CONTENTS) {
+      home.playlistError = 0;
+      int rc = getAccountPlaylistVideos(home.playlistId, token, out);
+      home.playlistError = rc < 0 ? rc : 0;
+      if (rc == 0 && out->count == 0)
+         home.playlistError = PLAYLIST_FETCH_UNAVAILABLE;
+      return rc;
+   }
    if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY)
       return getAccountFeed((AccountFeed)(home.category - HOME_ACCOUNT), token, out);
    if (home.category == HOME_SUBS)       return fetchSubscriptions(out);
@@ -352,16 +391,66 @@ static void setHeading(void)
    else if (home.category == HOME_SUBS)       snprintf(heading, sizeof heading, "Subscriptions%s", local);
    else if (home.category == HOME_WATCHLATER) snprintf(heading, sizeof heading, "Watch Later%s", local);
    else if (home.category == HOME_LIVE)       snprintf(heading, sizeof heading, "Live");
-   else if (home.category == HOME_PLAYLISTS)  snprintf(heading, sizeof heading, "Playlists");
-   else if (home.category == HOME_PLAYLIST_CONTENTS)
+   else if (home.category == HOME_PLAYLISTS || home.category == HOME_LOCAL_PLAYLISTS)
+      snprintf(heading, sizeof heading, "Playlists");
+   else if (home.category == HOME_PLAYLIST_CONTENTS || home.category == HOME_LOCAL_PLAYLIST_CONTENTS)
       snprintf(heading, sizeof heading, "%s", home.playlistTitle[0] ? home.playlistTitle : "Playlist");
    else                                       snprintf(heading, sizeof heading, "Trending");
    setLabelText(&titleLabel, heading);
 }
 
+static int homeSupportsSort(void)
+{
+   return home.category == HOME_SUBS || home.category < TREND_COUNT ||
+          home.category == HOME_LIVE ||
+          home.category == HOME_ACCOUNT + ACCOUNT_FEED_HOME ||
+          home.category == HOME_ACCOUNT + ACCOUNT_FEED_SUBSCRIPTIONS;
+}
+
+static int homeSupportsPlaylistSort(void)
+{
+   return home.category == HOME_PLAYLISTS || home.category == HOME_LOCAL_PLAYLISTS;
+}
+
+static SortPreference currentFeedSortPreference(void)
+{
+   if (home.category < TREND_COUNT) return (SortPreference)(SORT_PREF_TRENDING_GAMING + home.category);
+   if (home.category == HOME_SUBS) return SORT_PREF_PS3_SUBSCRIPTIONS;
+   if (home.category == HOME_LIVE) return (SortPreference)(SORT_PREF_LIVE_POPULAR + home.liveCategory);
+   if (home.category == HOME_ACCOUNT + ACCOUNT_FEED_HOME) return SORT_PREF_RECOMMENDED;
+   return SORT_PREF_ACCOUNT_SUBSCRIPTIONS;
+}
+
+static SortPreference currentPlaylistSortPreference(void)
+{
+   if (home.category == HOME_PLAYLISTS) return SORT_PREF_ACCOUNT_PLAYLISTS;
+   return home.localPlaylistTab == 0 ? SORT_PREF_LOCAL_PLAYLISTS_WATCH_LATER : SORT_PREF_LOCAL_PLAYLISTS_PS3;
+}
+
+static void updateHomeSortHint(void)
+{
+   if (homeSortHint < 0) return;
+   setButtonHintShown(sdHintsTwoRows ? &hintsSecondRow : &hints,
+                      homeSortHint, homeSupportsSort() || homeSupportsPlaylistSort());
+}
+
+static int homeSortGroupLeft(void)
+{
+   int count = homeSupportsPlaylistSort() ? PLAYLIST_SORT_COUNT : SORT_COUNT;
+   int total = HOME_SORT_GAP * (count - 1);
+   for (int i = 0; i < count; i++) {
+      Label *label = homeSupportsPlaylistSort() ? &playlistSortLabels[i] : &homeSortLabels[i];
+      refreshLabelScale(label);
+      total += label->tt.tex.w + HOME_SORT_PAD_X * 2;
+   }
+   return home.screenW - MARGIN_X - total;
+}
+
 static void refreshCurrentCategory(void)
 {
    if (home.category < HOME_CACHE_COUNT) categoryCached[home.category] = 0;
+   setGridSortMode(&home.grid, homeSupportsSort() ? home.sort : SORT_RELEVANCE);
+   setGridPlaylistSortMode(&home.grid, homeSupportsPlaylistSort() ? home.playlistSort : PLAYLIST_SORT_NEWEST);
    if (home.category == HOME_PLAYLISTS) playlistRefreshUs = getTimeUs();
    if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY) {
       int feed = home.category - HOME_ACCOUNT;
@@ -374,9 +463,17 @@ static void refreshCurrentCategory(void)
 
 static void loadCategory(void)
 {
+   if (homeSupportsSort()) home.sort = (SortOrder)getSortPreference(currentFeedSortPreference());
+   if (homeSupportsPlaylistSort()) home.playlistSort = (PlaylistSortOrder)getSortPreference(currentPlaylistSortPreference());
+   setGridSortMode(&home.grid, homeSupportsSort() ? home.sort : SORT_RELEVANCE);
+   setGridPlaylistSortMode(&home.grid, homeSupportsPlaylistSort() ? home.playlistSort : PLAYLIST_SORT_NEWEST);
+   if (home.category < HOME_CACHE_COUNT && homeSupportsSort() && categoryCached[home.category] &&
+       categoryCacheSort[home.category] != home.sort)
+      categoryCached[home.category] = 0;
    setHeading();
    if (home.category == HOME_LOCAL_HISTORY || home.category == HOME_LIVE ||
-       home.category == HOME_PLAYLIST_CONTENTS) {
+       home.category == HOME_PLAYLIST_CONTENTS || home.category == HOME_LOCAL_PLAYLISTS ||
+       home.category == HOME_LOCAL_PLAYLIST_CONTENTS) {
       if (home.category == HOME_LIVE) home.liveLoadedUs = getTimeUs();
       setGridSource(&home.grid, homeFetch, NULL);
       return;
@@ -415,7 +512,8 @@ static void loadCategory(void)
 static void cacheCurrent(void)
 {
    if (home.category == HOME_LOCAL_HISTORY || home.category == HOME_LIVE ||
-       home.category == HOME_PLAYLIST_CONTENTS) return;
+       home.category == HOME_PLAYLIST_CONTENTS || home.category == HOME_LOCAL_PLAYLISTS ||
+       home.category == HOME_LOCAL_PLAYLIST_CONTENTS) return;
    if (gridStage(&home.grid) != GRID_READY || gridBusy(&home.grid)) return;   // don't copy mid-append
    if (home.grid.threadActive) {
       const SearchResults *results = gridResults(&home.grid);
@@ -423,6 +521,7 @@ static void cacheCurrent(void)
          if (results->items[i].isPlaylist) return;   // playlist thumbnail workers resolve IDs in-place
    }
    categoryCache[home.category] = *gridResults(&home.grid);
+   categoryCacheSort[home.category] = homeSupportsSort() ? home.sort : SORT_RELEVANCE;
    categoryCached[home.category] = 1;
 }
 
@@ -431,7 +530,8 @@ static void openAccountPanel(void);
 
 static void setSidebarForCategory(void)
 {
-   if (home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS) setSidebarCurrent(SIDEBAR_PLAYLISTS);
+   if (home.category == HOME_LOCAL_PLAYLISTS || home.category == HOME_LOCAL_PLAYLIST_CONTENTS) setSidebarCurrent(SIDEBAR_PS3_PLAYLISTS);
+   else if (home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS) setSidebarCurrent(SIDEBAR_PLAYLISTS);
    else if (home.category == HOME_LIVE) setSidebarCurrent(SIDEBAR_LIVE);
    else if (home.category == HOME_WATCHLATER) setSidebarCurrent(SIDEBAR_PS3_WATCH_LATER);
    else if (home.category == HOME_LOCAL_HISTORY) setSidebarCurrent(SIDEBAR_PS3_HISTORY);
@@ -456,19 +556,76 @@ static void selectAccountFeed(AccountFeed feed)
 
 static void switchToCategory(int category)
 {
+   if (category != HOME_PLAYLIST_CONTENTS && home.category == HOME_PLAYLIST_CONTENTS &&
+       (home.playlistReturnToSearch || home.playlistReturnLocal)) {
+      home.playlistReturnToSearch = 0;
+      home.playlistReturnLocal = 0;
+      home.playlistReturnCategory = -1;
+      home.playlistReturnSort = SORT_RELEVANCE;
+      home.playlistReturnQuery[0] = 0;
+   }
    if (category < 0 ||
        (category >= HOME_CAT_COUNT && category != HOME_LOCAL_HISTORY && category != HOME_LIVE &&
-        category != HOME_PLAYLISTS && category != HOME_PLAYLIST_CONTENTS) ||
+        category != HOME_PLAYLISTS && category != HOME_PLAYLIST_CONTENTS &&
+        category != HOME_LOCAL_PLAYLISTS && category != HOME_LOCAL_PLAYLIST_CONTENTS) ||
        category == home.category) return;
    cacheCurrent();
    home.category = category;
    loadCategory();
    setSidebarForCategory();
+   updateHomeSortHint();
+}
+
+void openHomePlaylist(const char *playlistId, const char *title)
+{
+   if (!playlistId || !playlistId[0]) return;
+   home.playlistReturnToSearch = 0;
+   home.playlistReturnLocal = 0;
+   home.playlistReturnCategory = -1;
+   home.playlistReturnSort = SORT_RELEVANCE;
+   home.playlistReturnQuery[0] = 0;
+   home.playlistError = 0;
+   strCopy(home.playlistId, sizeof home.playlistId, playlistId);
+   strCopy(home.playlistTitle, sizeof home.playlistTitle, title && title[0] ? title : "Playlist");
+   home.pendingPlaylistOpen = 0;
+   if (home.category == HOME_PLAYLIST_CONTENTS) {
+      loadCategory();
+      setSidebarForCategory();
+   } else {
+      switchToCategory(HOME_PLAYLIST_CONTENTS);
+   }
+}
+
+void openHomePlaylistFromSearch(const char *playlistId, const char *title, const char *query, int sort)
+{
+   if (!playlistId || !playlistId[0]) return;
+   home.playlistReturnToSearch = 1;
+   home.playlistReturnLocal = 0;
+   home.playlistReturnCategory = home.category;
+   home.playlistReturnSort = sort;
+   strCopy(home.playlistReturnQuery, sizeof home.playlistReturnQuery, query ? query : "");
+   home.playlistError = 0;
+   strCopy(home.playlistId, sizeof home.playlistId, playlistId);
+   strCopy(home.playlistTitle, sizeof home.playlistTitle, title && title[0] ? title : "Playlist");
+   home.pendingPlaylistOpen = 0;
+   if (home.category == HOME_PLAYLIST_CONTENTS) {
+      loadCategory();
+      setSidebarForCategory();
+   } else {
+      switchToCategory(HOME_PLAYLIST_CONTENTS);
+   }
 }
 
 static void switchCategory(int delta)
 {
-   if (home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS) return;
+   if (home.category == HOME_LOCAL_PLAYLISTS) {
+      home.localPlaylistTab = 1 - home.localPlaylistTab;
+      loadCategory();
+      updateHomeSortHint();
+      return;
+   }
+   if (home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS ||
+       home.category == HOME_LOCAL_PLAYLIST_CONTENTS) return;
    if (home.category == HOME_LIVE) {
       home.liveCategory = (LiveCategory)((home.liveCategory + delta + LIVE_COUNT) % LIVE_COUNT);
       loadCategory();
@@ -484,6 +641,7 @@ static void switchCategory(int delta)
    home.category = order[(position + delta + count) % count];
    loadCategory();
    setSidebarForCategory();
+   updateHomeSortHint();
 }
 
 // signed in or out (here, or a revoked token found by a feed request): the account caches belong to the
@@ -500,6 +658,7 @@ static void applyAccountChange(void)
    home.category = isSignedIn() ? HOME_ACCOUNT + ACCOUNT_FEED_HOME : HOME_SUBS;
    loadCategory();
    setSidebarForCategory();
+   updateHomeSortHint();
 }
 
 // ---- account panel (Select) ----
@@ -536,6 +695,7 @@ static void closeAccountPanel(void)
    cancelSignIn();
    home.accountOpen = 0;
    home.pendingAccountCategory = -1;
+   home.pendingPlaylistOpen = 0;
 }
 
 static void updateAccountPanel(void)
@@ -546,8 +706,13 @@ static void updateAccountPanel(void)
 
    if (status.stage == SIGNIN_DONE) {
       home.accountOpen = 0;
-      if ((home.pendingAccountCategory >= HOME_ACCOUNT && home.pendingAccountCategory < HOME_LOCAL_HISTORY) ||
-          home.pendingAccountCategory == HOME_PLAYLISTS) {
+      if (home.pendingPlaylistOpen) {
+         home.pendingPlaylistOpen = 0;
+         home.pendingAccountCategory = -1;
+         if (home.category == HOME_PLAYLIST_CONTENTS) loadCategory();
+         else switchToCategory(HOME_PLAYLIST_CONTENTS);
+      } else if ((home.pendingAccountCategory >= HOME_ACCOUNT && home.pendingAccountCategory < HOME_LOCAL_HISTORY) ||
+                 home.pendingAccountCategory == HOME_PLAYLISTS) {
          int category = home.pendingAccountCategory;
          home.pendingAccountCategory = -1;
          switchToCategory(category);
@@ -1041,38 +1206,106 @@ static void drawHomeIconFixed(Icon *icon, int x, int y, uint32_t color)
                                0.0f, 0.0f, 1.0f, 1.0f, color, GFX_FILTER_LINEAR);
 }
 
+static void drawHomeSortPills(void)
+{
+   int playlistMode = homeSupportsPlaylistSort();
+   int count = playlistMode ? PLAYLIST_SORT_COUNT : SORT_COUNT;
+   int x = homeSortGroupLeft();
+   int y = titleLabel.y + (titleLabel.tt.tex.h - HOME_SORT_HEIGHT) / 2;
+   if (y < titleLabel.y) y = titleLabel.y;
+   for (int i = 0; i < count; i++) {
+      Label *label = playlistMode ? &playlistSortLabels[i] : &homeSortLabels[i];
+      int width = label->tt.tex.w + HOME_SORT_PAD_X * 2;
+      int selected = playlistMode ? i == (int)home.playlistSort : i == (int)home.sort;
+      uint32_t edge = selected ? activeTheme->accent : activeTheme->rowHighlight;
+      uint32_t fill = selected ? activeTheme->rowHighlight : activeTheme->surface;
+      fillGfxRoundedRectangleFixed(x, y, width, HOME_SORT_HEIGHT, HOME_SORT_HEIGHT / 2, edge);
+      fillGfxRoundedRectangleFixed(x + 1, y + 1, width - 2, HOME_SORT_HEIGHT - 2,
+                                   HOME_SORT_HEIGHT / 2 - 1, fill);
+      setLabelColor(label, selected ? activeTheme->textPrimary : activeTheme->textSecondary);
+      moveLabel(label, x + (width - label->tt.tex.w) / 2,
+                y + (HOME_SORT_HEIGHT - label->tt.tex.h) / 2);
+      drawLabel(label);
+      x += width + HOME_SORT_GAP;
+   }
+}
+
+static void drawLocalPlaylistTabs(void)
+{
+   int x = titleLabel.x + titleLabel.tt.tex.w + 18;
+   int right = homeSortGroupLeft() - 14;
+   int pad = TREND_CHIP_PAD_X, gap = TREND_CHIP_GAP;
+   for (int i = 0; i < 2; i++) refreshLabelScale(&localPlaylistTabLabels[i]);
+   int total = localPlaylistTabLabels[0].tt.tex.w + localPlaylistTabLabels[1].tt.tex.w + 4 * pad + gap;
+   while (x + total > right && pad > 3) { pad--; total -= 4; }
+   while (x + total > right && gap > 2) { gap--; total--; }
+   int y = titleLabel.y + (titleLabel.tt.tex.h - TREND_CHIP_HEIGHT) / 2;
+   for (int i = 0; i < 2; i++) {
+      Label *label = &localPlaylistTabLabels[i];
+      int width = label->tt.tex.w + 2 * pad;
+      int active = i == home.localPlaylistTab;
+      fillGfxRoundedRectangleFixed(x, y, width, TREND_CHIP_HEIGHT, TREND_CHIP_HEIGHT / 2,
+                                   active ? activeTheme->rowHighlight : activeTheme->surface);
+      setLabelColor(label, active ? activeTheme->accent : activeTheme->textPrimary);
+      moveLabel(label, x + pad, getCenteredLabelY(label, y, TREND_CHIP_HEIGHT));
+      drawLabel(label);
+      x += width + gap;
+   }
+}
+
 static void drawTrendingTabs(void)
 {
    int x = titleLabel.x + titleLabel.tt.tex.w + 18;
-   int right = home.screenW - MARGIN_X;
+   int right = homeSortGroupLeft() - 14;
    int gap = TREND_CHIP_GAP;
    int pad = TREND_CHIP_PAD_X;
+   int iconSize = TREND_CHIP_ICON_SIZE;
+   for (int i = 0; i < TREND_COUNT; i++) refreshLabelScale(&trendingChipLabels[i]);
+
+   int active = home.category;
+   int first = 0, last = TREND_COUNT - 1;
    int total = 0;
-   for (int i = 0; i < TREND_COUNT; i++) {
-      refreshLabelScale(&trendingChipLabels[i]);
-      total += TREND_CHIP_ICON_SIZE + TREND_CHIP_ICON_GAP + trendingChipLabels[i].tt.tex.w + 2 * pad;
-      if (i) total += gap;
+   for (int i = first; i <= last; i++)
+      total += iconSize + TREND_CHIP_ICON_GAP + trendingChipLabels[i].tt.tex.w + 2 * pad +
+               (i > first ? gap : 0);
+   while (x + total > right && pad > 3) {
+      pad--;
+      total = 0;
+      for (int i = first; i <= last; i++)
+         total += iconSize + TREND_CHIP_ICON_GAP + trendingChipLabels[i].tt.tex.w + 2 * pad +
+                  (i > first ? gap : 0);
    }
-   int available = right - x;
-   if (total > available) {
-      pad = 4;
-      gap = 3;
+   while (x + total > right && gap > 2) {
+      gap--;
+      total = 0;
+      for (int i = first; i <= last; i++)
+         total += iconSize + TREND_CHIP_ICON_GAP + trendingChipLabels[i].tt.tex.w + 2 * pad +
+                  (i > first ? gap : 0);
    }
+   if (x + total > right) {
+      first = last = active;
+      pad = 3;
+      gap = 0;
+      iconSize = 0;
+      if (x + trendingChipLabels[active].tt.tex.w + 2 * pad > right) return;
+   }
+
    int chipY = titleLabel.y + (titleLabel.tt.tex.h - TREND_CHIP_HEIGHT) / 2;
    if (chipY < titleLabel.y - 4) chipY = titleLabel.y - 4;
-
-   for (int i = 0; i < TREND_COUNT; i++) {
+   for (int i = first; i <= last; i++) {
       Label *label = &trendingChipLabels[i];
-      int chipW = TREND_CHIP_ICON_SIZE + TREND_CHIP_ICON_GAP + label->tt.tex.w + 2 * pad;
-      int active = home.category == i;
+      int chipW = label->tt.tex.w + 2 * pad;
+      if (iconSize > 0) chipW += iconSize + TREND_CHIP_ICON_GAP;
+      int selected = home.category == i;
       fillGfxRectangleFixed(x, chipY, chipW, TREND_CHIP_HEIGHT,
-                            active ? activeTheme->rowHighlight : activeTheme->surface);
-      drawHomeIconFixed(&trendingChipIcons[i], x + pad,
-                        chipY + (TREND_CHIP_HEIGHT - TREND_CHIP_ICON_SIZE) / 2,
-                        active ? activeTheme->accent : activeTheme->textSecondary);
-      moveLabel(label, x + pad + TREND_CHIP_ICON_SIZE + TREND_CHIP_ICON_GAP,
+                            selected ? activeTheme->rowHighlight : activeTheme->surface);
+      if (iconSize > 0)
+         drawHomeIconFixed(&trendingChipIcons[i], x + pad,
+                           chipY + (TREND_CHIP_HEIGHT - TREND_CHIP_ICON_SIZE) / 2,
+                           selected ? activeTheme->accent : activeTheme->textSecondary);
+      moveLabel(label, x + pad + (iconSize > 0 ? iconSize + TREND_CHIP_ICON_GAP : 0),
                 getCenteredLabelY(label, chipY, TREND_CHIP_HEIGHT));
-      setLabelColor(label, active ? activeTheme->accent : activeTheme->textPrimary);
+      setLabelColor(label, selected ? activeTheme->accent : activeTheme->textPrimary);
       drawLabel(label);
       x += chipW + gap;
    }
@@ -1090,7 +1323,7 @@ static void drawLiveTabs(void)
 {
    int active = (int)home.liveCategory;
    int x = titleLabel.x + titleLabel.tt.tex.w + 18;
-   int right = home.screenW - MARGIN_X;
+   int right = homeSupportsSort() ? homeSortGroupLeft() - 14 : home.screenW - MARGIN_X;
    int pad = TREND_CHIP_PAD_X, gap = TREND_CHIP_GAP;
    for (int i = 0; i < LIVE_COUNT; i++) refreshLabelScale(&liveChipLabels[i]);
 
@@ -1111,6 +1344,12 @@ static void drawLiveTabs(void)
             }
          }
       }
+      if (!bestCount && x + liveChipLabels[active].tt.tex.w <= right) {
+         pad = 0;
+         gap = 0;
+      } else if (!bestCount) {
+         return;
+      }
    }
 
    int y = titleLabel.y + (titleLabel.tt.tex.h - TREND_CHIP_HEIGHT) / 2;
@@ -1127,24 +1366,12 @@ static void drawLiveTabs(void)
    }
 }
 
-// OSK confirmed: a link plays directly, anything else opens a search.
-static void onQueryEntered(const char *text)
-{
-   logInfo("[diag-search] home callback entered text=%s len=%d\n", text ? "present" : "NULL", text ? (int)strlen(text) : 0);
-   if (!text || !text[0]) { logInfo("[diag-search] home callback empty; return\n"); return; }
-   if (strstr(text, "youtu")) { logInfo("[diag-search] home URL path: stop grid\n"); stopVideoGrid(&home.grid); logInfo("[diag-search] home URL path: playVideo\n"); playVideo(text); return; }
-   logInfo("[diag-search] home query path: cacheCurrent begin\n");
-   cacheCurrent();
-   logInfo("[diag-search] home query path: cacheCurrent done; openSearchQuery begin\n");
-   openSearchQuery(text);
-   logInfo("[diag-search] home query path: openSearchQuery returned\n");
-}
-
 void handleHomeSidebarSelection(int picked)
 {
    switch (picked) {
       case SIDEBAR_SEARCH:
-         oskInputBegin("Search YouTube", "", onQueryEntered);
+         cacheCurrent();
+         openSearchPage();
          break;
       case SIDEBAR_RECOMMENDED:
          selectAccountFeed(ACCOUNT_FEED_HOME);
@@ -1183,6 +1410,9 @@ void handleHomeSidebarSelection(int picked)
       case SIDEBAR_PS3_WATCH_LATER:
          switchToCategory(HOME_WATCHLATER);
          break;
+      case SIDEBAR_PS3_PLAYLISTS:
+         switchToCategory(HOME_LOCAL_PLAYLISTS);
+         break;
       case SIDEBAR_ACCOUNT:
          openAccountPanel();
          break;
@@ -1200,6 +1430,17 @@ void handleHomeSidebarSelection(int picked)
 static void initHome(void)
 {
    home.pendingAccountCategory = -1;
+   home.pendingPlaylistOpen = 0;
+   home.playlistError = 0;
+   home.playlistReturnToSearch = 0;
+   home.playlistReturnLocal = 0;
+   home.playlistReturnCategory = -1;
+   home.playlistReturnSort = SORT_RELEVANCE;
+   home.playlistReturnQuery[0] = 0;
+   home.localPlaylistTab = 0;
+   home.sort = SORT_RELEVANCE;
+   home.playlistSort = PLAYLIST_SORT_NEWEST;
+   squarePressedAt = 0;
    home.liveCategory = LIVE_POPULAR;
    home.settingsOpen = 0;
    home.settingsSelected = 0;
@@ -1223,6 +1464,9 @@ static void initHome(void)
              home.screenW - 2 * MARGIN_X - categoryTitleOffset, AUTO, TITLE_SIZE,
              activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabel(&statusLabel, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, AUTO, 21, activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
+   initLabel(&playlistErrorLabel, &uiFont, MARGIN_X, 0, home.screenW - 2 * MARGIN_X, AUTO, 18,
+             activeTheme->textPrimary, TEXT_WRAP, "This playlist is private, restricted or unavailable.");
+   setLabelScaleWithUi(&playlistErrorLabel, 1);
    // Home heading/status grow by rerasterising their font, while retaining their
    // original anchors instead of being pushed off the 4:3 safe area.
    setLabelScaleWithUi(&titleLabel, 1);
@@ -1236,7 +1480,7 @@ static void initHome(void)
                       home.screenH - SD_HINTS_BOTTOM - maxGlyphHeight - SD_HINT_ROW_GAP,
                       HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
       addButtonHint(&hints, getConsoleGlyph(GLYPH_CROSS),    "Play");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE),   "Watch Later");
+      homeSquareHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE),   "Watch Later");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_TRIANGLE), "Channel");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R3),       "Download");
       setButtonHintsStableLayout(&hints, 1);
@@ -1248,11 +1492,13 @@ static void initHome(void)
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_L1), "");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R1), "Category");
       addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R2), "Refresh");
+      homeSortHint = addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_L2), "Sort");
       setButtonHintsStableLayout(&hintsSecondRow, 1);
+      setButtonHintGap(&hintsSecondRow, 8);
    } else {
       initButtonHints(&hints, &uiFont, home.screenH - HINTS_BOTTOM, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
       addButtonHint(&hints, getConsoleGlyph(GLYPH_CROSS),    "Play");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE),   "Watch Later");
+      homeSquareHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE),   "Watch Later");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_TRIANGLE), "Channel");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R3),       "Download");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT),  "Search");
@@ -1260,6 +1506,8 @@ static void initHome(void)
       addButtonHint(&hints, getConsoleGlyph(GLYPH_L1),       "");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R1),       "Category");
       addButtonHint(&hints, getConsoleGlyph(GLYPH_R2),       "Refresh");
+      homeSortHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L2), "Sort");
+      setButtonHintGap(&hints, 14);
    }
 
    int panelY = (home.screenH - getAccountPanelHeight()) / 2;
@@ -1366,6 +1614,25 @@ static void initHome(void)
                 activeTheme->textPrimary, TEXT_NOWRAP, LiveNames[i]);
       setLabelScaleWithUi(&liveChipLabels[i], 1);
    }
+   static const char *HomeSortNames[SORT_COUNT] = { "Relevance", "Views", "Newest" };
+   for (int i = 0; i < SORT_COUNT; i++) {
+      initLabel(&homeSortLabels[i], &uiFont, 0, 0, AUTO, AUTO, HOME_SORT_TEXT_SIZE,
+                activeTheme->textSecondary, TEXT_NOWRAP, HomeSortNames[i]);
+      setLabelScaleWithUi(&homeSortLabels[i], 1);
+   }
+   static const char *PlaylistSortNames[PLAYLIST_SORT_COUNT] = { "Newest", "A-Z" };
+   static const char *LocalPlaylistTabNames[2] = { "Watch Later", "PS3" };
+   for (int i = 0; i < PLAYLIST_SORT_COUNT; i++) {
+      initLabel(&playlistSortLabels[i], &uiFont, 0, 0, AUTO, AUTO, HOME_SORT_TEXT_SIZE,
+                activeTheme->textSecondary, TEXT_NOWRAP, PlaylistSortNames[i]);
+      setLabelScaleWithUi(&playlistSortLabels[i], 1);
+   }
+   for (int i = 0; i < 2; i++) {
+      initLabel(&localPlaylistTabLabels[i], &uiFont, 0, 0, AUTO, AUTO, TREND_CHIP_FONT_SIZE,
+                activeTheme->textPrimary, TEXT_NOWRAP, LocalPlaylistTabNames[i]);
+      setLabelScaleWithUi(&localPlaylistTabLabels[i], 1);
+   }
+   updateHomeSortHint();
    initButtonHints(&panelHints, &uiFont, panelY + getAccountPanelHeight() - 48, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
    panelConfirmHint = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CROSS),  "Try again");
    panelBackHint    = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CIRCLE), "Close");
@@ -1384,11 +1651,46 @@ static void initHome(void)
 
    subsRevisionSeen = getSubscriptionsRevision();
    watchLaterRevisionSeen = getWatchLaterRevision();
+   localPlaylistRevisionSeen = getLocalPlaylistRevision();
+   playlistWatchLaterRevisionSeen = getPlaylistWatchLaterRevision();
    accountRevisionSeen = getAccountRevision();
    // signed in, start on the account's Recommended feed; otherwise on Subscriptions, as before
    home.category = isSignedIn() ? HOME_ACCOUNT + ACCOUNT_FEED_HOME : HOME_SUBS;
    loadCategory();
    setSidebarForCategory();
+   updateHomeSortHint();
+}
+
+static int handleHomeSquareAction(const SearchResult *selected)
+{
+   if (squarePressedAt) {
+      if (isPadButtonDown(PAD_BTN_SQUARE) &&
+          getTimeUs() - squarePressedAt >= SQUARE_HOLD_US) {
+         squarePressedAt = 0;
+         openLocalPlaylistPicker(&squarePendingItem);
+         return 1;
+      }
+      if (isPadButtonReleased(PAD_BTN_SQUARE)) {
+         toggleWatchLater(&squarePendingItem);
+         watchLaterRevisionSeen = getWatchLaterRevision();
+         categoryCached[HOME_WATCHLATER] = 0;
+         if (home.category == HOME_WATCHLATER) loadCategory();
+         squarePressedAt = 0;
+         return 1;
+      }
+      return 1;
+   }
+   if (!isPadButtonPressed(PAD_BTN_SQUARE)) return 0;
+   if (selected->isPlaylist) {
+      if (!selected->isLocalPlaylist && addPlaylistToWatchLater(selected) == 0) {
+         playlistWatchLaterRevisionSeen = getPlaylistWatchLaterRevision();
+         if (home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 0) loadCategory();
+      }
+      return 1;
+   }
+   squarePendingItem = *selected;
+   squarePressedAt = getTimeUs();
+   return 1;
 }
 
 static void updateHome(void)
@@ -1447,8 +1749,29 @@ static void updateHome(void)
    // the grid and must move the selection normally.
    if (!isSidebarActive()) {
       if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+         if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS) {
+            switchToCategory(HOME_LOCAL_PLAYLISTS);
+            return;
+         }
          if (home.category == HOME_PLAYLIST_CONTENTS) {
-            switchToCategory(HOME_PLAYLISTS);
+            if (home.playlistReturnToSearch) {
+               char query[SEARCH_QUERY_LEN];
+               strCopy(query, sizeof query, home.playlistReturnQuery);
+               int returnCategory = home.playlistReturnCategory;
+               int returnSort = home.playlistReturnSort;
+               home.playlistReturnToSearch = 0;
+               home.playlistReturnLocal = 0;
+               home.playlistReturnCategory = -1;
+               home.playlistReturnSort = SORT_RELEVANCE;
+               home.playlistReturnQuery[0] = 0;
+               if (returnCategory >= 0 && returnCategory != home.category)
+                  switchToCategory(returnCategory);
+               openSearchQueryWithSort(query, returnSort);
+            } else if (home.playlistReturnLocal) {
+               switchToCategory(HOME_LOCAL_PLAYLISTS);
+            } else {
+               switchToCategory(HOME_PLAYLISTS);
+            }
             return;
          }
          openSidebar();
@@ -1467,9 +1790,21 @@ static void updateHome(void)
       return;
    }
 
-   if (isPadButtonPressed(PAD_BTN_SELECT)) { oskInputBegin("Search YouTube", "", onQueryEntered); return; }
+   if (isPadButtonPressed(PAD_BTN_SELECT)) { cacheCurrent(); openSearchPage(); return; }
    if (isPadButtonPressed(PAD_BTN_START)) { openHomeSettingsPanel(); return; }
    if (isPadButtonPressed(PAD_BTN_R2)) { refreshCurrentCategory(); return; }
+   if (isPadButtonPressed(PAD_BTN_L2) && homeSupportsSort()) {
+      home.sort = (SortOrder)((home.sort + 1) % SORT_COUNT);
+      setSortPreference(currentFeedSortPreference(), (int)home.sort);
+      refreshCurrentCategory();
+      return;
+   }
+   if (isPadButtonPressed(PAD_BTN_L2) && homeSupportsPlaylistSort()) {
+      home.playlistSort = (PlaylistSortOrder)((home.playlistSort + 1) % PLAYLIST_SORT_COUNT);
+      setSortPreference(currentPlaylistSortPreference(), (int)home.playlistSort);
+      refreshCurrentCategory();
+      return;
+   }
 
    // L1/R1 stay responsive even mid-load (the source swap is non-blocking)
    if      (isPadButtonPressed(PAD_BTN_R1)) { switchCategory(1);  return; }
@@ -1490,21 +1825,48 @@ static void updateHome(void)
 
    const SearchResult *selected = gridSelected(&home.grid);
    if (!selected) return;
+   if (squarePressedAt && handleHomeSquareAction(selected)) return;
+
    if (home.category == HOME_PLAYLISTS) {
+      if (homeSquareHint >= 0) {
+         setButtonHintCaption(&hints, homeSquareHint, "Save playlist");
+         setButtonHintShown(&hints, homeSquareHint, 1);
+      }
+      if (handleHomeSquareAction(selected)) return;
       if (isPadButtonPressed(PAD_BTN_CROSS) && selected->isPlaylist && selected->playlistId[0]) {
          strCopy(home.playlistId, sizeof home.playlistId, selected->playlistId);
          strCopy(home.playlistTitle, sizeof home.playlistTitle, selected->title);
-         switchToCategory(HOME_PLAYLIST_CONTENTS);
+         openHomePlaylist(selected->playlistId, selected->title);
       }
       return;
    }
-   if (isPadButtonPressed(PAD_BTN_SQUARE)) {
-      toggleWatchLater(selected);
-      watchLaterRevisionSeen = getWatchLaterRevision();
-      categoryCached[HOME_WATCHLATER] = 0;
-      if (home.category == HOME_WATCHLATER) loadCategory();   // reflect the add/remove immediately
+   if (home.category == HOME_LOCAL_PLAYLISTS) {
+      if (homeSquareHint >= 0) setButtonHintShown(&hints, homeSquareHint, 0);
+      if (isPadButtonPressed(PAD_BTN_CROSS) && selected->isPlaylist) {
+         if (home.localPlaylistTab == 0 && selected->playlistId[0]) {
+            home.playlistReturnToSearch = 0;
+            home.playlistReturnLocal = 1;
+            home.playlistReturnCategory = HOME_LOCAL_PLAYLISTS;
+            home.localPlaylistTab = 0;
+            home.playlistError = 0;
+            strCopy(home.playlistId, sizeof home.playlistId, selected->playlistId);
+            strCopy(home.playlistTitle, sizeof home.playlistTitle, selected->title);
+            switchToCategory(HOME_PLAYLIST_CONTENTS);
+         } else if (home.localPlaylistTab == 1 && selected->isLocalPlaylist && selected->localPlaylistId[0]) {
+            home.playlistReturnToSearch = 0;
+            home.playlistReturnLocal = 0;
+            strCopy(home.localPlaylistId, sizeof home.localPlaylistId, selected->localPlaylistId);
+            strCopy(home.playlistTitle, sizeof home.playlistTitle, selected->title);
+            switchToCategory(HOME_LOCAL_PLAYLIST_CONTENTS);
+         }
+      }
       return;
    }
+   if (homeSquareHint >= 0) {
+      setButtonHintCaption(&hints, homeSquareHint, "Watch Later (hold)");
+      setButtonHintShown(&hints, homeSquareHint, 1);
+   }
+   if (handleHomeSquareAction(selected)) return;
    if (isPadButtonPressed(PAD_BTN_R3)) { if (!selected->isLive) enqueueDownload(selected); return; }   // live can't be downloaded
    // Recommended tiles don't say which channel they are from
    if (isPadButtonPressed(PAD_BTN_TRIANGLE)) {
@@ -1544,7 +1906,15 @@ static void drawHome(void)
    refreshLabelScale(&titleLabel);
    refreshLabelScale(&statusLabel);
    fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->appBg);
-   if (gridStage(&home.grid) == GRID_READY) {
+   if (home.category == HOME_PLAYLIST_CONTENTS && home.playlistError) {
+      refreshLabelScale(&playlistErrorLabel);
+      int statusX = (home.screenW - playlistErrorLabel.tt.tex.w) / 2;
+      int statusY = (home.screenH - playlistErrorLabel.tt.tex.h) / 2;
+      fillGfxRoundedRectangleFixed(statusX - 18, statusY - 9,
+                                   playlistErrorLabel.tt.tex.w + 36, playlistErrorLabel.tt.tex.h + 18,
+                                   9, activeTheme->badgeFill);
+      drawLabelAt(&playlistErrorLabel, statusX, statusY);
+   } else if (gridStage(&home.grid) == GRID_READY) {
       drawVideoGrid(&home.grid);
    } else {
       setLabelText(&statusLabel, gridStage(&home.grid) == GRID_EMPTY ? "No results" : "Loading...");
@@ -1555,6 +1925,8 @@ static void drawHome(void)
    drawLabel(&titleLabel);
    if (home.category < TREND_COUNT) drawTrendingTabs();
    else if (home.category == HOME_LIVE) drawLiveTabs();
+   else if (home.category == HOME_LOCAL_PLAYLISTS) drawLocalPlaylistTabs();
+   if (homeSupportsSort() || homeSupportsPlaylistSort()) drawHomeSortPills();
    drawButtonHints(&hints, home.screenW);
    if (sdHintsTwoRows) drawButtonHints(&hintsSecondRow, home.screenW);
    drawDownloadOverlay(home.screenW);
@@ -1568,7 +1940,11 @@ static void drawHome(void)
    if (home.exitConfirmOpen) drawExitConfirmation();
 }
 
-static void suspendHome(void) { stopVideoGrid(&home.grid); }   // free the http pools for the pushed screen
+static void suspendHome(void)
+{
+   squarePressedAt = 0;
+   stopVideoGrid(&home.grid);   // free the http pools for the pushed screen
+}
 
 // returning from search/play: if the load was interrupted mid-flight (worker stopped), restart it; an
 // already-loaded grid is kept as-is (instant, thumbnails intact).
@@ -1595,6 +1971,15 @@ static void resumeHome(void)
       categoryCached[HOME_WATCHLATER] = 0;
       if (home.category == HOME_WATCHLATER) { loadCategory(); return; }
    }
+   if (getLocalPlaylistRevision() != localPlaylistRevisionSeen ||
+       getPlaylistWatchLaterRevision() != playlistWatchLaterRevisionSeen) {
+      localPlaylistRevisionSeen = getLocalPlaylistRevision();
+      playlistWatchLaterRevisionSeen = getPlaylistWatchLaterRevision();
+      if (home.category == HOME_LOCAL_PLAYLISTS || home.category == HOME_LOCAL_PLAYLIST_CONTENTS) {
+         loadCategory();
+         return;
+      }
+   }
    if (gridStage(&home.grid) != GRID_READY) loadCategory();
 }
 
@@ -1611,6 +1996,7 @@ static void termHome(void)
    termButtonHints(&panelHints);
    freeLabel(&titleLabel);
    freeLabel(&statusLabel);
+   freeLabel(&playlistErrorLabel);
    freeLabel(&panelTitle);
    freeLabel(&panelLine1);
    freeLabel(&panelLine2);
@@ -1639,6 +2025,9 @@ static void termHome(void)
       freeIcon(&trendingChipIcons[i]);
    }
    for (int i = 0; i < LIVE_COUNT; i++) freeLabel(&liveChipLabels[i]);
+   for (int i = 0; i < SORT_COUNT; i++) freeLabel(&homeSortLabels[i]);
+   for (int i = 0; i < PLAYLIST_SORT_COUNT; i++) freeLabel(&playlistSortLabels[i]);
+   for (int i = 0; i < 2; i++) freeLabel(&localPlaylistTabLabels[i]);
    closeFont(&uiFont);
 }
 

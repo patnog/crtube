@@ -600,8 +600,12 @@ static void thumbFetchThread(uint64_t arg)
          SearchResult *item = &grid->results.items[i];
          const char *thumbnailVideoId = item->videoId;
          if (item->isPlaylist) {
-            // Resolve a playlist's first video off the UI thread. Cached playlist results retain
-            // thumbnailVideoId, so revisiting the Playlists page does not repeat this browse call.
+            // Resolve remote playlist thumbnails off the UI thread. Local PS3 playlists carry their
+            // newest video's ID in the stored summary and must never trigger an account browse.
+            if (!item->thumbnailVideoId[0] && item->isLocalPlaylist) {
+               grid->thumbs[i].state = THUMB_FAILED;
+               continue;
+            }
             if (!item->thumbnailVideoId[0]) {
                SearchResults *playlistPage = (SearchResults *)malloc(sizeof *playlistPage);
                if (playlistPage) {
@@ -695,6 +699,93 @@ static void fetchThumbnailsRange(VideoGrid *grid, int from, int to)
    logInfo("[grid] thumbnail batch finished\n");
 }
 
+// Sort only metadata already returned by the feed. Unknown values remain at the end.
+#define GRID_AGE_UNKNOWN 2000000000L
+static long gridPublishedAgeSeconds(const char *published)
+{
+   const char *digit = published;
+   while (*digit && (*digit < '0' || *digit > '9')) digit++;
+   if (!*digit) return GRID_AGE_UNKNOWN;
+   long value = atol(digit);
+   if      (strstr(published, "second")) return value;
+   else if (strstr(published, "minute")) return value * 60;
+   else if (strstr(published, "hour"))   return value * 3600;
+   else if (strstr(published, "day"))    return value * 86400;
+   else if (strstr(published, "week"))   return value * 604800;
+   else if (strstr(published, "month"))  return value * 2592000;
+   else if (strstr(published, "year"))   return value * 31536000;
+   return GRID_AGE_UNKNOWN;
+}
+
+static double gridViewCount(const char *views)
+{
+   char number[32];
+   int used = 0, hasDigit = 0;
+   char suffix = 0;
+   for (const char *p = views; *p; p++) {
+      if (*p >= '0' && *p <= '9') {
+         if (used < (int)sizeof number - 1) number[used++] = *p;
+         hasDigit = 1;
+      } else if (*p == '.' && hasDigit && used < (int)sizeof number - 1) {
+         number[used++] = *p;
+      } else if (*p == ',') {
+         continue;
+      } else if (hasDigit) {
+         if (*p == 'k' || *p == 'K' || *p == 'm' || *p == 'M' || *p == 'b' || *p == 'B')
+            suffix = *p;
+         break;
+      }
+   }
+   if (!hasDigit) return -1.0;
+   number[used] = 0;
+   double value = atof(number);
+   if (suffix == 'k' || suffix == 'K') value *= 1000.0;
+   else if (suffix == 'm' || suffix == 'M') value *= 1000000.0;
+   else if (suffix == 'b' || suffix == 'B') value *= 1000000000.0;
+   return value;
+}
+
+static int comparePlaylistTitles(const char *a, const char *b)
+{
+   while (*a && *b) {
+      unsigned char ca = (unsigned char)*a++, cb = (unsigned char)*b++;
+      if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca - 'A' + 'a');
+      if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb - 'A' + 'a');
+      if (ca != cb) return ca < cb ? -1 : 1;
+   }
+   return (*a != 0) - (*b != 0);
+}
+
+static int gridResultBefore(const SearchResult *a, const SearchResult *b,
+                            int sortMode, int playlistSortMode)
+{
+   if (a->isPlaylist && b->isPlaylist && playlistSortMode == PLAYLIST_SORT_AZ)
+      return comparePlaylistTitles(a->title, b->title) < 0;
+   if (sortMode == SORT_VIEWS) {
+      double av = gridViewCount(a->views), bv = gridViewCount(b->views);
+      if (av < 0.0) return 0;
+      if (bv < 0.0) return 1;
+      return av > bv;
+   }
+   if (sortMode == SORT_NEWEST)
+      return gridPublishedAgeSeconds(a->published) < gridPublishedAgeSeconds(b->published);
+   return 0;
+}
+
+static void sortSearchResults(SearchResults *results, int sortMode, int playlistSortMode)
+{
+   if (sortMode == SORT_RELEVANCE && playlistSortMode != PLAYLIST_SORT_AZ) return;
+   for (int i = 1; i < results->count; i++) {
+      SearchResult item = results->items[i];
+      int j = i;
+      while (j > 0 && gridResultBefore(&item, &results->items[j - 1], sortMode, playlistSortMode)) {
+         results->items[j] = results->items[j - 1];
+         j--;
+      }
+      results->items[j] = item;
+   }
+}
+
 // append a fetched page's items, skipping duplicate video or playlist IDs. sortTokens (channel chips) are kept
 // from the first page - continuation pages don't carry them.
 static void appendPage(VideoGrid *grid, const SearchResults *page)
@@ -705,7 +796,11 @@ static void appendPage(VideoGrid *grid, const SearchResults *page)
       for (int j = 0; j < grid->results.count; j++) {
          const SearchResult *existing = &grid->results.items[j];
          if (item->isPlaylist && existing->isPlaylist) {
-            if (strcmp(existing->playlistId, item->playlistId) == 0) { duplicate = 1; break; }
+            const char *newId = item->isLocalPlaylist ? item->localPlaylistId : item->playlistId;
+            const char *oldId = existing->isLocalPlaylist ? existing->localPlaylistId : existing->playlistId;
+            if (item->isLocalPlaylist == existing->isLocalPlaylist && strcmp(oldId, newId) == 0) {
+               duplicate = 1; break;
+            }
          } else if (!item->isPlaylist && !existing->isPlaylist &&
                     strcmp(existing->videoId, item->videoId) == 0) {
             duplicate = 1;
@@ -797,6 +892,10 @@ static void worker(uint64_t arg)
       logInfo("[diag-grid] JOB_LOAD fetch begin grid=%p\n", grid);
       int rc = grid->fetch(NULL, &grid->results, grid->fetchUser);
       logInfo("[diag-grid] JOB_LOAD fetch returned rc=%d count=%d\n", rc, grid->results.count);
+      if (rc == 0 && (grid->sortMode != SORT_RELEVANCE || grid->playlistSortMode == PLAYLIST_SORT_AZ)) {
+         sortSearchResults(&grid->results, grid->sortMode, grid->playlistSortMode);
+         grid->selected = 0;
+      }
       if (rc == 0) applyMemberOnlyCacheRange(grid, 0, grid->results.count);
       // Publish the metadata before thumbnail work starts. drawVideoGrid() can render placeholders
       // immediately while the independent thumbnail workers fill the visible band and lookahead.
@@ -827,8 +926,13 @@ static void worker(uint64_t arg)
       SearchResults *page = (SearchResults *)malloc(sizeof *page);
       if (page && grid->fetch(grid->results.continuation, page, grid->fetchUser) == 0) {
          int base = grid->results.count;
+         if (grid->sortMode != SORT_RELEVANCE || grid->playlistSortMode == PLAYLIST_SORT_AZ)
+            sortSearchResults(page, grid->sortMode, grid->playlistSortMode);
          appendPage(grid, page);
          applyMemberOnlyCacheRange(grid, base, grid->results.count);
+         if ((grid->sortMode != SORT_RELEVANCE || grid->playlistSortMode == PLAYLIST_SORT_AZ) &&
+             grid->results.count > base)
+            grid->sortPendingFrom = base;
          if (grid->results.count == base) grid->results.continuation[0] = 0;   // nothing new: stop paging
       }
       free(page);
@@ -911,6 +1015,7 @@ static void resetFeed(VideoGrid *grid)
    grid->memberCheckIndex = -1;
    grid->memberIdleFrames = 0;
    grid->decodeIndex = -1;
+   grid->sortPendingFrom = -1;
    grid->selected = grid->scrollRow = grid->winStart = grid->winEnd = 0;
 }
 
@@ -1051,6 +1156,21 @@ static void formatGridTitle(VideoGrid *grid, const char *source, char *out, int 
    out[length] = 0;
 }
 
+static void playlistCountOnly(const char *source, char *out, int cap)
+{
+   int used = 0, started = 0;
+   for (const char *p = source; *p && used < cap - 1; p++) {
+      if ((*p >= '0' && *p <= '9') || (*p == '.' && started) ||
+          ((*p == 'K' || *p == 'M' || *p == 'B' || *p == 'k' || *p == 'm' || *p == 'b') && started)) {
+         out[used++] = *p;
+         started = 1;
+      } else if (*p == ',' && started) {
+         out[used++] = *p;
+      } else if (started) break;
+   }
+   out[used] = 0;
+}
+
 static void materializeTile(VideoGrid *grid, int i)
 {
    char meta[128];
@@ -1060,7 +1180,99 @@ static void materializeTile(VideoGrid *grid, int i)
    setLabelText(&grid->rows[i], title);
    composeMeta(meta, sizeof meta, item);
    setLabelText(&grid->metas[i], meta);
-   setLabelText(&grid->durations[i], item->isLive ? "LIVE" : item->duration);
+   if (item->isPlaylist) {
+      char count[24];
+      playlistCountOnly(item->duration, count, sizeof count);
+      setLabelText(&grid->durations[i], count);
+   } else {
+      setLabelText(&grid->durations[i], item->isLive ? "LIVE" : item->duration);
+   }
+}
+
+typedef struct {
+   SearchResult item;
+   GridThumb thumb;
+   GridMemberState member;
+   Label row, meta, duration;
+} GridSortEntry;
+
+static GridSortEntry takeGridSortEntry(VideoGrid *grid, int index)
+{
+   GridSortEntry entry;
+   entry.item = grid->results.items[index];
+   entry.thumb = grid->thumbs[index];
+   entry.member = grid->membersOnly[index];
+   entry.row = grid->rows[index];
+   entry.meta = grid->metas[index];
+   entry.duration = grid->durations[index];
+   return entry;
+}
+
+static void putGridSortEntry(VideoGrid *grid, int index, const GridSortEntry *entry)
+{
+   grid->results.items[index] = entry->item;
+   grid->thumbs[index] = entry->thumb;
+   grid->membersOnly[index] = entry->member;
+   grid->rows[index] = entry->row;
+   grid->metas[index] = entry->meta;
+   grid->durations[index] = entry->duration;
+}
+
+// Merge only the newly appended, already-sorted page into the accumulated list. This runs after the
+// fetch worker is joined, so the UI never observes items moving underneath drawVideoGrid().
+static void mergeSortedPage(VideoGrid *grid, int firstNew)
+{
+   int newCount = grid->results.count - firstNew;
+   int shifted = 0;
+   char selectedId[64] = "";
+   int selectedIsPlaylist = 0;
+   if (grid->selected >= 0 && grid->selected < grid->results.count) {
+      const SearchResult *selected = &grid->results.items[grid->selected];
+      selectedIsPlaylist = selected->isPlaylist;
+      strCopy(selectedId, sizeof selectedId, selectedIsPlaylist
+              ? (selected->isLocalPlaylist ? selected->localPlaylistId : selected->playlistId)
+              : selected->videoId);
+   }
+   for (int n = 0; n < newCount; n++) {
+      int index = firstNew + n + shifted;
+      GridSortEntry entry = takeGridSortEntry(grid, index);
+      int position = index;
+      while (position > 0 && gridResultBefore(&entry.item, &grid->results.items[position - 1], grid->sortMode, grid->playlistSortMode))
+         position--;
+      if (position == index) continue;
+
+      for (int j = index; j > position; j--) {
+         GridSortEntry previous = takeGridSortEntry(grid, j - 1);
+         putGridSortEntry(grid, j, &previous);
+      }
+      putGridSortEntry(grid, position, &entry);
+      shifted++;
+
+      if (grid->decodeIndex >= position) grid->decodeIndex++;
+      if (grid->thumbRequestIndex >= position) grid->thumbRequestIndex++;
+      if (grid->memberCheckIndex >= position) grid->memberCheckIndex++;
+
+      if (position < grid->winStart) {
+         grid->winStart++;
+         grid->winEnd++;
+      } else if (position < grid->winEnd) {
+         grid->winEnd++;
+         materializeTile(grid, position);
+      }
+   }
+   if (selectedId[0]) {
+      for (int i = 0; i < grid->results.count; i++) {
+         const SearchResult *item = &grid->results.items[i];
+         const char *itemId = selectedIsPlaylist
+            ? (item->isLocalPlaylist ? item->localPlaylistId : item->playlistId) : item->videoId;
+         if (selectedIsPlaylist == item->isPlaylist && strcmp(itemId, selectedId) == 0) {
+            grid->selected = i;
+            break;
+         }
+      }
+   }
+   grid->thumbRequestIndex = -1;
+   grid->thumbRequestEnd = 0;
 }
 
 static void dematerializeTile(VideoGrid *grid, int i)
@@ -1173,6 +1385,7 @@ void initVideoGrid(VideoGrid *grid, Font *font, int x, int y, int width, int hei
    memset(grid, 0, sizeof *grid);
    grid->decodeIndex = -1;
    grid->thumbRequestIndex = -1;
+   grid->sortPendingFrom = -1;
    grid->font = font;
    grid->x = x; grid->y = y; grid->width = width; grid->height = height;
    int sdOutput = isGfxSdVideoOutput();
@@ -1251,6 +1464,28 @@ void termVideoGrid(VideoGrid *grid)
 void setGridWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *videoId)) { grid->isWatched = isWatched; }
 void setGridWatchedPosition(VideoGrid *grid, int (*watchedPosition)(const char *videoId)) { grid->watchedPosition = watchedPosition; }
 void setGridWatchLaterPredicate(VideoGrid *grid, int (*isWatchLater)(const char *videoId)) { grid->isWatchLater = isWatchLater; }
+void setGridSortMode(VideoGrid *grid, SortOrder mode) { if (grid) grid->sortMode = mode >= SORT_RELEVANCE && mode < SORT_COUNT ? mode : SORT_RELEVANCE; }
+void setGridPlaylistSortMode(VideoGrid *grid, PlaylistSortOrder mode)
+{
+   if (grid) grid->playlistSortMode = mode >= PLAYLIST_SORT_NEWEST && mode < PLAYLIST_SORT_COUNT ? mode : PLAYLIST_SORT_NEWEST;
+}
+void setGridSortByPublished(VideoGrid *grid, int enabled) { setGridSortMode(grid, enabled ? SORT_NEWEST : SORT_RELEVANCE); }
+
+void setGridInputSuppressed(VideoGrid *grid, int suppressed)
+{
+   suppressed = suppressed ? 1 : 0;
+   if (grid->inputSuppressed == suppressed) return;
+   grid->inputSuppressed = suppressed;
+   grid->horizontalRepeat.timer = getTimeUs();
+   grid->horizontalRepeat.repeats = 0;
+   grid->verticalRepeat.timer = getTimeUs();
+   grid->verticalRepeat.repeats = 0;
+}
+
+void setGridFocusHidden(VideoGrid *grid, int hidden)
+{
+   grid->focusHidden = hidden ? 1 : 0;
+}
 
 // both source-changes are non-blocking: if a load is in flight, ask it to stop and defer the swap until the
 // reap in updateVideoGrid, so mode / category switches never freeze the frame on an in-flight fetch.
@@ -1283,7 +1518,13 @@ void updateVideoGrid(VideoGrid *grid)
    // reap a finished worker; a deferred source swap then resets and starts the new feed
    if (grid->workerDone && grid->threadActive) {
       joinThread(grid->workerTid); grid->threadActive = 0;
-      if (grid->reloadPending) { grid->reloadPending = 0; applyDeferredSource(grid); }
+      if (grid->reloadPending) {
+         grid->reloadPending = 0;
+         applyDeferredSource(grid);
+      } else if (grid->sortPendingFrom >= 0) {
+         mergeSortedPage(grid, grid->sortPendingFrom);
+         grid->sortPendingFrom = -1;
+      }
    }
    if (grid->stage != GRID_READY) return;
 
@@ -1292,21 +1533,25 @@ void updateVideoGrid(VideoGrid *grid)
    decodeWindowThumbnails(grid);
 
    if (!grid->backgroundPaused) {
-      if      (isRepeatDue(&grid->horizontalRepeat, getPadButtonState(PAD_BTN_RIGHT))) moveSelection(grid, 1);
-      else if (isRepeatDue(&grid->horizontalRepeat, getPadButtonState(PAD_BTN_LEFT)))  moveSelection(grid, -1);
-      if      (isRepeatDue(&grid->verticalRepeat,   getPadButtonState(PAD_BTN_DOWN)))  moveSelection(grid, grid->columns);
-      else if (isRepeatDue(&grid->verticalRepeat,   getPadButtonState(PAD_BTN_UP)))    moveSelection(grid, -grid->columns);
+      if (!grid->inputSuppressed) {
+         if      (isRepeatDue(&grid->horizontalRepeat, getPadButtonState(PAD_BTN_RIGHT))) moveSelection(grid, 1);
+         else if (isRepeatDue(&grid->horizontalRepeat, getPadButtonState(PAD_BTN_LEFT)))  moveSelection(grid, -1);
+         if      (isRepeatDue(&grid->verticalRepeat,   getPadButtonState(PAD_BTN_DOWN)))  moveSelection(grid, grid->columns);
+         else if (isRepeatDue(&grid->verticalRepeat,   getPadButtonState(PAD_BTN_UP)))    moveSelection(grid, -grid->columns);
 
-      PadButtonState right = getPadButtonState(PAD_BTN_RIGHT);
-      PadButtonState left  = getPadButtonState(PAD_BTN_LEFT);
-      PadButtonState down  = getPadButtonState(PAD_BTN_DOWN);
-      PadButtonState up    = getPadButtonState(PAD_BTN_UP);
-      int navigating = right == PAD_BUTTON_STATE_PRESSED || right == PAD_BUTTON_STATE_HELD ||
-                       left == PAD_BUTTON_STATE_PRESSED || left == PAD_BUTTON_STATE_HELD ||
-                       down == PAD_BUTTON_STATE_PRESSED || down == PAD_BUTTON_STATE_HELD ||
-                       up == PAD_BUTTON_STATE_PRESSED || up == PAD_BUTTON_STATE_HELD;
-      if (navigating) grid->memberIdleFrames = 0;
-      else if (grid->memberIdleFrames < MEMBER_IDLE_FRAMES) grid->memberIdleFrames++;
+         PadButtonState right = getPadButtonState(PAD_BTN_RIGHT);
+         PadButtonState left  = getPadButtonState(PAD_BTN_LEFT);
+         PadButtonState down  = getPadButtonState(PAD_BTN_DOWN);
+         PadButtonState up    = getPadButtonState(PAD_BTN_UP);
+         int navigating = right == PAD_BUTTON_STATE_PRESSED || right == PAD_BUTTON_STATE_HELD ||
+                          left == PAD_BUTTON_STATE_PRESSED || left == PAD_BUTTON_STATE_HELD ||
+                          down == PAD_BUTTON_STATE_PRESSED || down == PAD_BUTTON_STATE_HELD ||
+                          up == PAD_BUTTON_STATE_PRESSED || up == PAD_BUTTON_STATE_HELD;
+         if (navigating) grid->memberIdleFrames = 0;
+         else if (grid->memberIdleFrames < MEMBER_IDLE_FRAMES) grid->memberIdleFrames++;
+      } else {
+         grid->memberIdleFrames = 0;
+      }
    } else {
       grid->memberIdleFrames = 0;
    }
@@ -1367,7 +1612,7 @@ static void drawTile(VideoGrid *grid, int i)
    int watched = progressWidth == 0 && !item->isPlaylist && !item->isLive &&
                  grid->isWatched && grid->isWatched(item->videoId);
 
-   if (i == grid->selected) {
+   if (i == grid->selected && !grid->focusHidden) {
       int ring = activeTheme->focusThickness;
       fillGfxRectangleFixed(tx - ring, ty - ring, grid->tileW + 2 * ring, grid->thumbH + 2 * ring, activeTheme->focusBorder);
    }
@@ -1384,7 +1629,27 @@ static void drawTile(VideoGrid *grid, int i)
    int padX = 6;
    int padY = 4;
    int edgeGap = 6;
-   if (item->duration[0] || item->isLive) {
+   if (item->isPlaylist && grid->durations[i].tt.tex.w > 0) {
+      float scale = getGfxUiScaleFactor();
+      int badgePadX = (int)(padX * scale + 0.5f);
+      int badgePadY = (int)(padY * scale + 0.5f);
+      int badgeEdgeGap = (int)(edgeGap * scale + 0.5f);
+      int iconW = (int)(14 * scale + 0.5f);
+      int lineH = (int)(2 * scale + 0.5f);
+      int iconGap = (int)(5 * scale + 0.5f);
+      int lineGap = (int)(1.5f * scale + 0.5f);
+      int badgeW = iconW + iconGap + grid->durations[i].tt.tex.w + 2 * badgePadX;
+      int badgeH = grid->durations[i].tt.tex.h + 2 * badgePadY;
+      int badgeX = tx + grid->tileW - badgeW - badgeEdgeGap;
+      int badgeY = ty + grid->thumbH - badgeH - badgeEdgeGap;
+      fillGfxRoundedRectangleFixed(badgeX, badgeY, badgeW, badgeH, badgeH / 3, activeTheme->badgeFill);
+      int lineX = badgeX + badgePadX;
+      int lineY = badgeY + (badgeH - lineH * 3 - lineGap * 2) / 2;
+      fillGfxRectangleFixed(lineX, lineY, iconW, lineH, activeTheme->textPrimary);
+      fillGfxRectangleFixed(lineX, lineY + lineH + lineGap, iconW, lineH, activeTheme->textPrimary);
+      fillGfxRectangleFixed(lineX, lineY + 2 * (lineH + lineGap), iconW, lineH, activeTheme->textPrimary);
+      drawLabelAt(&grid->durations[i], lineX + iconW + iconGap, badgeY + badgePadY);
+   } else if (!item->isPlaylist && (item->duration[0] || item->isLive)) {
       int badgeW = grid->durations[i].tt.tex.w + 2 * padX;
       int badgeH = grid->durations[i].tt.tex.h + 2 * padY;
       int badgeX = tx + grid->tileW - badgeW - edgeGap, badgeY = ty + grid->thumbH - badgeH - edgeGap;

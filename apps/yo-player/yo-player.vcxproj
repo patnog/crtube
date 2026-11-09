@@ -43,6 +43,7 @@
    <ClCompile Include="src\screens\home.c" />
    <ClCompile Include="src\screens\play.c" />
    <ClCompile Include="src\screens\search.c" />
+   <ClCompile Include="src\screens\playlist-picker.c" />
    <ClCompile Include="src\video-grid.c" />
    <ClCompile Include="src\storage.c" />
    <ClCompile Include="src\stream-select.c" />
@@ -64,6 +65,7 @@
    <ClInclude Include="include\screens\home.h" />
    <ClInclude Include="include\screens\play.h" />
    <ClInclude Include="include\screens\search.h" />
+   <ClInclude Include="include\screens\playlist-picker.h" />
    <ClInclude Include="include\video-grid.h" />
    <ClInclude Include="include\storage.h" />
    <ClInclude Include="include\stream-select.h" />

@@ -170,6 +170,129 @@ void drawButtonHints(ButtonHints *bar, int screenWidth)
    drawButtonHintsAt(bar, (screenWidth - total) / 2);
 }
 
+#define HINT_FIT_MAX_ROWS 3
+
+typedef struct {
+   int indices[MAX_BUTTON_HINTS];
+   int counts[HINT_FIT_MAX_ROWS];
+   int widths[HINT_FIT_MAX_ROWS];
+   int rows;
+} HintFitLayout;
+
+static int hintFitRowWidth(const ButtonHints *bar, const int *widths,
+                           const int *indices, int start, int end)
+{
+   int total = 0;
+   for (int i = start; i < end; i++) {
+      total += widths[indices[i]];
+      if (i + 1 < end)
+         total += hintRowGap(bar, bar->hints[indices[i]].pairNext);
+   }
+   return total;
+}
+
+static int buildHintFitLayout(ButtonHints *bar, int screenWidth, int maxRows,
+                              HintFitLayout *layout)
+{
+   int widths[MAX_BUTTON_HINTS];
+   int visible = 0;
+   const int inf = 0x3fffffff;
+   int dp[HINT_FIT_MAX_ROWS + 1][MAX_BUTTON_HINTS + 1];
+   int previous[HINT_FIT_MAX_ROWS + 1][MAX_BUTTON_HINTS + 1];
+
+   memset(layout, 0, sizeof *layout);
+   refreshHintCaptionSizes(bar);
+   if (maxRows < 1) maxRows = 1;
+   if (maxRows > HINT_FIT_MAX_ROWS) maxRows = HINT_FIT_MAX_ROWS;
+
+   for (int i = 0; i < bar->count; i++) {
+      ButtonHint *hint = &bar->hints[i];
+      if (hint->hidden) continue;
+      layout->indices[visible] = i;
+      widths[i] = hintGlyphSize(bar, hint->drawWidth);
+      if (!hint->pairNext)
+         widths[i] += hintIconGap(bar) + hint->caption.tt.tex.w;
+      visible++;
+   }
+   if (visible == 0) return 0;
+
+   for (int r = 0; r <= HINT_FIT_MAX_ROWS; r++)
+      for (int i = 0; i <= MAX_BUTTON_HINTS; i++) {
+         dp[r][i] = inf;
+         previous[r][i] = -1;
+      }
+   dp[0][0] = 0;
+
+   for (int r = 1; r <= maxRows; r++) {
+      for (int end = r; end <= visible; end++) {
+         for (int start = r - 1; start < end; start++) {
+            if (dp[r - 1][start] == inf) continue;
+            int rowWidth = hintFitRowWidth(bar, widths, layout->indices, start, end);
+            int candidate = dp[r - 1][start] > rowWidth ? dp[r - 1][start] : rowWidth;
+            if (candidate < dp[r][end]) {
+               dp[r][end] = candidate;
+               previous[r][end] = start;
+            }
+         }
+      }
+   }
+
+   float scale = hintCurrentScale();
+   int capacity = (int)(screenWidth / scale + 0.5f);
+   int chosen = 0;
+   for (int r = 1; r <= maxRows; r++) {
+      if (dp[r][visible] <= capacity) { chosen = r; break; }
+   }
+   if (!chosen) {
+      chosen = 1;
+      for (int r = 2; r <= maxRows; r++)
+         if (dp[r][visible] < dp[chosen][visible]) chosen = r;
+   }
+
+   int end = visible;
+   for (int r = chosen; r >= 1; r--) {
+      int start = previous[r][end];
+      if (start < 0) start = 0;
+      layout->counts[r - 1] = end - start;
+      layout->widths[r - 1] = hintFitRowWidth(bar, widths, layout->indices, start, end);
+      end = start;
+   }
+   layout->rows = chosen;
+   return chosen;
+}
+
+int getButtonHintsFitRows(ButtonHints *bar, int screenWidth, int maxRows)
+{
+   HintFitLayout layout;
+   if (!bar) return 0;
+   return buildHintFitLayout(bar, screenWidth, maxRows, &layout);
+}
+
+int drawButtonHintsFitted(ButtonHints *bar, int screenWidth, int bottomY, int rowGap, int maxRows)
+{
+   HintFitLayout layout;
+   int rows = buildHintFitLayout(bar, screenWidth, maxRows, &layout);
+   if (rows <= 0) return 0;
+
+   float scale = hintCurrentScale();
+   float centerY = getGfxScreenHeight() * 0.5f;
+   int glyphHeight = (int)(hintGlyphSize(bar, bar->glyphHeight) * scale + 0.5f);
+   int rowStep = glyphHeight + rowGap;
+   int rowOffset = 0;
+   for (int row = 0; row < rows; row++) {
+      int targetY = bottomY - (rows - 1 - row) * rowStep;
+      int y = (int)(centerY + (targetY - centerY) / scale + 0.5f);
+      int x = (screenWidth - layout.widths[row]) / 2;
+      for (int j = 0; j < layout.counts[row]; j++) {
+         int hintIndex = layout.indices[rowOffset++];
+         x = drawHint(bar, &bar->hints[hintIndex], x, y);
+         if (j + 1 < layout.counts[row])
+            x += hintRowGap(bar, bar->hints[hintIndex].pairNext);
+      }
+   }
+   return rows;
+}
+
 void termButtonHints(ButtonHints *bar)
 {
    for (int i = 0; i < bar->count; i++) freeLabel(&bar->hints[i].caption);

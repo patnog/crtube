@@ -71,10 +71,17 @@ typedef struct {
    int  isPlaylist;        // 1 = account playlist tile; it is opened by playlistId, not videoId
    char playlistId[64];    // YouTube playlist id, without the VL browse prefix
    char thumbnailVideoId[16]; // first video resolved asynchronously for a playlist tile
+   int  isLocalPlaylist;   // PS3-managed playlist; contents are stored locally
+   char localPlaylistId[16]; // stable local playlist key (not a YouTube playlist id)
 } SearchResult;
 
 #define MAX_CONTINUATION 4096   // youtube "load more" tokens are long base64 blobs
 #define MAX_SORT_TOKEN   512    // a channel sort chip's continuation token
+
+// Playlist browse failures used by the UI to show an access/unavailable message.
+#define PLAYLIST_FETCH_PRIVATE     (-2001)
+#define PLAYLIST_FETCH_RESTRICTED  (-2002)
+#define PLAYLIST_FETCH_UNAVAILABLE (-2003)
 
 typedef struct {
    int          count;
@@ -107,13 +114,19 @@ typedef enum {
    LIVE_COUNT
 } LiveCategory;
 
-// search result ordering. YouTube's newer WEB API only offers these two sorts (its "Prioritize" menu
-// dropped date-sort); the search screen switches them with L1/R1. keep SortNames in sync.
+// Search result ordering. Keep the enum aligned with SEARCH_SORT_PARAMS and the search screen labels.
 typedef enum {
    SORT_RELEVANCE,
    SORT_VIEWS,
+   SORT_NEWEST,
    SORT_COUNT
 } SortOrder;
+
+typedef enum {
+   PLAYLIST_SORT_NEWEST,
+   PLAYLIST_SORT_AZ,
+   PLAYLIST_SORT_COUNT
+} PlaylistSortOrder;
 
 // a channel Videos feed's sort chips. index matches SearchResults.sortTokens. keep ChannelSortNames in
 // the search screen in sync with this order.

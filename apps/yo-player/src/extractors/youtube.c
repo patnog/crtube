@@ -79,11 +79,13 @@ static const char *LIVE_BODY_FMT =
    "{\"context\":{\"client\":{" LIVE_CLIENT ",\"visitorData\":\"%s\"}},\"videoId\":\"%s\",\"contentCheckOk\":true,\"racyCheckOk\":true}";
 
 static const char *VISITOR_BODY   = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"}}}";   // visitor session stays on its original fixed region
-// search params combine the "Videos" filter (drops the Shorts shelf, channels and playlists) with a sort
-// order. index by SortOrder. canonical values from youtube's own filter menu. three %s: gl, escaped query, params.
+// Search keeps YouTube's mixed result types (videos and playlists). These params apply only the sort
+// order; the previous video-type filter hid every playlist. Newest remains best-effort server-side and
+// VideoGrid also sorts fetched video pages locally by published age.
 static const char *SEARCH_SORT_PARAMS[SORT_COUNT] = {
-   "EgIQAQ==",   // SORT_RELEVANCE (youtube's default)
-   "CAMSAhAB",   // SORT_VIEWS (popularity / view count, highest first)
+   "",       // SORT_RELEVANCE (youtube default, no filter)
+   "CAM=",   // SORT_VIEWS (view-count sort only)
+   "CAI=",   // SORT_NEWEST (upload-date sort only)
 };
 #define SEARCH_BODY_FMT WEB_CONTEXT_FMT ",\"query\":\"%s\",\"params\":\"%s\"}"
 // trending feed. YouTube retired the aggregated Trending page in 2025 (FEtrending now redirects to an empty
@@ -1304,11 +1306,11 @@ static void readField(const char *block, const char *end, const char *container,
    if (pos && pos < end) jsonString(pos, end, key, out, cap);
 }
 
-// the next feed item at or after `from`. search uses "videoRenderer", trending shelves "gridVideoRenderer",
-// and channel pages the newer "lockupViewModel". returns the nearest of the three (NULL if none).
+// the next feed item at or after `from`. Search can return videos, playlists and newer lockups;
+// trending shelves use gridVideoRenderer. Returns the nearest item (NULL if none).
 static const char *nextItemBlock(const char *from)
 {
-   static const char *keys[] = { "\"videoRenderer\"", "\"gridVideoRenderer\"", "\"lockupViewModel\"" };
+   static const char *keys[] = { "\"videoRenderer\"", "\"gridVideoRenderer\"", "\"lockupViewModel\"", "\"playlistRenderer\":{" };
    const char *best = NULL;
    for (unsigned i = 0; i < sizeof keys / sizeof keys[0]; i++) {
       const char *hit = strstr(from, keys[i]);
@@ -1321,6 +1323,116 @@ static int isDuplicate(const SearchResults *out, const char *videoId)
 {
    for (int i = 0; i < out->count; i++) if (strcmp(out->items[i].videoId, videoId) == 0) return 1;
    return 0;
+}
+
+static int isDuplicatePlaylist(const SearchResults *out, const char *playlistId)
+{
+   for (int i = 0; i < out->count; i++)
+      if (out->items[i].isPlaylist && strcmp(out->items[i].playlistId, playlistId) == 0) return 1;
+   return 0;
+}
+
+static int isSearchPlaylistId(const char *id)
+{
+   int length = (int)strlen(id);
+   if (length < 2 || length > 61) return 0;
+   for (const char *p = id; *p; p++) {
+      if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+            (*p >= '0' && *p <= '9') || *p == '-' || *p == '_')) return 0;
+   }
+   return 1;
+}
+
+static void readPlaylistThumbnailVideoId(const char *block, const char *end, char *out, int cap)
+{
+   const char *scan = block;
+   while ((scan = strstr(scan, "\"url\":\"")) != NULL && scan < end) {
+      char url[256];
+      if (jsonString(scan, end, "url", url, sizeof url)) {
+         const char *video = strstr(url, "/vi/");
+         if (video) {
+            video += 4;
+            const char *slash = strchr(video, '/');
+            if (slash && slash - video == 11 && cap > 11) {
+               int valid = 1;
+               for (int i = 0; i < 11; i++) {
+                  char c = video[i];
+                  if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '-' || c == '_')) valid = 0;
+               }
+               if (valid) { memcpy(out, video, 11); out[11] = 0; return; }
+            }
+         }
+      }
+      scan += 7;
+   }
+   if (cap) out[0] = 0;
+}
+
+static void readObjectStringField(const char *block, const char *end, const char *objectKey,
+                                  const char *valueKey, char *out, int cap)
+{
+   const char *objectEnd = NULL;
+   const char *object = jsonObjectForKey(block, end, objectKey, &objectEnd);
+   if (!object || !jsonString(object, objectEnd, valueKey, out, cap)) {
+      if (cap) out[0] = 0;
+   }
+}
+
+static void readObjectTextField(const char *block, const char *end, const char *objectKey,
+                                char *out, int cap)
+{
+   readObjectStringField(block, end, objectKey, "text", out, cap);
+   if (!out[0]) readObjectStringField(block, end, objectKey, "simpleText", out, cap);
+}
+
+static void readPlaylistCount(const char *block, const char *end, char *out, int cap)
+{
+   readObjectTextField(block, end, "videoCountText", out, cap);
+   if (!out[0]) readObjectTextField(block, end, "videoCountShortText", out, cap);
+   if (!out[0]) readObjectTextField(block, end, "thumbnailText", out, cap);
+   if (!out[0]) {
+      char countText[16];
+      if (jsonString(block, end, "videoCount", countText, sizeof countText)) {
+         snprintf(out, cap, "%s videos", countText);
+      } else {
+         int count = 0;
+         if (jsonInt(block, end, "videoCount", &count) && count >= 0)
+            snprintf(out, cap, "%d videos", count);
+      }
+   }
+}
+
+static int parsePlaylistRenderer(const char *block, const char *end, SearchResult *item)
+{
+   const char *open = strchr(block, '{');
+   if (!open || open >= end) return 0;
+   const char *close = jsonObjectEnd(open, end);
+   if (!close || close > end) close = end;
+   if (!jsonString(open, close, "playlistId", item->playlistId, sizeof item->playlistId) ||
+       !isSearchPlaylistId(item->playlistId)) return 0;
+   readObjectTextField(open, close, "title", item->title, sizeof item->title);
+   if (!item->title[0]) return 0;
+   readObjectTextField(open, close, "shortBylineText", item->author, sizeof item->author);
+   readPlaylistCount(open, close, item->duration, sizeof item->duration);
+   readPlaylistThumbnailVideoId(open, close, item->thumbnailVideoId, sizeof item->thumbnailVideoId);
+   item->isPlaylist = 1;
+   return 1;
+}
+
+static int parseLockupPlaylistItem(const char *block, const char *end, SearchResult *item)
+{
+   const char *playlistType = strstr(block, "\"contentType\":\"LOCKUP_CONTENT_TYPE_PLAYLIST\"");
+   if (!playlistType || playlistType >= end) return 0;
+   if (!jsonString(block, end, "contentId", item->playlistId, sizeof item->playlistId) ||
+       !isSearchPlaylistId(item->playlistId)) return 0;
+   readObjectStringField(block, end, "lockupMetadataViewModel", "content", item->title, sizeof item->title);
+   if (!item->title[0]) return 0;
+   readField(block, end, "\"metadataParts\"", "content", item->author, sizeof item->author);
+   readObjectTextField(block, end, "thumbnailBadgeViewModel", item->duration, sizeof item->duration);
+   readPlaylistThumbnailVideoId(block, end, item->thumbnailVideoId, sizeof item->thumbnailVideoId);
+   item->isPlaylist = 1;
+   return 1;
 }
 
 // copy the first "content":"..." value within [from,end) whose text ends with `suffix` (e.g. " views",
@@ -1392,9 +1504,8 @@ static int parseLockupItem(const char *block, const char *end, SearchResult *ite
    return item->title[0] != 0;
 }
 
-// scan a WEB innertube response for feed items (search, trending shelves and channel pages use different
-// renderers, dispatched per block) and fill out->items. dedupes by videoId - youtube repeats a
-// video across shelves.
+// Scan WEB innertube feed items. Search can mix videoRenderer and playlistRenderer; newer surfaces
+// may use lockupViewModel. Videos and playlists are deduplicated by their respective IDs.
 static void parseVideoResults(const char *resp, int respLen, SearchResults *out)
 {
    const char *end = resp + respLen;
@@ -1407,13 +1518,17 @@ static void parseVideoResults(const char *resp, int respLen, SearchResults *out)
 
       SearchResult *item = &out->items[out->count];
       memset(item, 0, sizeof *item);
-      int ok = (strncmp(block + 1, "lockupViewModel", 15) == 0)
-             ? parseLockupItem(block, blockEnd, item)
-             : parseRendererItem(block, blockEnd, item);
+      int isPlaylistRenderer = strncmp(block + 1, "playlistRenderer", 15) == 0;
+      int isLockup = strncmp(block + 1, "lockupViewModel", 15) == 0;
+      int ok = isPlaylistRenderer ? parsePlaylistRenderer(block, blockEnd, item) :
+               isLockup ? (parseLockupPlaylistItem(block, blockEnd, item) ||
+                           parseLockupItem(block, blockEnd, item)) :
+               parseRendererItem(block, blockEnd, item);
       // drop members-only videos: they resolve to UNPLAYABLE for an anonymous session (no stream, no author)
       const char *membersBadge = strstr(block, "Members only");
-      if (membersBadge && membersBadge < blockEnd) ok = 0;
-      if (ok && !isDuplicate(out, item->videoId)) out->count++;
+      if (!item->isPlaylist && membersBadge && membersBadge < blockEnd) ok = 0;
+      if (ok && (item->isPlaylist ? !isDuplicatePlaylist(out, item->playlistId)
+                                  : !isDuplicate(out, item->videoId))) out->count++;
       scan = blockEnd;
    }
 
@@ -1622,12 +1737,153 @@ static int fetchAccountPlaylists(const char *continuation, SearchResults *out)
    return fetchTvCustomBrowse(body, bodyLen, out, parseTvPlaylists);
 }
 
+static int classifyPlaylistError(const char *resp, int status)
+{
+   if (status == 401 || status == 403) return PLAYLIST_FETCH_RESTRICTED;
+   if (status == 404 || status == 410) return PLAYLIST_FETCH_UNAVAILABLE;
+   if (resp) {
+      if (strstr(resp, "PLAYLIST_PRIVATE") || strstr(resp, "This playlist is private") ||
+          strstr(resp, "playlist is private") || strstr(resp, "PRIVATE_PLAYLIST") ||
+          strstr(resp, "private playlist"))
+         return PLAYLIST_FETCH_PRIVATE;
+      if (strstr(resp, "LOGIN_REQUIRED") || strstr(resp, "Members only") ||
+          strstr(resp, "members only") || strstr(resp, "AGE_RESTRICTED") ||
+          strstr(resp, "UNAUTHENTICATED") || strstr(resp, "UNPLAYABLE") ||
+          strstr(resp, "CONTENT_CHECK_REQUIRED") || strstr(resp, "AGE_CHECK_REQUIRED") ||
+          strstr(resp, "restricted"))
+         return PLAYLIST_FETCH_RESTRICTED;
+      if (strstr(resp, "Playlist not found") || strstr(resp, "playlist not found") ||
+          strstr(resp, "This playlist is unavailable") || strstr(resp, "playlist is unavailable") ||
+          strstr(resp, "not available") || strstr(resp, "Video unavailable"))
+         return PLAYLIST_FETCH_UNAVAILABLE;
+   }
+   return PLAYLIST_FETCH_UNAVAILABLE;
+}
+
+static void parseWebPlaylistVideos(const char *resp, int respLen, SearchResults *out)
+{
+   memset(out, 0, sizeof *out);
+   if (!resp || respLen <= 0) return;
+   const char *end = resp + respLen;
+   const char *scan = resp;
+   static const char ITEM[] = "\"playlistVideoRenderer\":{";
+   while (out->count < MAX_SEARCH_RESULTS) {
+      const char *block = strstr(scan, ITEM);
+      if (!block || block >= end) break;
+      const char *open = block + sizeof ITEM - 2;
+      const char *blockEnd = jsonObjectEnd(open, end);
+      SearchResult *item = &out->items[out->count];
+      memset(item, 0, sizeof *item);
+      if (parseRendererItem(open, blockEnd, item)) {
+         readField(open, blockEnd, "\"shortBylineText\"", "text", item->author, sizeof item->author);
+         if (!isDuplicate(out, item->videoId)) out->count++;
+      }
+      scan = blockEnd;
+   }
+   const char *more = strstr(resp, "\"continuationItemRenderer\":{");
+   if (more && more < end) jsonString(more, end, "token", out->continuation, sizeof out->continuation);
+   if (!out->continuation[0]) {
+      const char *next = strstr(resp, "\"nextContinuationData\":{");
+      if (next && next < end) jsonString(next, end, "continuation", out->continuation, sizeof out->continuation);
+   }
+}
+
+static void tagPlaylistContinuation(SearchResults *out, char client)
+{
+   if (!out->continuation[0]) return;
+   size_t length = strlen(out->continuation);
+   if (length + 3 > sizeof out->continuation) {
+      out->continuation[0] = 0;
+      return;
+   }
+   memmove(out->continuation + 2, out->continuation, length + 1);
+   out->continuation[0] = client;
+   out->continuation[1] = ':';
+}
+
+static int fetchWebPlaylistVideos(const char *playlistId, const char *continuation, SearchResults *out)
+{
+   if (!playlistId || !playlistId[0] || !out) return PLAYLIST_FETCH_UNAVAILABLE;
+   memset(out, 0, sizeof *out);
+   const char *gl = getContentRegionCode();
+   char body[MAX_CONTINUATION + 512];
+   int bodyLen;
+   if (continuation) {
+      bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, gl, continuation);
+   } else {
+      char browseId[72];
+      int idLength = snprintf(browseId, sizeof browseId, "VL%s", playlistId);
+      if (idLength < 0 || idLength >= (int)sizeof browseId) return PLAYLIST_FETCH_UNAVAILABLE;
+      bodyLen = snprintf(body, sizeof body, WEB_CONTEXT_FMT ",\"browseId\":\"%s\"}", gl, browseId);
+   }
+   if (bodyLen < 0 || bodyLen >= (int)sizeof body) return PLAYLIST_FETCH_UNAVAILABLE;
+
+   char *resp = malloc(RESP_CAP);
+   if (!resp) return -1;
+   HttpHeader headers[] = {
+      { "Content-Type", "application/json" },
+      { "User-Agent", WEB_UA },
+      { "X-YouTube-Client-Name", "1" },
+      { "X-YouTube-Client-Version", WEB_VERSION },
+      { "Origin", "https://www.youtube.com" },
+      { "Accept-Encoding", "identity" },
+   };
+   int respLen = 0, status = 0;
+   int rc = fetchHttp("POST", BROWSE_URL, headers, sizeof headers / sizeof headers[0],
+                      body, bodyLen, resp, RESP_CAP, &respLen, &status);
+   if (rc < 0) {
+      free(resp);
+      return rc;
+   }
+   if (status != 200) {
+      int error = classifyPlaylistError(resp, status);
+      logWarn("[yt] playlist browse failed id=%s status=%d error=%d\n", playlistId, status, error);
+      free(resp);
+      return error;
+   }
+
+   parseWebPlaylistVideos(resp, respLen, out);
+   tagPlaylistContinuation(out, 'W');
+   if (out->count == 0 && !out->continuation[0]) {
+      int error = classifyPlaylistError(resp, status);
+      if (error != PLAYLIST_FETCH_UNAVAILABLE ||
+          strstr(resp, "playlist") || strstr(resp, "LOGIN_REQUIRED") || strstr(resp, "Members only")) {
+         free(resp);
+         return error;
+      }
+   }
+   free(resp);
+   return 0;
+}
+
 static int fetchAccountPlaylistVideos(const char *playlistId, const char *continuation, SearchResults *out)
 {
-   char body[MAX_CONTINUATION + 512];
-   int bodyLen = buildTvPlaylistBody(body, sizeof body, playlistId, continuation);
-   if (bodyLen < 0) { memset(out, 0, sizeof *out); return -1; }
-   return fetchTvCustomBrowse(body, bodyLen, out, parseTvPlaylistVideos);
+   if (!playlistId || !playlistId[0] || !out) return PLAYLIST_FETCH_UNAVAILABLE;
+
+   const char *rawContinuation = continuation;
+   char client = isSignedIn() ? 'T' : 'W';
+   if (continuation && continuation[0] && continuation[1] == ':') {
+      client = continuation[0];
+      rawContinuation = continuation + 2;
+   }
+
+   if (client == 'T') {
+      if (!isSignedIn()) return PLAYLIST_FETCH_RESTRICTED;
+      char body[MAX_CONTINUATION + 512];
+      int bodyLen = buildTvPlaylistBody(body, sizeof body, playlistId, rawContinuation);
+      if (bodyLen >= 0) {
+         int rc = fetchTvCustomBrowse(body, bodyLen, out, parseTvPlaylistVideos);
+         if (rc == 0 && (continuation || out->count > 0)) {
+            tagPlaylistContinuation(out, 'T');
+            return 0;
+         }
+      }
+      if (continuation) return PLAYLIST_FETCH_RESTRICTED;
+   }
+
+   // Public search playlists also open while signed out. WEB browse needs no OAuth; its continuation is
+   // tagged so the next page cannot accidentally be sent to the authenticated TV client.
+   return fetchWebPlaylistVideos(playlistId, rawContinuation, out);
 }
 
 

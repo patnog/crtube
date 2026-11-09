@@ -143,7 +143,10 @@ Existing opt-in points provide examples of the intended pattern:
 - `video-grid.c`: title, metadata, duration and badges adapt to the selected scale.
 - `sidebar.c`: sidebar labels and layout account for the scale.
 - `screens/home.c`: home-screen labels and settings use the shared scale state.
-- `screens/search.c`: search labels opt into scale-aware rendering.
+- `screens/search.c`: search labels opt into scale-aware rendering. The rounded search field and adjacent sort pills use fixed-position drawing with explicitly scaled dimensions/anchors; the pre-search `Press X to enter search` prompt uses the same font size as the entered-query text. The grid starts no higher than the Home/Recommended grid baseline. Recent-search selection uses a scale-aware rounded highlight, and the footer wraps hints to the available width (up to three rows).
+- `screens/home.c`: Home sort pills measure their scale-aware labels and reserve the right side of the header; Trending and Live tabs compact around the active category when the 4:3 layout has less horizontal space. The PS3 Playlists page uses the same measured header geometry for its Watch Later / PS3 tabs and Newest / A-Z pills.
+- `video-grid.c`: playlist count badges scale their three-line glyph and padding with the UI factor without changing thumbnail dimensions. Local PS3 playlists supply the newest video's ID as the thumbnail source, so the existing grid thumbnail path is reused.
+- `screens/playlist-picker.c`: the add-to-playlist chooser keeps its panel and row geometry within the screen while its labels opt into the selected UI scale.
 - `downloads.c`: the download overlay label opts into scale-aware rendering.
 
 These are examples, not a guarantee that every element in every screen scales automatically.

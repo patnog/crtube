@@ -1,12 +1,20 @@
 #pragma once
 
 // storage - tiny persistent preferences + watch history, kept as plain text files under
-// /dev_hdd0/tmp/yo-player/ (via the VFS layer). No user/account binding: back up or move the folder and
+// /dev_hdd0/tmp/crtube/ (via the VFS layer). No user/account binding: back up or move the folder and
 // anyone can restore it. initStorage() must run once at startup before the getters are used.
 
 #include "extractor.h"   // SearchResult / SearchResults (watch-later stores full entries)
 
 void initStorage(void);
+
+#define MAX_SEARCH_HISTORY 32
+#define SEARCH_QUERY_LEN   128
+
+// Search queries are stored newest-first. Repeating a query moves it to the front; the oldest falls off at 32.
+int  getSearchHistory(char out[][SEARCH_QUERY_LEN], int max);
+void addSearchHistory(const char *query);
+void clearSearchHistory(void);
 
 // PS3-local playback history: 50 newest-first video entries, persisted independently from watch/resume state.
 int  getLocalHistory(SearchResults *out);
@@ -47,3 +55,19 @@ int  isWatchLater(const char *videoId);
 void toggleWatchLater(const SearchResult *item);
 int  getWatchLater(SearchResults *out);
 int  getWatchLaterRevision(void);
+
+// PS3 playlist library. Watch Later stores YouTube playlist references; PS3 stores local video lists.
+#define LOCAL_PLAYLIST_NAME_LEN 64
+#define LOCAL_PLAYLIST_ID_LEN   16
+int  addPlaylistToWatchLater(const SearchResult *playlist);
+int  getPlaylistWatchLater(SearchResults *out);
+int  getLocalPlaylistCount(void);
+int  getLocalPlaylistInfo(int newestIndex, char *idOut, int idCapacity,
+                         char *nameOut, int nameCapacity);
+int  getLocalPlaylistRevision(void);
+int  getPlaylistWatchLaterRevision(void);
+int  getLocalPlaylists(SearchResults *out);
+int  getLocalPlaylistVideos(const char *playlistId, SearchResults *out);
+int  createLocalPlaylist(const char *name, const SearchResult *firstVideo,
+                         char *playlistIdOut, int playlistIdCapacity);
+int  addVideoToLocalPlaylist(const char *playlistId, const SearchResult *item);

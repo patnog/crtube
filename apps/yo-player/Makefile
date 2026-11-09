@@ -17,7 +17,7 @@ SOURCES := src src/screens src/extractors psl1ght
 INCLUDES := include ../../libs/simple-lib-app/include ../../libs/simple-lib-av/include \
             ../../libs/simple-lib-https/include ../../libs/simple-lib-core/include psl1ght/include
 
-CFILES := main.c home.c play.c search.c video-grid.c storage.c stream-select.c \
+CFILES := main.c home.c play.c search.c playlist-picker.c video-grid.c storage.c stream-select.c \
           downloads.c video-export-psl1ght.c extractor.c youtube.c sponsorblock.c \
           subtitles.c chapters.c settings.c theme.c \
           account.c account-oauth.c youtube-tv.c sidebar.c

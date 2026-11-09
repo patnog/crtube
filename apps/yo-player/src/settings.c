@@ -48,7 +48,24 @@ static const char *DEFAULT_SETTINGS =
    "\n"
    "theme=youtube\n"
    "# which colour theme to start in - one of the [Name] blocks in themes.txt (lower case,\n"
-   "# spaces become hyphens). the shipped one is youtube.\n";
+   "# spaces become hyphens). the shipped one is youtube.\n"
+   "\n"
+   "sort-search=0\n"
+   "sort-recommended=0\n"
+   "sort-account-subscriptions=0\n"
+   "sort-ps3-subscriptions=0\n"
+   "sort-trending-gaming=0\n"
+   "sort-trending-sports=0\n"
+   "sort-trending-podcasts=0\n"
+   "sort-live-popular=0\n"
+   "sort-live-music=0\n"
+   "sort-live-gaming=0\n"
+   "sort-live-sports=0\n"
+   "sort-live-podcasts=0\n"
+   "sort-live-news=0\n"
+   "sort-account-playlists=0\n"
+   "sort-local-playlists-watch-later=0\n"
+   "sort-local-playlists-ps3=0\n";
 
 static SponsorblockMode sponsorblockMode = SPONSORBLOCK_ADS;
 static int sponsorActions[SPONSOR_CATEGORY_COUNT] = {
@@ -66,6 +83,18 @@ static int overscanPercent = 0;
 static int subtitleStyle[5] = { 0, 0, 3, 0, 2 };
 static const char *SUBTITLE_STYLE_KEYS[5] = { "subtitle-text-color", "subtitle-background-color", "subtitle-background-opacity", "subtitle-highlight", "subtitle-font-size" };
 static const int SUBTITLE_STYLE_MAX[5] = { 5, 4, 4, 2, 5 };
+
+static const char *SORT_SETTING_KEYS[SORT_PREF_COUNT] = {
+   "sort-search", "sort-recommended", "sort-account-subscriptions", "sort-ps3-subscriptions",
+   "sort-trending-gaming", "sort-trending-sports", "sort-trending-podcasts",
+   "sort-live-popular", "sort-live-music", "sort-live-gaming", "sort-live-sports",
+   "sort-live-podcasts", "sort-live-news", "sort-account-playlists",
+   "sort-local-playlists-watch-later", "sort-local-playlists-ps3"
+};
+static const int SORT_SETTING_MAX[SORT_PREF_COUNT] = {
+   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1
+};
+static int sortPreferences[SORT_PREF_COUNT];
 
 static const ContentRegion REGIONS[] = {
    { "DE", "Germany" }, { "AT", "Austria" }, { "CH", "Switzerland" },
@@ -123,6 +152,15 @@ void loadSettings(void)
    regionUnsaved = 0;
    if (loadSettingsFile(SETTINGS_PATH, DEFAULT_SETTINGS, text, sizeof text) == 1)
       logInfo("[settings] created %s with defaults\n", SETTINGS_PATH);
+
+   for (int i = 0; i < SORT_PREF_COUNT; i++) {
+      const char *value = findSettingValue(text, SORT_SETTING_KEYS[i]);
+      int parsed = value ? atoi(value) : 0;
+      if (parsed < 0 || parsed > SORT_SETTING_MAX[i]) parsed = 0;
+      sortPreferences[i] = parsed;
+      if (!value && rewriteSettingKey(SETTINGS_PATH, SORT_SETTING_KEYS[i], "0") != 0)
+         logWarn("[settings] could not add %s default\n", SORT_SETTING_KEYS[i]);
+   }
 
    autoplayEnabled = 1;
    const char *autoplay = findSettingValue(text, "autoplay");
@@ -250,6 +288,26 @@ void loadSettings(void)
       }
    }
    setGfxOverscan(overscanPercent);
+}
+
+int getSortPreference(SortPreference setting)
+{
+   if (setting < 0 || setting >= SORT_PREF_COUNT) return 0;
+   return sortPreferences[setting];
+}
+
+int setSortPreference(SortPreference setting, int value)
+{
+   if (setting < 0 || setting >= SORT_PREF_COUNT || value < 0 || value > SORT_SETTING_MAX[setting]) return -1;
+   if (sortPreferences[setting] == value) return 0;
+   char text[8];
+   snprintf(text, sizeof text, "%d", value);
+   if (rewriteSettingKey(SETTINGS_PATH, SORT_SETTING_KEYS[setting], text) != 0) {
+      logWarn("[settings] could not persist %s=%s\n", SORT_SETTING_KEYS[setting], text);
+      return -1;
+   }
+   sortPreferences[setting] = value;
+   return 0;
 }
 
 SponsorblockMode getSponsorblockMode(void) { return sponsorblockMode; }
