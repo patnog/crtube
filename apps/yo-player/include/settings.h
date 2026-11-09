@@ -45,3 +45,7 @@ int getContentRegionIndex(void);
 const char *getContentRegionCode(void);
 int setContentRegionIndex(int index);
 unsigned getContentRegionRevision(void);
+
+// Independent subtitle appearance preferences: text colour, background colour, opacity and highlight.
+int getSubtitleStyle(int setting);
+int setSubtitleStyle(int setting, int value);

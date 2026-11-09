@@ -22,6 +22,12 @@ static const char *DEFAULT_SETTINGS =
    "enable-1080p60=off\n"
    "# on = allow experimental TEE 1080p50/60 playback; off = Sony VDEC only, up to 1080p30\n"
    "subtitle-language=en\n"
+   "subtitle-text-color=0\n"
+   "subtitle-background-color=0\n"
+   "subtitle-background-opacity=3\n"
+   "subtitle-highlight=0\n"
+   "subtitle-font-size=2\n"
+   "# Subtitle style: text color 0-5, background 0-4, opacity 0-4, highlight 0-2\n"
    "# preferred subtitle language code; the player tries creator-provided tracks before English auto-generated\n"
    "region=US\n"
    "# country used for YouTube content lists (two-letter gl code); default US\n"
@@ -57,6 +63,9 @@ static int autoplayEnabled = 1;
 static int enable1080p60 = 0;
 static char subtitleLanguage[12] = "en";
 static int overscanPercent = 0;
+static int subtitleStyle[5] = { 0, 0, 3, 0, 2 };
+static const char *SUBTITLE_STYLE_KEYS[5] = { "subtitle-text-color", "subtitle-background-color", "subtitle-background-opacity", "subtitle-highlight", "subtitle-font-size" };
+static const int SUBTITLE_STYLE_MAX[5] = { 5, 4, 4, 2, 5 };
 
 static const ContentRegion REGIONS[] = {
    { "DE", "Germany" }, { "AT", "Austria" }, { "CH", "Switzerland" },
@@ -165,6 +174,18 @@ void loadSettings(void)
       } else {
          memcpy(subtitleLanguage, subtitleLang, (size_t)length);
          subtitleLanguage[length] = 0;
+      }
+   }
+
+   for (int i = 0; i < 5; i++) {
+      const char *value = findSettingValue(text, SUBTITLE_STYLE_KEYS[i]);
+      int parsed = value ? atoi(value) : subtitleStyle[i];
+      if (parsed < 0 || parsed > SUBTITLE_STYLE_MAX[i]) parsed = subtitleStyle[i];
+      subtitleStyle[i] = parsed;
+      if (!value) {
+         char fallback[8]; snprintf(fallback, sizeof fallback, "%d", parsed);
+         if (rewriteSettingKey(SETTINGS_PATH, SUBTITLE_STYLE_KEYS[i], fallback) != 0)
+            logWarn("[settings] could not add %s default\n", SUBTITLE_STYLE_KEYS[i]);
       }
    }
 
@@ -351,5 +372,20 @@ int setContentRegionIndex(int index)
    }
    regionUnsaved = 0;
    logInfo("[settings] content region %s -> %s\n", REGIONS[old].code, REGIONS[index].code);
+   return 0;
+}
+
+int getSubtitleStyle(int setting)
+{
+   return setting >= 0 && setting < 5 ? subtitleStyle[setting] : 0;
+}
+
+int setSubtitleStyle(int setting, int value)
+{
+   if (setting < 0 || setting >= 5 || value < 0 || value > SUBTITLE_STYLE_MAX[setting]) return -1;
+   if (subtitleStyle[setting] == value) return 0;
+   char text[8]; snprintf(text, sizeof text, "%d", value);
+   if (rewriteSettingKey(SETTINGS_PATH, SUBTITLE_STYLE_KEYS[setting], text) != 0) return -1;
+   subtitleStyle[setting] = value;
    return 0;
 }

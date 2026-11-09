@@ -112,10 +112,12 @@ static Label optionsCurrentValueLabels[3]; // Quality, Audio, Subs language
 
 // Playback-owned settings panel. It deliberately shares the persisted settings APIs
 // with navigation, but owns its input state, labels, layout and SponsorBlock submenu.
-#define PLAYBACK_SETTINGS_COUNT 4
+#define PLAYBACK_SETTINGS_COUNT 5
 #define PLAYBACK_SETTINGS_ROW_H 54
 #define PLAYBACK_SETTINGS_PANEL_W 650
-#define PLAYBACK_SETTINGS_PANEL_H 380
+#define PLAYBACK_SETTINGS_PANEL_H 430
+#define PLAYBACK_SUBTITLE_STYLE_COUNT 5
+#define PLAYBACK_SUBTITLE_STYLE_PANEL_H 490
 #define PLAYBACK_SPONSOR_PANEL_W 780
 #define PLAYBACK_SPONSOR_PANEL_H 470
 #define PLAYBACK_SPONSOR_ROW_H 42
@@ -123,6 +125,9 @@ static Label optionsCurrentValueLabels[3]; // Quality, Audio, Subs language
 #define PLAYBACK_SPONSOR_OPTION_GAP 5
 #define PLAYBACK_SD_SCALE_PATH CRTUBE_DATA_DIR "/sd-ui-scale.txt"
 static int playbackSettingsOpen, playbackSettingsSelected;
+static int playbackSubtitleStyleOpen, playbackSubtitleStyleSelected;
+static ButtonRepeat playbackSubtitleStyleRepeat;
+static Label playbackSubtitleStyleTitle, playbackSubtitleStyleLabels[PLAYBACK_SUBTITLE_STYLE_COUNT], playbackSubtitlePreview;
 static int playbackSponsorOpen, playbackSponsorSelected;
 static ButtonRepeat playbackSettingsRepeat, playbackSponsorRepeat;
 static Label playbackSettingsTitle, playbackSettingsLabels[PLAYBACK_SETTINGS_COUNT];
@@ -1215,7 +1220,7 @@ static void applyPlaybackUiLabelScale(float scale)
    SCALE_PLAYBACK_LABEL(authorLabel);
    SCALE_PLAYBACK_LABEL(nextNoticeHeadingLabel);
    SCALE_PLAYBACK_LABEL(nextNoticeTitleLabel);
-   subtitleLabel.size = playbackSubtitleFontSize(SUBTITLE_TEXT_SIZE);
+   subtitleLabel.size = playbackSubtitleFontSize(22 + getSubtitleStyle(4) * 4);
    subtitleLabel.fixedRenderScale = 0.0f;
    setLabelFixedRenderScale(&subtitleLabel, 1.0f, 0);
    SCALE_PLAYBACK_LABEL(playbackInfoLabel);
@@ -1227,6 +1232,11 @@ static void applyPlaybackUiLabelScale(float scale)
    for (int i = 0; i < OPTIONS_DROPDOWN_MAX; i++) SCALE_PLAYBACK_LABEL(optionsValueLabels[i]);
    for (int i = 0; i < 3; i++) SCALE_PLAYBACK_LABEL(optionsCurrentValueLabels[i]);
    SCALE_PLAYBACK_LABEL(playbackSettingsTitle);
+   SCALE_PLAYBACK_LABEL(playbackSubtitleStyleTitle);
+   for (int i = 0; i < PLAYBACK_SUBTITLE_STYLE_COUNT; i++) SCALE_PLAYBACK_LABEL(playbackSubtitleStyleLabels[i]);
+   playbackSubtitlePreview.size = playbackSubtitleFontSize(22 + getSubtitleStyle(4) * 4);
+   playbackSubtitlePreview.fixedRenderScale = 0.0f;
+   setLabelFixedRenderScale(&playbackSubtitlePreview, 1.0f, 0);
    for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
       SCALE_PLAYBACK_LABEL(playbackSettingsLabels[i]);
       SCALE_PLAYBACK_LABEL(playbackSettingsValues[i]);
@@ -1289,12 +1299,12 @@ static void initPlay(void)
    initLabelRaw(&optionsCurrentValueLabels[2], &uiFont, 0, 0, 400, AUTO,
                 playbackFontSize(27), activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
 
-   playbackSettingsOpen = playbackSponsorOpen = 0;
+   playbackSettingsOpen = playbackSponsorOpen = playbackSubtitleStyleOpen = 0;
    playbackSettingsSelected = playbackSponsorSelected = 0;
    initLabelRaw(&playbackSettingsTitle, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 48, AUTO,
                 playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "Playback Settings");
    static const char *playbackSettingNames[PLAYBACK_SETTINGS_COUNT] = {
-      "Enable 1080p (experimental)", "UI Scaling", "Overscan", "SponsorBlock"
+      "Enable 1080p (experimental)", "UI Scaling", "Overscan", "Subtitle Style", "SponsorBlock"
    };
    for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
       initLabelRaw(&playbackSettingsLabels[i], &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 230, AUTO,
@@ -1307,6 +1317,16 @@ static void initPlay(void)
                 playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP, "OFF");
    initLabelRaw(&playbackSettingsToggleLabels[1], &uiFont, 0, 0, 60, AUTO,
                 playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP, "ON");
+   initLabelRaw(&playbackSubtitleStyleTitle, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 48, AUTO,
+                playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "Subtitle Style");
+   static const char *subtitleStyleNames[PLAYBACK_SUBTITLE_STYLE_COUNT] = {
+      "Text Color", "Background Color", "Background Opacity", "Text Highlight", "Font Size"
+   };
+   for (int i = 0; i < PLAYBACK_SUBTITLE_STYLE_COUNT; i++)
+      initLabelRaw(&playbackSubtitleStyleLabels[i], &uiFont, 0, 0, 300, AUTO,
+                   playbackFontSize(20), activeTheme->textPrimary, TEXT_NOWRAP, subtitleStyleNames[i]);
+   initLabelRaw(&playbackSubtitlePreview, &uiFont, 0, 0, 520, AUTO,
+                playbackSubtitleFontSize(22 + getSubtitleStyle(4) * 4), 0xFFFFFFFF, TEXT_WRAP, "Lorem Ipsum");
    initLabelRaw(&playbackSponsorTitle, &uiFont, 0, 0, PLAYBACK_SPONSOR_PANEL_W - 48, AUTO,
                 playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "SponsorBlock");
    for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++)
@@ -2058,6 +2078,7 @@ static void openPlaybackSettings(void)
 {
    playbackSettingsOpen = 1;
    playbackSponsorOpen = 0;
+   playbackSubtitleStyleOpen = 0;
    playbackSettingsSelected = 0;
    playbackSettingsRepeat.timer = playbackSettingsRepeat.repeats = 0;
 }
@@ -2108,8 +2129,26 @@ static void setPlaybackUiScale(float scale)
    applyPlaybackUiLabelScale(scale);
 }
 
+static void updatePlaybackSubtitleStyle(void)
+{
+   if (isPadButtonPressed(PAD_BTN_CIRCLE)) { playbackSubtitleStyleOpen = 0; return; }
+   if (isRepeatDue(&playbackSubtitleStyleRepeat, getPadButtonState(PAD_BTN_DOWN)))
+      playbackSubtitleStyleSelected = (playbackSubtitleStyleSelected + 1) % PLAYBACK_SUBTITLE_STYLE_COUNT;
+   else if (isRepeatDue(&playbackSubtitleStyleRepeat, getPadButtonState(PAD_BTN_UP)))
+      playbackSubtitleStyleSelected = (playbackSubtitleStyleSelected + PLAYBACK_SUBTITLE_STYLE_COUNT - 1) % PLAYBACK_SUBTITLE_STYLE_COUNT;
+   int delta = isPadButtonPressed(PAD_BTN_LEFT) ? -1 :
+               (isPadButtonPressed(PAD_BTN_RIGHT) || isPadButtonPressed(PAD_BTN_CROSS)) ? 1 : 0;
+   if (delta) {
+      static const int limits[5] = { 6, 5, 5, 3, 6 };
+      int setting = playbackSubtitleStyleSelected;
+      int value = (getSubtitleStyle(setting) + delta + limits[setting]) % limits[setting];
+      if (setSubtitleStyle(setting, value) != 0) showToast("Could not save subtitle style");
+   }
+}
+
 static void updatePlaybackSettings(void)
 {
+   if (playbackSubtitleStyleOpen) { updatePlaybackSubtitleStyle(); return; }
    if (playbackSponsorOpen) { updatePlaybackSponsorSettings(); return; }
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { playbackSettingsOpen = 0; return; }
    if (isRepeatDue(&playbackSettingsRepeat, getPadButtonState(PAD_BTN_DOWN)))
@@ -2136,12 +2175,17 @@ static void updatePlaybackSettings(void)
       int overscan = getOverscanPercent() + delta;
       if (setOverscanPercent(overscan) != 0) showToast("Could not save overscan setting");
    } else if (playbackSettingsSelected == 3 && (cross || right)) {
+      playbackSubtitleStyleOpen = 1;
+      playbackSubtitleStyleSelected = 0;
+      playbackSubtitleStyleRepeat.timer = playbackSubtitleStyleRepeat.repeats = 0;
+   } else if (playbackSettingsSelected == 4 && (cross || right)) {
       openPlaybackSponsorSettings();
    }
 }
 
 static void handlePlaybackOptionsInput(void)
 {
+   if (playbackSubtitleStyleOpen) { updatePlaybackSubtitleStyle(); return; }
    if (playbackSettingsOpen) { updatePlaybackSettings(); return; }
    if (optionsDropdownOpen) {
       if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_LEFT)) {
@@ -2315,6 +2359,7 @@ static void drawPlaybackSettings(void)
       setLabelText(&playbackSettingsValues[1], scaleValue);
    setLabelText(&playbackSettingsValues[2], overscanValue);
    setLabelText(&playbackSettingsValues[3], "Configure");
+   setLabelText(&playbackSettingsValues[4], "Configure");
 
    int toggleW = 132;
    int toggleX = x + panelW - 40 - toggleW;
@@ -2354,7 +2399,7 @@ static void drawPlaybackSettings(void)
          setLabelColor(value, i == playbackSettingsSelected ? activeTheme->accent : activeTheme->textPrimary);
          moveLabel(value, valueX + (valueW - value->tt.tex.w) / 2, valueY);
          drawLabel(value);
-         if (i == 3) {
+         if (i == 3 || i == 4) {
             int tx = x + panelW - 24;
             int ty = rowY + PLAYBACK_SETTINGS_ROW_H / 2;
             drawGfxTriangle(tx - 7, ty - 4, activeTheme->textSecondary,
@@ -2362,6 +2407,74 @@ static void drawPlaybackSettings(void)
                             tx, ty + 4, activeTheme->textSecondary);
          }
       }
+   }
+}
+
+static void drawSubtitleLabelWithHighlight(Label *label, int x, int y, uint32_t textColor)
+{
+   int highlight = getSubtitleStyle(3);
+   if (highlight == 1) {
+      // A heavier, more visible drop shadow, offset down and to the right.
+      setLabelColor(label, 0xFF000000);
+      drawLabelAt(label, x + 3, y + 3);
+      drawLabelAt(label, x + 5, y + 5);
+   } else if (highlight == 2) {
+      // Two-pixel outline around the glyphs for stronger contrast on bright scenes.
+      setLabelColor(label, 0xFF000000);
+      for (int oy = -2; oy <= 2; oy++) for (int ox = -2; ox <= 2; ox++)
+         if (ox == -2 || ox == 2 || oy == -2 || oy == 2)
+            drawLabelAt(label, x + ox, y + oy);
+   }
+   setLabelColor(label, textColor);
+   drawLabelAt(label, x, y);
+}
+
+static void drawPlaybackSubtitleStyle(void)
+{
+   static const char *const textNames[] = { "White", "Yellow", "Cyan", "Green", "Blue", "Red" };
+   static const uint32_t textColors[] = { 0xFFFFFFFF, 0xFFFFFF00, 0xFF00FFFF, 0xFF00FF00, 0xFF4488FF, 0xFFFF4444 };
+   static const char *const bgNames[] = { "Black", "Dark Gray", "Gray", "Blue", "Transparent" };
+   static const uint32_t bgColors[] = { 0xFF000000, 0xFF303030, 0xFF777777, 0xFF102040, 0x00000000 };
+   static const char *const opacityNames[] = { "0%", "25%", "50%", "80%", "100%" };
+   static const char *const highlightNames[] = { "None", "Shadow", "Outline" };
+   static const char *const fontSizeNames[] = { "Small", "Medium", "Default", "Large", "Extra Large", "Huge" };
+   const char *values[] = { textNames[getSubtitleStyle(0)], bgNames[getSubtitleStyle(1)],
+                            opacityNames[getSubtitleStyle(2)], highlightNames[getSubtitleStyle(3)],
+                            fontSizeNames[getSubtitleStyle(4)] };
+   int panelW = playbackSettingsPanelWidth(), panelH = PLAYBACK_SUBTITLE_STYLE_PANEL_H;
+   if (panelH > state.screenH - 48) panelH = state.screenH - 48;
+   int x = (state.screenW - panelW) / 2, y = (state.screenH - panelH) / 2;
+   fillGfxRectangleFixed(0, 0, state.screenW, state.screenH, 0x78000000);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+   refreshLabelScale(&playbackSubtitleStyleTitle);
+   drawLabelAt(&playbackSubtitleStyleTitle, state.screenW / 2 - playbackSubtitleStyleTitle.tt.tex.w / 2, y + 22);
+   int previewX = x + 30, previewY = y + 66, previewW = panelW - 60, previewH = 92;
+   fillGfxRoundedRectangleFixed(previewX, previewY, previewW, previewH, 7, 0xFF252525);
+   uint32_t bg = bgColors[getSubtitleStyle(1)];
+   bg = (bg & 0x00FFFFFF) | ((uint32_t[]){ 0, 64, 128, 204, 255 }[getSubtitleStyle(2)] << 24);
+   uint32_t color = textColors[getSubtitleStyle(0)];
+   playbackSubtitlePreview.size = playbackSubtitleFontSize(22 + getSubtitleStyle(4) * 4);
+   setLabelText(&playbackSubtitlePreview, "Lorem Ipsum");
+   setLabelColor(&playbackSubtitlePreview, color);
+   refreshLabelScale(&playbackSubtitlePreview);
+   int textW = playbackSubtitlePreview.tt.tex.w + 24;
+   int textH = playbackSubtitlePreview.tt.tex.h + 12;
+   int tx = state.screenW / 2 - textW / 2, ty = previewY + (previewH - textH) / 2;
+   fillGfxRoundedRectangleFixed(tx, ty, textW, textH, 4, bg);
+   drawSubtitleLabelWithHighlight(&playbackSubtitlePreview,
+      state.screenW / 2 - playbackSubtitlePreview.tt.tex.w / 2, ty + 6, color);
+   for (int i = 0; i < PLAYBACK_SUBTITLE_STYLE_COUNT; i++) {
+      int rowY = y + 176 + i * 52;
+      Label *name = &playbackSubtitleStyleLabels[i]; refreshLabelScale(name);
+      if (i == playbackSubtitleStyleSelected)
+         fillGfxRoundedRectangleFixed(x + 18, rowY, panelW - 36, 46, 7, activeTheme->rowHighlight);
+      setLabelColor(name, i == playbackSubtitleStyleSelected ? activeTheme->accent : activeTheme->textPrimary);
+      drawLabelAt(name, x + 38, getCenteredLabelY(name, rowY, 46));
+      Label *value = &playbackSettingsValues[0];
+      setLabelText(value, values[i]); refreshLabelScale(value);
+      setLabelColor(value, i == playbackSubtitleStyleSelected ? activeTheme->accent : activeTheme->textPrimary);
+      drawLabelAt(value, x + panelW - 40 - value->tt.tex.w, getCenteredLabelY(value, rowY, 46));
    }
 }
 
@@ -2521,8 +2634,7 @@ static void drawPlaybackOptions(void)
       drawLabelAt(name, x + 38, nameY);
 
       if (i == 0 || i == 1 || i == 3) {
-         int valueIndex = i == 0 ? 0 : i == 1 ? 1 : 2;
-         Label *value = &optionsCurrentValueLabels[valueIndex];
+         Label *value = &optionsCurrentValueLabels[i == 0 ? 0 : i == 1 ? 1 : 2];
          if (i == 0) {
             int qualityX = arrowLeft - value->tt.tex.w - 12;
             if (qualityX < x + 38) qualityX = x + 38;
@@ -2555,7 +2667,7 @@ static void drawPlaybackOptions(void)
                       getCenteredLabelY(word, toggleY, toggleH));
             drawLabel(word);
          }
-      } else if (i == 0 || i == 1 || i == 3 || i == 4 || i == 7) {
+      } else if (i == 0 || i == 1 || i == 3 || i == 4 || i == 6 || i == 7) {
          int tx = x + panelW - 44;
          int ty = rowY + rowH / 2;
          drawGfxTriangle(tx - 7, ty - 4, activeTheme->textSecondary,
@@ -2866,8 +2978,10 @@ static void updatePlay(void)
    }
 
    // feed the cue covering the current position into the label; setLabelText only rasterises on change
-   if (state.subtitlesReady && state.subtitlePick >= 0 && state.stage == STAGE_PLAYING && state.player)
+   if (state.subtitlesReady && state.subtitlePick >= 0 && state.stage == STAGE_PLAYING && state.player) {
+      subtitleLabel.size = playbackSubtitleFontSize(22 + getSubtitleStyle(4) * 4);
       setLabelText(&subtitleLabel, getSubtitleCueText(state.subtitleTrack, getVideoPositionSeconds(state.player), &state.subtitleScanFrom));
+   }
 
    int playbackInputBlocked = overlayHadPad || loadingPauseInput;
    if (suppressPlaybackCrossUntilRelease) {
@@ -3080,8 +3194,12 @@ static void drawSubtitle(void)
    if (state.subtitlePick < 0 || subtitleLabel.tt.tex.w == 0) return;
    int x = state.screenW / 2 - subtitleLabel.tt.tex.w / 2;
    int y = (int)(state.screenH * 0.94f) - 40 - subtitleLabel.tt.tex.h;
-   fillGfxRectangle(x - 12, y - 6, subtitleLabel.tt.tex.w + 24, subtitleLabel.tt.tex.h + 12, activeTheme->badgeFill);
-   drawLabelAt(&subtitleLabel, x, y);
+   static const uint32_t textColors[] = { 0xFFFFFFFF, 0xFFFFFF00, 0xFF00FFFF, 0xFF00FF00, 0xFF4488FF, 0xFFFF4444 };
+   static const uint32_t bgColors[] = { 0xFF000000, 0xFF303030, 0xFF777777, 0xFF102040, 0x00000000 };
+   uint32_t bg = bgColors[getSubtitleStyle(1)];
+   bg = (bg & 0x00FFFFFF) | ((uint32_t[]){ 0, 64, 128, 204, 255 }[getSubtitleStyle(2)] << 24);
+   fillGfxRectangle(x - 12, y - 6, subtitleLabel.tt.tex.w + 24, subtitleLabel.tt.tex.h + 12, bg);
+   drawSubtitleLabelWithHighlight(&subtitleLabel, x, y, textColors[getSubtitleStyle(0)]);
 }
 
 // the description over the whole video: a semi-transparent black layer, then the slice of the text
@@ -3331,6 +3449,7 @@ static void drawPlay(void)
       if (optionsVisible) drawPlaybackOptions();
       if (playbackSettingsOpen) drawPlaybackSettings();
       if (playbackSponsorOpen) drawPlaybackSponsorSettings();
+      if (playbackSubtitleStyleOpen) drawPlaybackSubtitleStyle();
    }
 
    // until the first frame is presented (open, then the async resume seek's reload) keep the loading
@@ -3398,6 +3517,9 @@ static void termPlay(void)
    for (int i = 0; i < OPTIONS_DROPDOWN_MAX; i++) freeLabel(&optionsValueLabels[i]);
    for (int i = 0; i < 3; i++) freeLabel(&optionsCurrentValueLabels[i]);
    freeLabel(&playbackSettingsTitle);
+   freeLabel(&playbackSubtitleStyleTitle);
+   for (int i = 0; i < PLAYBACK_SUBTITLE_STYLE_COUNT; i++) freeLabel(&playbackSubtitleStyleLabels[i]);
+   freeLabel(&playbackSubtitlePreview);
    for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
       freeLabel(&playbackSettingsLabels[i]);
       freeLabel(&playbackSettingsValues[i]);
