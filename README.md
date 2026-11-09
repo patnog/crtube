@@ -1,7 +1,7 @@
-# Yo! Player — Sign-In & CRT Edition
+# CRTube — youtube player for PS3 with focused on CRT
 
 <p align="center">
-  <img src="apps/yo-player/ICON0.PNG" alt="Yo! Player" width="180">
+  <img src="apps/yo-player/ICON0.PNG" alt="CRtube" width="180">
 </p>
 
 A PlayStation 3 YouTube client with optional Google/YouTube account sign-in and account-based feeds. Display layout follows the PS3's active video output. The configurable UI scale (1.0x or 1.5x) is available at every output resolution; the 4:3 aspect ratio additionally selects the CRT-oriented layout.
