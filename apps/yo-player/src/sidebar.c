@@ -186,7 +186,7 @@ void initSidebar(Font *font, int screenW, int screenH)
       if (mainRows[i].icon) initIcon(&side.mainIcons[i], mainRows[i].icon, SIDEBAR_ICON_SIZE);
    }
    initIcon(&side.edgeOpen, ICON_LEFT_BIG, 27);
-   initIcon(&side.edgeClose, ICON_LEFT_BIG, 27);
+   initIcon(&side.edgeClose, ICON_RIGHT_BIG, 27);
    initIcon(&side.exitArrow, ICON_RIGHT_BIG, SIDEBAR_ICON_SIZE);
    keepSelectionVisible();
    updateSelectedColors();
@@ -276,7 +276,8 @@ int updateSidebar(void)
    if (isRepeatDue(&side.navigateRepeat, getPadButtonState(PAD_BTN_DOWN))) moveSelection(1);
    else if (isRepeatDue(&side.navigateRepeat, getPadButtonState(PAD_BTN_UP))) moveSelection(-1);
 
-   if (isPadButtonPressed(PAD_BTN_LEFT) || isPadButtonPressed(PAD_BTN_CIRCLE)) {
+   if (isPadButtonPressed(PAD_BTN_LEFT) || isPadButtonPressed(PAD_BTN_RIGHT) ||
+       isPadButtonPressed(PAD_BTN_CIRCLE)) {
       side.focused = 0;
       animateTo(0);
       return -1;
@@ -329,7 +330,7 @@ static void drawEdge(int panelX)
 {
    int edgeX = panelX + side.panelW - SIDEBAR_EDGE_WIDTH;
    int edgeY = (side.screenH - SIDEBAR_EDGE_HEIGHT) / 2;
-   Icon *glyph = &side.edgeOpen; // The indicator always points left.
+   Icon *glyph = side.progress > 0.0f ? &side.edgeClose : &side.edgeOpen;
    int glyphX;
 
    if (side.progress > 0.0f) {

@@ -27,6 +27,6 @@ void setSidebarCurrent(SidebarItem item);
 int  isSidebarActive(void);
 int  isSidebarFocused(void);
 // LEFT opens from the first grid column; UP/DOWN navigate; CROSS commits;
-// LEFT or CIRCLE closes; RIGHT leaves the menu open.
+// LEFT, RIGHT or CIRCLE closes the menu.
 int  updateSidebar(void);
 void drawSidebar(void);
