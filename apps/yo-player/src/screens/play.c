@@ -351,6 +351,7 @@ static struct {
    uint64_t         lastSeekInputUs;
    uint64_t         controlsShownUs;   // last seek-bar activity
    uint64_t         hudShownUs;        // last L2 full-HUD request
+   int              controlsDismissed; // Circle explicitly hid the playback HUD, including while paused
 
    // sponsorblock: fetched on a side thread (in parallel with resolve/open), then auto-skipped during
    // playback and drawn on the seek bar. sbReady goes up once the thread is reaped and segments are safe.
@@ -1355,11 +1356,16 @@ static void initPlay(void)
                               THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-sponsor") == 0);
 }
 
-static void showControls(void) { state.controlsShownUs = sys_time_get_system_time(); }
+static void showControls(void)
+{
+   state.controlsDismissed = 0;
+   state.controlsShownUs = sys_time_get_system_time();
+}
 
 static void showFullPlaybackHud(void)
 {
    uint64_t now = sys_time_get_system_time();
+   state.controlsDismissed = 0;
    state.controlsShownUs = now;
    state.hudShownUs = now;
 }
@@ -1726,6 +1732,8 @@ static void nudgeSeek(float deltaSeconds, uint64_t nowUs)
 // left/right scrub, cross toggles pause (restarts if the video ended). only once playing.
 static void updateCropPan(void);
 static int findAskSponsorSegment(void);
+static int controlsVisible(void);
+static int fullPlaybackHudVisible(void);
 
 static void handlePlaybackInput(void)
 {
@@ -2733,7 +2741,21 @@ static void updatePlay(void)
    else if (state.chaptersVisible) handleChaptersInput();
    else if (optionsVisible) handlePlaybackOptionsInput();
    else {
-      if (isPadButtonPressed(PAD_BTN_CIRCLE)) { popScreen(); return; }   // back to the results list
+      if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+         // Circle dismisses playback controls first. This also overrides the paused/ended
+         // always-visible seek bar; a second Circle exits to the results list.
+         uint64_t now = sys_time_get_system_time();
+         int volumeVisible = volumeMeter.shownUs != 0 && now - volumeMeter.shownUs < 2500000ULL;
+         if (controlsVisible() || fullPlaybackHudVisible() || volumeVisible) {
+            state.controlsDismissed = 1;
+            state.controlsShownUs = 0;
+            state.hudShownUs = 0;
+            hideVolumeMeter(&volumeMeter);
+         } else {
+            popScreen();
+            return;
+         }
+      }
       if (state.stage == STAGE_LOADING && isPadButtonPressed(PAD_BTN_CROSS)) {
          state.pauseWhenReady = !state.pauseWhenReady;
          loadingPauseInput = 1;
@@ -3099,6 +3121,7 @@ static void drawStatsOverlay(void)
 // seek bar + time show while scrubbing / paused / ended, else auto-hide after the last activity
 static int controlsVisible(void)
 {
+   if (state.controlsDismissed) return 0;
    uint64_t now = sys_time_get_system_time();
    if (isVideoPaused(state.player) || isVideoEnded(state.player) || state.seeking) return 1;
    if (state.hudShownUs != 0 && now - state.hudShownUs < HUD_VISIBLE_US) return 1;
@@ -3107,7 +3130,8 @@ static int controlsVisible(void)
 
 static int fullPlaybackHudVisible(void)
 {
-   return state.hudShownUs != 0 && sys_time_get_system_time() - state.hudShownUs < HUD_VISIBLE_US;
+   return !state.controlsDismissed && state.hudShownUs != 0 &&
+          sys_time_get_system_time() - state.hudShownUs < HUD_VISIBLE_US;
 }
 
 // paint each sponsor segment onto the bar in its category colour, over the progress fill so it stays
