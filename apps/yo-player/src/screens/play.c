@@ -940,7 +940,10 @@ static void worker(uint64_t arg)
       strCopy(state.author, sizeof state.author, "Downloaded");
       loadDownloadedMetadata(requestedLocalPath, state.title, sizeof state.title,
                              state.author, sizeof state.author,
-                             state.description, sizeof state.description);
+                             state.description, sizeof state.description,
+                             state.publishedDate, sizeof state.publishedDate,
+                             state.viewCount, sizeof state.viewCount,
+                             state.likeCount, sizeof state.likeCount);
       CaptionTrack localTracks[2];
       int localTrackCount = getDownloadedSubtitleTracks(requestedLocalPath, localTracks, 2);
       if (localTrackCount > 0) {
@@ -953,7 +956,9 @@ static void worker(uint64_t arg)
          }
       }
       parseChapters(state.description, &state.chapters);
-      strCopy(state.likeCount, sizeof state.likeCount, "Offline");
+      if (!state.likeCount[0]) strCopy(state.likeCount, sizeof state.likeCount, "Offline");
+      if (!state.viewCount[0]) strCopy(state.viewCount, sizeof state.viewCount, "Offline");
+      if (!state.publishedDate[0]) strCopy(state.publishedDate, sizeof state.publishedDate, "Offline");
       state.isLive = 0;
       state.videoCount = 0;
       state.resolutionIndex = -1;

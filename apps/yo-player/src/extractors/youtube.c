@@ -1288,6 +1288,27 @@ static int extract(const char *input, StreamInfo *out)
    }
 
    if (out->formatCount == 0 && isMembersOnlyResponse(resp)) membersOnly = 1;
+
+   /* Some player clients omit videoDetails.shortDescription even when the
+      video has a public description. Retry only this missing field with WEB. */
+   if (!out->description[0]) {
+      int metadataLen = 0;
+      int metadataRc = fetchPlayerClient(
+         "\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"",
+         WEB_UA, "1", WEB_VERSION, videoId, resp, &metadataLen);
+      if (metadataRc == 0 && metadataLen > 0) {
+         const char *metadataEnd = resp + metadataLen;
+         const char *metadataDetails = strstr(resp, "\"videoDetails\"");
+         if (metadataDetails)
+            jsonString(metadataDetails, metadataEnd, "shortDescription", out->description, sizeof out->description);
+      }
+      if (out->description[0])
+         logInfo("[yt] description recovered from WEB metadata video=%s bytes=%d\n",
+                 videoId, (int)strlen(out->description));
+      else
+         logWarn("[yt] description unavailable from player clients video=%s\n", videoId);
+   }
+
    free(resp);
    return membersOnly && out->formatCount == 0 ? -2 : 0;
 }

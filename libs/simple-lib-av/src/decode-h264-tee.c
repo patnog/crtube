@@ -147,6 +147,14 @@ struct H264TeeBackend {
    int dropped;
    uint64_t statsSinceUs;
    int statsOutput;
+   int statsDecodedStart;
+   int statsCatchUpInspected;
+   int statsCatchUpDisposable;
+   int statsQueuePeak;
+   uint64_t statsGetUs;
+   uint64_t statsCopyUs;
+   uint64_t statsGetMaxUs;
+   uint64_t statsCopyMaxUs;
    int width;
    int height;
    char error[200];
@@ -206,6 +214,7 @@ H264TeeBackend *openH264TeeBackend(int width, int height, char *error, int error
    __sync_lock_test_and_set(&teeDecoderOpen, 1);
    __sync_lock_test_and_set(&teeOperationLock, 0);
    backend->statsSinceUs = sys_time_get_system_time();
+   backend->statsDecodedStart = tdec_pictures_decoded(backend->decoder);
    backend->width = width;
    backend->height = height;
    logInfo("[decode-h264] TEE backend opened for %dx%d\n", width, height);
@@ -253,9 +262,13 @@ int feedH264TeeBackend(H264TeeBackend *backend, const uint8_t *data, int size, u
       return -1;
    }
 
-   if (backend->catchUpSkip && isDisposableTeeAu(data, size)) {
-      backend->dropped++;
-      return 0;
+   if (backend->catchUpSkip) {
+      backend->statsCatchUpInspected++;
+      if (isDisposableTeeAu(data, size)) {
+         backend->statsCatchUpDisposable++;
+         backend->dropped++;
+         return 0;
+      }
    }
 
    result = tdec_feed(backend->decoder, data, (size_t)size, TDEC_ANNEXB, (int64_t)pts);
@@ -270,45 +283,96 @@ int feedH264TeeBackend(H264TeeBackend *backend, const uint8_t *data, int size, u
    return -1;
 }
 
+static void reportTeeStats(H264TeeBackend *backend)
+{
+   uint64_t now;
+   int queueCount;
+   int decoded;
+
+   if (!backend || !backend->decoder)
+      return;
+   queueCount = tdec_output_queue_count(backend->decoder);
+   if (queueCount > backend->statsQueuePeak)
+      backend->statsQueuePeak = queueCount;
+   now = sys_time_get_system_time();
+   if (now - backend->statsSinceUs < TEE_STATS_INTERVAL_US)
+      return;
+
+   decoded = tdec_pictures_decoded(backend->decoder);
+   logInfo("[decode-h264-tee] 5s decoded=%d output=%d getMs=%llu getMaxUs=%llu copyMs=%llu copyMaxUs=%llu queue=%d queuePeak=%d backlog=%d catchUpAUs=%d disposableAUs=%d droppedNonRef=%d\n",
+           decoded - backend->statsDecodedStart,
+           backend->statsOutput,
+           (unsigned long long)(backend->statsGetUs / 1000ull),
+           (unsigned long long)backend->statsGetMaxUs,
+           (unsigned long long)(backend->statsCopyUs / 1000ull),
+           (unsigned long long)backend->statsCopyMaxUs,
+           queueCount,
+           backend->statsQueuePeak,
+           getH264TeeBackendBacklog(backend),
+           backend->statsCatchUpInspected,
+           backend->statsCatchUpDisposable,
+           backend->dropped);
+
+   backend->statsSinceUs = now;
+   backend->statsDecodedStart = decoded;
+   backend->statsOutput = 0;
+   backend->statsCatchUpInspected = 0;
+   backend->statsCatchUpDisposable = 0;
+   backend->statsQueuePeak = queueCount;
+   backend->statsGetUs = 0;
+   backend->statsCopyUs = 0;
+   backend->statsGetMaxUs = 0;
+   backend->statsCopyMaxUs = 0;
+   backend->dropped = 0;
+}
+
 int getH264TeeBackendFrame(H264TeeBackend *backend, void *yuvOut,
                            int *outWidth, int *outHeight, uint64_t *outPts)
 {
    tdec_picture picture;
    int result;
    const char *why;
+   uint64_t started;
+   uint64_t elapsed;
 
    if (!backend || !backend->decoder || !yuvOut) return -1;
+   started = sys_time_get_system_time();
    result = tdec_get_picture(backend->decoder, &picture);
+   elapsed = sys_time_get_system_time() - started;
+   backend->statsGetUs += elapsed;
+   if (elapsed > backend->statsGetMaxUs)
+      backend->statsGetMaxUs = elapsed;
    if (result == 0) {
       why = tdec_error(backend->decoder);
       if (why) {
          snprintf(backend->error, sizeof(backend->error), "%s", why);
+         reportTeeStats(backend);
          return -1;
       }
+      reportTeeStats(backend);
       return 0;
    }
    if (result < 0) {
       why = tdec_error(backend->decoder);
       snprintf(backend->error, sizeof(backend->error), "%s",
                why ? why : "TEE decoder stopped before end of stream");
+      reportTeeStats(backend);
       return -1;
    }
 
+   started = sys_time_get_system_time();
    tdec_copy_i420(&picture, (uint8_t *)yuvOut);
+   elapsed = sys_time_get_system_time() - started;
+   backend->statsCopyUs += elapsed;
+   if (elapsed > backend->statsCopyMaxUs)
+      backend->statsCopyMaxUs = elapsed;
    *outWidth = picture.width;
    *outHeight = picture.height;
    *outPts = (uint64_t)picture.pts;
    tdec_release_picture(backend->decoder, &picture);
    backend->output++;
    backend->statsOutput++;
-   uint64_t now = sys_time_get_system_time();
-   if (now - backend->statsSinceUs >= TEE_STATS_INTERVAL_US) {
-      logInfo("[decode-h264-tee] 5s output=%d backlog=%d droppedNonRef=%d\n",
-              backend->statsOutput, getH264TeeBackendBacklog(backend), backend->dropped);
-      backend->statsSinceUs = now;
-      backend->statsOutput = 0;
-      backend->dropped = 0;
-   }
+   reportTeeStats(backend);
    return 1;
 }
 
@@ -373,6 +437,14 @@ int flushH264TeeBackend(H264TeeBackend *backend)
       backend->output = 0;
       backend->dropped = 0;
       backend->statsOutput = 0;
+      backend->statsDecodedStart = tdec_pictures_decoded(backend->decoder);
+      backend->statsCatchUpInspected = 0;
+      backend->statsCatchUpDisposable = 0;
+      backend->statsQueuePeak = 0;
+      backend->statsGetUs = 0;
+      backend->statsCopyUs = 0;
+      backend->statsGetMaxUs = 0;
+      backend->statsCopyMaxUs = 0;
       backend->statsSinceUs = sys_time_get_system_time();
       setH264TeeBackendCatchUpSkip(backend, 0);
       backend->error[0] = 0;

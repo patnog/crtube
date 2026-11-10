@@ -3,8 +3,8 @@
 // downloads - background video downloads. Square/R3 on a grid queues a video; a single low-priority worker
 // drains the queue one at a time, remuxing the same H.264 + AAC streams the player would show into one
 // .mp4, then handing it to video-export so it turns up in the XMB's Video column. The active download's
-// progress shows top-right on the browse screens. Everything runs off the UI thread; the queue is
-// cancelled and cleared on app exit.
+// progress shows at the lower-left below the browse-screen button hints. Everything runs off the UI
+// thread; the queue is cancelled and cleared on app exit.
 
 #include "extractor.h"   // SearchResult / CaptionTrack
 
@@ -18,8 +18,10 @@ int deleteDownloadedVideo(const char *videoId);
 int getDownloadedSubtitleTracks(const char *videoPath, CaptionTrack *out, int capacity);
 int getDownloadedVideoPath(const char *videoId, char *path, int cap);
 int loadDownloadedMetadata(const char *videoPath, char *title, int titleCap,
-                           char *author, int authorCap, char *description, int descriptionCap);
+                           char *author, int authorCap, char *description, int descriptionCap,
+                           char *publishedDate, int publishedCap,
+                           char *viewCount, int viewsCap, char *likeCount, int likesCap);
 
 void updateDownloadOverlay(void);         // refresh the "Downloading ..." label; call each frame in a screen update
-void drawDownloadOverlay(int screenWidth); // draw it top-right if a download is active; call in a screen draw
+void drawDownloadOverlay(int screenWidth); // draw progress and the short enqueue toast; call in a screen draw
 int consumeDownloadCompletion(void); // consume a completion event on the UI thread

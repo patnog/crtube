@@ -320,6 +320,23 @@ int tdec_pictures_decoded(const tdec *d)
 	return dec_pictures_done(d->core);
 }
 
+int tdec_output_queue_count(const tdec *d)
+{
+	dec_out *queue;
+	int count = 0;
+	int i;
+
+	if (!d || !d->core || !d->running)
+		return 0;
+	plat_sync();
+	queue = dec_outq(d->core);
+	for (i = 0; i < DEC_OUTQ; i++) {
+		if (queue[i].state == 1)
+			count++;
+	}
+	return count;
+}
+
 int tdec_next_au(const uint8_t *data, size_t size, size_t *pos, const uint8_t **au, size_t *len)
 {
 	return h264_next_au(data, size, pos, au, len);

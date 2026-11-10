@@ -223,9 +223,10 @@ void setSidebarCurrent(SidebarItem item)
       case SIDEBAR_PS3_HISTORY:             side.selected = 10; break;
       case SIDEBAR_PS3_WATCH_LATER:         side.selected = 11; break;
       case SIDEBAR_PS3_PLAYLISTS:           side.selected = 12; break;
-      case SIDEBAR_ACCOUNT:                 side.selected = 14; break;
-      case SIDEBAR_SETTINGS:                side.selected = 15; break;
-      case SIDEBAR_EXIT:                    side.selected = 16; break;
+      case SIDEBAR_DOWNLOADS:               side.selected = 13; break;
+      case SIDEBAR_ACCOUNT:                 side.selected = 15; break;
+      case SIDEBAR_SETTINGS:                side.selected = 16; break;
+      case SIDEBAR_EXIT:                    side.selected = 17; break;
       default: break;
    }
    keepSelectionVisible();
@@ -382,7 +383,7 @@ static void drawMainRows(int panelX)
       int iconY = rowY + (SIDEBAR_ROW_HEIGHT - iconSize) / 2;
       int contentOffset = side.screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
       uint32_t iconColor = i == side.selected ? activeTheme->accent : activeTheme->textSecondary;
-      if (i == 15)
+      if (mainRows[i].action == SIDEBAR_EXIT)
          drawExitDoorIcon(panelX + SIDEBAR_CONTENT_LEFT + contentOffset, iconY, iconColor);
       else
          drawSidebarRowIcon(&side.mainIcons[i], panelX + SIDEBAR_CONTENT_LEFT + contentOffset, iconY, iconColor);

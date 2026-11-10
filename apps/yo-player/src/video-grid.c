@@ -1670,6 +1670,30 @@ static void drawTile(VideoGrid *grid, int i)
       fillGfxRectangleFixed(lineX, lineY + lineH + lineGap, iconW, lineH, activeTheme->textPrimary);
       fillGfxRectangleFixed(lineX, lineY + 2 * (lineH + lineGap), iconW, lineH, activeTheme->textPrimary);
       drawLabelAt(&grid->durations[i], lineX + iconW + iconGap, badgeY + badgePadY);
+   } else if (item->isLocalDownload) {
+      float scale = getGfxUiScaleFactor();
+      int iconW = (int)(14 * scale + 0.5f);
+      int iconH = (int)(14 * scale + 0.5f);
+      int iconGap = (int)(5 * scale + 0.5f);
+      int badgePadX = (int)(6 * scale + 0.5f);
+      int badgePadY = (int)(4 * scale + 0.5f);
+      int badgeGap = (int)(6 * scale + 0.5f);
+      int textW = grid->durations[i].tt.tex.w;
+      int badgeW = iconW + iconGap + textW + 2 * badgePadX;
+      int badgeH = (grid->durations[i].tt.tex.h > iconH ? grid->durations[i].tt.tex.h : iconH) + 2 * badgePadY;
+      int badgeX = tx + grid->tileW - badgeW - badgeGap;
+      int badgeY = ty + grid->thumbH - badgeH - badgeGap;
+      fillGfxRoundedRectangleFixed(badgeX, badgeY, badgeW, badgeH, badgeH / 3, activeTheme->badgeFill);
+      int iconX = badgeX + badgePadX;
+      int iconY = badgeY + (badgeH - iconH) / 2;
+      /* Compact floppy-disk silhouette. */
+      fillGfxRectangleFixed(iconX, iconY, iconW, iconH, activeTheme->textPrimary);
+      fillGfxRectangleFixed(iconX + (int)(3 * scale + 0.5f), iconY,
+                            (int)(7 * scale + 0.5f), (int)(4 * scale + 0.5f), activeTheme->badgeFill);
+      fillGfxRectangleFixed(iconX + (int)(4 * scale + 0.5f), iconY + (int)(7 * scale + 0.5f),
+                            (int)(6 * scale + 0.5f), (int)(5 * scale + 0.5f), activeTheme->badgeFill);
+      drawLabelAt(&grid->durations[i], iconX + iconW + iconGap,
+                  badgeY + (badgeH - grid->durations[i].tt.tex.h) / 2);
    } else if (!item->isPlaylist && (item->duration[0] || item->isLive)) {
       int badgeW = grid->durations[i].tt.tex.w + 2 * padX;
       int badgeH = grid->durations[i].tt.tex.h + 2 * padY;

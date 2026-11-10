@@ -134,6 +134,7 @@ const char *tdec_error(const tdec *d);         /* NULL while all is well */
 void   tdec_picture_memory(const tdec *d, void **base, size_t *size);
 int    tdec_size(const tdec *d, int *width, int *height);   /* the visible size; 0 before the first picture */
 int    tdec_pictures_decoded(const tdec *d);   /* since tdec_open / tdec_flush */
+int    tdec_output_queue_count(const tdec *d); /* decoded pictures currently available in the output ring */
 
 /* Annex B (.264, MPEG-TS payloads): the next access unit - one picture's NAL units, start codes included - at
    or after *pos in data. 1 with [*au, *au + *len), *pos moved past it; 0 at the end. A new access unit starts at
