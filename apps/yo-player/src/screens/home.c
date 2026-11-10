@@ -1842,6 +1842,7 @@ static void initHome(void)
    setGridWatchedPosition(&home.grid, getWatchedPosition);
    setGridDownloadedPosition(&home.grid, getDownloadedPosition);
    setGridWatchLaterPredicate(&home.grid, isWatchLater);
+   setGridPlaylistWatchLaterPredicate(&home.grid, isPlaylistWatchLater);
    home.grid.suppressWatchLaterBadge = (home.category == HOME_WATCHLATER ||
       home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER);
 

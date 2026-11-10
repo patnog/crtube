@@ -405,6 +405,7 @@ static void initSearch(void)
    setGridWatchedPredicate(&search.grid, isWatched);
    setGridWatchedPosition(&search.grid, getWatchedPosition);
    setGridWatchLaterPredicate(&search.grid, isWatchLater);
+   setGridPlaylistWatchLaterPredicate(&search.grid, isPlaylistWatchLater);
    setGridInputSuppressed(&search.grid, search.landing);
    setGridFocusHidden(&search.grid, search.landing);
    setSidebarCurrent(SIDEBAR_SEARCH);

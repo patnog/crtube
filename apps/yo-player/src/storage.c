@@ -902,6 +902,15 @@ static void savePlaylistWatchLater(void)
    free(buffer);
 }
 
+int isPlaylistWatchLater(const char *playlistId)
+{
+   if (!playlistId || !playlistId[0]) return 0;
+   loadPlaylistWatchLater();
+   for (int i = 0; i < playlistWatchLaterCount; i++)
+      if (strcmp(playlistWatchLater[i].playlistId, playlistId) == 0) return 1;
+   return 0;
+}
+
 int addPlaylistToWatchLater(const SearchResult *playlist)
 {
    if (!playlist || !playlist->isPlaylist || !playlist->playlistId[0]) return -1;

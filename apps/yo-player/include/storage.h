@@ -63,6 +63,7 @@ int  getWatchLaterRevision(void);
 // PS3 playlist library. Watch Later stores YouTube playlist references; PS3 stores local video lists.
 #define LOCAL_PLAYLIST_NAME_LEN 64
 #define LOCAL_PLAYLIST_ID_LEN   16
+int  isPlaylistWatchLater(const char *playlistId);
 int  addPlaylistToWatchLater(const SearchResult *playlist);
 int  getPlaylistWatchLater(SearchResults *out);
 int  getLocalPlaylistCount(void);

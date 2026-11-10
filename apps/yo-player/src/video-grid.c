@@ -1516,6 +1516,7 @@ void setGridWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *video
 void setGridWatchedPosition(VideoGrid *grid, int (*watchedPosition)(const char *videoId)) { grid->watchedPosition = watchedPosition; }
 void setGridDownloadedPosition(VideoGrid *grid, int (*downloadedPosition)(const char *videoId)) { grid->downloadedPosition = downloadedPosition; }
 void setGridWatchLaterPredicate(VideoGrid *grid, int (*isWatchLater)(const char *videoId)) { grid->isWatchLater = isWatchLater; }
+void setGridPlaylistWatchLaterPredicate(VideoGrid *grid, int (*isWatchLater)(const char *playlistId)) { grid->isPlaylistWatchLater = isWatchLater; }
 void setGridSortMode(VideoGrid *grid, SortOrder mode) { if (grid) grid->sortMode = mode >= SORT_RELEVANCE && mode < SORT_COUNT ? mode : SORT_RELEVANCE; }
 void setGridPlaylistSortMode(VideoGrid *grid, PlaylistSortOrder mode)
 {
@@ -1745,7 +1746,10 @@ static void drawTile(VideoGrid *grid, int i)
       drawLabelAt(&grid->membersOnlyBadge, badgeX + padX, badgeY + padY);
    }
 
-   if (!grid->suppressWatchLaterBadge && !item->isPlaylist && grid->isWatchLater && grid->isWatchLater(item->videoId)) {
+   if (!grid->suppressWatchLaterBadge &&
+       ((!item->isPlaylist && grid->isWatchLater && grid->isWatchLater(item->videoId)) ||
+        (item->isPlaylist && !item->isLocalPlaylist && grid->isPlaylistWatchLater &&
+         grid->isPlaylistWatchLater(item->playlistId)))) {
       int badgeW = grid->watchLaterBadge.tt.tex.w + 2 * padX;
       int badgeH = grid->watchLaterBadge.tt.tex.h + 2 * padY;
       int badgeX = tx + grid->tileW - badgeW - edgeGap, badgeY = ty + 6;
