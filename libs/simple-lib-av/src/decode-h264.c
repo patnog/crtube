@@ -309,3 +309,7 @@ void destroyH264Decoder(H264Decoder *decoder)
    destroyLock(&decoder->lock);
    free(decoder);
 }
+
+void setH264DecoderCatchUpSkip(H264Decoder *decoder, int enabled) { (void)decoder; (void)enabled; }
+
+int getAuBacklogLimitH264(const H264Decoder *decoder, int auBufferCount) { (void)decoder; return auBufferCount; }

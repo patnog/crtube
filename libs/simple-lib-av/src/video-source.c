@@ -20,18 +20,27 @@ static int seekBackend(VideoSource *source, uint64_t offset)
    return seekFs(&source->file, (int64_t)offset, VFS_SEEK_SET) < 0 ? -1 : 0;
 }
 
-// a live segment stream is addressed as "dashseg|<startSq>|<edgeSq>|<baseUrl>" (see live-source.h). NULL base
-// on a malformed value keeps openVideoSource from opening it.
-static const char *parseLivePath(const char *path, long *startSq, long *edgeSq)
+// dashseg is an active LIVE window; dashvod is a just-ended LIVE recording. Both accept an optional playSq.
+static const char *parseLivePath(const char *path, long *startSq, long *edgeSq, long *playSq, int *ended)
 {
-   if (strncmp(path, "dashseg|", 8) != 0) return NULL;
+   if (strncmp(path, "dashseg|", 8) != 0 && strncmp(path, "dashvod|", 8) != 0) return NULL;
+   *ended = path[4] == 'v';
    const char *cursor = path + 8;
    *startSq = atol(cursor);
    cursor = strchr(cursor, '|');
    if (!cursor) return NULL;
    *edgeSq = atol(++cursor);
    cursor = strchr(cursor, '|');
-   return cursor ? cursor + 1 : NULL;
+   if (!cursor) return NULL;
+   cursor++;
+   *playSq = -1;
+   if ((*cursor >= '0' && *cursor <= '9') || *cursor == '-') {
+      *playSq = atol(cursor);
+      cursor = strchr(cursor, '|');
+      if (!cursor) return NULL;
+      cursor++;
+   }
+   return cursor;
 }
 
 int openVideoSource(VideoSource *source, const char *path)
@@ -41,10 +50,11 @@ int openVideoSource(VideoSource *source, const char *path)
    source->buffer = (uint8_t *)malloc(SOURCE_BUFFER_SIZE);
    if (!source->buffer) return -1;
 
-   long startSq = 0, edgeSq = 0;
-   const char *liveBase = parseLivePath(path, &startSq, &edgeSq);
+   long startSq = 0, edgeSq = 0, playSq = -1;
+   int ended = 0;
+   const char *liveBase = parseLivePath(path, &startSq, &edgeSq, &playSq, &ended);
    if (liveBase) {
-      source->live = openLiveSource(liveBase, startSq, edgeSq);
+      source->live = openLiveSource(liveBase, startSq, edgeSq, playSq, ended);
       if (!source->live) { free(source->buffer); source->buffer = 0; return -1; }
       source->isLive = 1;
       source->size   = 0;   // unbounded live stream
@@ -119,9 +129,14 @@ int seekVideoSource(VideoSource *source, uint64_t offset)
 uint64_t getVideoSourcePosition(const VideoSource *source) { return source->pos; }
 uint64_t getVideoSourceSize(const VideoSource *source) { return source->size; }
 
+long getVideoSourceLiveFirstSq(const VideoSource *source)
+{
+   return source && source->isOpen && source->isLive ? getLiveSourceFirstSq(source->live) : -1;
+}
+
 void cancelVideoSource(VideoSource *source)
 {
-   if (!source->isOpen) return;
+   if (!source || !source->isOpen) return;
    if (source->isLive) cancelLiveSource(source->live);
    else if (source->isHttp) cancelHttpStream(source->http);
 }

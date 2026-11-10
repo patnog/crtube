@@ -41,6 +41,8 @@ int isH264TeeAvailable(void);
 // access units. This keeps media time moving on the PS3's ~35 fps 1080p decoder; it does not
 // produce 60 decoded pictures per second. Set before feeding begins.
 void setH264DecoderAlternateSkip(H264Decoder *decoder, int enabled);
+// TEE-only adaptive catch-up: drop only non-reference pictures while presentation is behind.
+void setH264DecoderCatchUpSkip(H264Decoder *decoder, int enabled);
 
 // feeds one Annex-B access unit without waiting for it to be consumed. pts is opaque (passed through
 // to the decoded picture). returns 0 when fed, 1 when the decoder's queues are full (pull pictures
@@ -51,6 +53,8 @@ int decodeAuH264(H264Decoder *decoder, const uint8_t *data, int size, uint64_t p
 // access units fed but not yet consumed. A caller with N rotating AU buffers may safely demux a
 // new AU while the backlog is below N.
 int getAuBacklogH264(const H264Decoder *decoder);
+// TEE copies submitted AUs internally and can run farther ahead than the rotating Sony input buffers.
+int getAuBacklogLimitH264(const H264Decoder *decoder, int auBufferCount);
 
 // TEE-only progress counter: pictures completed by the decoder since open/flush.
 int getH264DecoderPicturesDecoded(const H264Decoder *decoder);

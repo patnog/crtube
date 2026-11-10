@@ -25,7 +25,7 @@
 #define AUDIO_STARTUP_PRIME_FRAMES 2048 // two typical AAC frames; avoids the old ~0.37 s audio lead-in
 #define PREROLL_AUDIO_TIMEOUT_US (5 * 1000 * 1000)   // give up waiting for audio to anchor the clock, play video alone
 #define DECODE_STALL_MS       3000   // no AU consumed and no picture produced for this long = hard error
-#define TEE_WATCHDOG_NO_FRAME_MS 2500 // no output with queued input = stalled TEE decoder
+#define TEE_WATCHDOG_NO_FRAME_MS 3000 // no output with queued input = stalled TEE decoder
 #define TEE_WATCHDOG_MIN_BACKLOG 2
 #define TEE_WATCHDOG_MAX_DIAGNOSTICS 2
 #define END_OF_STREAM_DRAIN_MS 500   // how long to wait for the last pictures after the final AU
@@ -45,6 +45,7 @@ struct VideoPlayer {
    VideoDemuxer demuxer;
    H264Decoder *decoder;
    int          allocW, allocH;   // coded frame-buffer dimensions (macroblock-aligned)
+   int          catchUpAllowed;   // TEE streams above 30 FPS may drop non-reference pictures when behind
    VideoFrameFreeFn freeFrame;    // releases the slot buffers (matches the allocator used)
 
    VideoAu      pendingAu;        // demuxed AU not yet accepted by the decoder (queues were full)
@@ -143,6 +144,15 @@ static void logDecoderForStream(const VideoPlayer *player)
 
 static void configureDecoderForStream(VideoPlayer *player)
 {
+   int fps = getStreamFps(player);
+   if (isH264DecoderTee(player->decoder)) {
+      player->catchUpAllowed = fps > 30;
+      setH264DecoderCatchUpSkip(player->decoder, 0);
+      if (player->catchUpAllowed)
+         logInfo("[video-player] adaptive TEE catch-up armed for %d fps\n", fps);
+      return;
+   }
+   player->catchUpAllowed = 0;
    int enabled = shouldAlternateSkipForStream(player);
    setH264DecoderAlternateSkip(player->decoder, enabled);
    if (enabled)
@@ -283,6 +293,7 @@ static int checkTeeWatchdog(VideoPlayer *player, int *startedAtKeyframe)
 // defined below the decode thread but used by performSeek's audio-revive path
 static VideoDemuxer *getAudioSource(VideoPlayer *player);
 static void audioDecodeThread(uint64_t arg);
+static int presentationClockNs(VideoPlayer *player, uint64_t nowUs, uint64_t *clockNs);
 
 // ============================================================================
 // decode thread
@@ -322,10 +333,9 @@ retry_decoder:
       if (watchdog > 0) { stalledMs = 0; continue; }
       if (watchdog < 0) return -1;
 
-      // the demuxer rotates AU_BUFFER_COUNT buffers; keep the decoder's command queue as full as they
-      // allow (the SDK notes throughput improves when the queue never runs dry) without overwriting
-      // an AU the decoder is still reading
-      if (!player->hasPendingAu && getAuBacklogH264(player->decoder) >= AU_BUFFER_COUNT) { sleepMs(1); stalledMs++; continue; }
+      // Sony VDEC reads from the rotating AU buffers, so its backlog stays within AU_BUFFER_COUNT.
+      // TEE copies each submitted AU internally and can keep a deeper 48-AU command queue full.
+      if (!player->hasPendingAu && getAuBacklogH264(player->decoder) >= getAuBacklogLimitH264(player->decoder, AU_BUFFER_COUNT)) { sleepMs(1); stalledMs++; continue; }
 
       if (!player->hasPendingAu) {
          int r = readVideoAu(&player->demuxer, &player->pendingAu);
@@ -458,6 +468,15 @@ static void decodeThread(uint64_t arg)
       int width, height; uint64_t pts;
       int got = player->decoder ? decodeNextFrame(player, player->slots[slot].yuv, &width, &height, &pts, &startedAtKeyframe) : -1;
 
+      if (player->catchUpAllowed && got == 1 && player->decoder && isH264DecoderTee(player->decoder)) {
+         uint64_t clock = 0;
+         if (presentationClockNs(player, sys_time_get_system_time(), &clock)) {
+            uint64_t lag = clock > pts ? clock - pts : 0;
+            if (lag > 250000000ull) setH264DecoderCatchUpSkip(player->decoder, 1);
+            else if (lag < 60000000ull) setH264DecoderCatchUpSkip(player->decoder, 0);
+         }
+      }
+
       lock(&player->lock);
       if (got == 1) {
          int logFirstReady = !player->diagFirstFrameReady;
@@ -492,6 +511,37 @@ static void decodeThread(uint64_t arg)
 static VideoDemuxer *getAudioSource(VideoPlayer *player)
 {
    return player->hasAudioDemuxer ? &player->audioDemuxer : &player->demuxer;
+}
+
+// Match the actual presentation master: audio samples consumed by the mixer, or the wall clock
+// before audio has anchored it. This avoids using queue depth as a proxy for decoder latency.
+static int presentationClockNs(VideoPlayer *player, uint64_t nowUs, uint64_t *clockNs)
+{
+   int paused, started, audioValid, feedSlot;
+   uint64_t currentPts, basePts, baseWallUs, audioBasePts;
+   lock(&player->lock);
+   paused = player->paused;
+   started = player->started;
+   audioValid = player->audioClockValid;
+   feedSlot = player->audioFeedSlot;
+   currentPts = player->currentPts;
+   basePts = player->basePts;
+   baseWallUs = player->baseWallUs;
+   audioBasePts = player->audioClockBasePts;
+   unlock(&player->lock);
+
+   *clockNs = currentPts;
+   if (paused || !started) return 0;
+   if (audioValid && feedSlot >= 0) {
+      VideoDemuxer *source = getAudioSource(player);
+      if (source->audioRate > 0) {
+         *clockNs = audioBasePts + getAudioPcmFeedPlayedFramesSlot(feedSlot) * 1000000000ull /
+                    (uint64_t)source->audioRate;
+         return 1;
+      }
+   }
+   if (nowUs >= baseWallUs) *clockNs = basePts + (nowUs - baseWallUs) * 1000ull;
+   return 1;
 }
 
 static void audioDecodeThread(uint64_t arg)
@@ -1039,6 +1089,16 @@ int isVideoEnded(const VideoPlayer *player)
 float getVideoPositionSeconds(const VideoPlayer *player)
 {
    return (float)player->currentPts / 1.0e9f;   // stream pts count from the start of the file
+}
+
+uint64_t getVideoPositionNs(const VideoPlayer *player)
+{
+   return player ? player->currentPts : 0;
+}
+
+long getVideoLiveFirstSq(const VideoPlayer *player)
+{
+   return player ? getVideoDemuxerLiveFirstSq(&player->demuxer) : -1;
 }
 
 float getVideoDurationSeconds(const VideoPlayer *player)

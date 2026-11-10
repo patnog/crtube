@@ -5,8 +5,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/sys_time.h>
 
 #define TEE_CLOSE_WAIT_MS 5000
+#define TEE_STATS_INTERVAL_US 5000000ull
 
 static volatile int teeAvailability = -1;
 static volatile int teeCloseDone;
@@ -141,6 +143,10 @@ struct H264TeeBackend {
    tdec *decoder;
    int fed;
    int output;
+   int catchUpSkip;
+   int dropped;
+   uint64_t statsSinceUs;
+   int statsOutput;
    int width;
    int height;
    char error[200];
@@ -199,10 +205,40 @@ H264TeeBackend *openH264TeeBackend(int width, int height, char *error, int error
 
    __sync_lock_test_and_set(&teeDecoderOpen, 1);
    __sync_lock_test_and_set(&teeOperationLock, 0);
+   backend->statsSinceUs = sys_time_get_system_time();
    backend->width = width;
    backend->height = height;
    logInfo("[decode-h264] TEE backend opened for %dx%d\n", width, height);
    return backend;
+}
+
+// Only non-reference VCL pictures (nal_ref_idc == 0) are disposable. IDR and reference pictures stay.
+static int isDisposableTeeAu(const uint8_t *data, int size)
+{
+   int i = 0;
+   while (i + 3 < size) {
+      int start = -1;
+      if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) start = i + 3;
+      else if (i + 4 < size && data[i] == 0 && data[i + 1] == 0 &&
+               data[i + 2] == 0 && data[i + 3] == 1) start = i + 4;
+      if (start < 0) { i++; continue; }
+      if (start >= size) break;
+      int type = data[start] & 0x1f;
+      if (type == 5) return 0;
+      if (type == 1) return ((data[start] >> 5) & 3) == 0;
+      i = start + 1;
+   }
+   return 0;
+}
+
+void setH264TeeBackendCatchUpSkip(H264TeeBackend *backend, int enabled)
+{
+   if (!backend) return;
+   enabled = enabled != 0;
+   if (backend->catchUpSkip != enabled) {
+      backend->catchUpSkip = enabled;
+      logInfo("[decode-h264-tee] adaptive non-reference drop %s\n", enabled ? "enabled" : "disabled");
+   }
 }
 
 int feedH264TeeBackend(H264TeeBackend *backend, const uint8_t *data, int size, uint64_t pts)
@@ -215,6 +251,11 @@ int feedH264TeeBackend(H264TeeBackend *backend, const uint8_t *data, int size, u
    if (why) {
       snprintf(backend->error, sizeof(backend->error), "%s", why);
       return -1;
+   }
+
+   if (backend->catchUpSkip && isDisposableTeeAu(data, size)) {
+      backend->dropped++;
+      return 0;
    }
 
    result = tdec_feed(backend->decoder, data, (size_t)size, TDEC_ANNEXB, (int64_t)pts);
@@ -259,6 +300,15 @@ int getH264TeeBackendFrame(H264TeeBackend *backend, void *yuvOut,
    *outPts = (uint64_t)picture.pts;
    tdec_release_picture(backend->decoder, &picture);
    backend->output++;
+   backend->statsOutput++;
+   uint64_t now = sys_time_get_system_time();
+   if (now - backend->statsSinceUs >= TEE_STATS_INTERVAL_US) {
+      logInfo("[decode-h264-tee] 5s output=%d backlog=%d droppedNonRef=%d\n",
+              backend->statsOutput, getH264TeeBackendBacklog(backend), backend->dropped);
+      backend->statsSinceUs = now;
+      backend->statsOutput = 0;
+      backend->dropped = 0;
+   }
    return 1;
 }
 
@@ -321,6 +371,10 @@ int flushH264TeeBackend(H264TeeBackend *backend)
    if (teeFlushResult == 0) {
       backend->fed = 0;
       backend->output = 0;
+      backend->dropped = 0;
+      backend->statsOutput = 0;
+      backend->statsSinceUs = sys_time_get_system_time();
+      setH264TeeBackendCatchUpSkip(backend, 0);
       backend->error[0] = 0;
       return 0;
    }

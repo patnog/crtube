@@ -50,6 +50,10 @@ typedef struct {
    char defaultAudioTrackId[40];
    int  durationSeconds;
    int  isLive;            // currently broadcasting: streams need live segment-sequence fetching, not a static moov
+   int  isPostLive;        // broadcast ended but YouTube still serves its recording as numbered DASH segments
+   int  liveDvr;           // broadcaster enabled rewind during the LIVE session
+   int  liveSegmentSec;    // target duration of a LIVE segment (normally 5, sometimes 2)
+   int  liveWindowSec;     // YouTube's advertised DVR window in seconds
    int  formatCount;
    StreamFormat formats[MAX_STREAM_FORMATS];
    char author[128];       // owning channel name (appended to preserve existing field offsets)

@@ -677,7 +677,7 @@ static void extractBetween(const char *text, const char *open, const char *close
 // a live stream's itag urls are a rolling DVR window whose byte-0 init rolls off, so play by DASH segments
 // instead: parse the manifest and, for each adaptiveFormat, replace its url with that Representation's
 // segment base ("<base>sq/<n>/...") and record the available sq range (window start .. live edge).
-static void parseLiveManifest(const char *resp, const char *end, StreamInfo *out)
+static void parseLiveManifest(const char *resp, const char *end, StreamInfo *out, const char *kind)
 {
    char manifestUrl[1400];
    if (!jsonString(resp, end, "dashManifestUrl", manifestUrl, sizeof manifestUrl)) return;
@@ -722,7 +722,7 @@ static void parseLiveManifest(const char *resp, const char *end, StreamInfo *out
       format->liveStartSq = startSq;
       format->liveEdgeSq = edgeSq;
       // the player opens this through the live segment source (see video-source / live-source)
-      snprintf(format->url, sizeof format->url, "dashseg|%ld|%ld|%s", startSq, edgeSq, base);
+      snprintf(format->url, sizeof format->url, "%s|%ld|%ld|%s", kind, startSq, edgeSq, base);
       logInfo("[yt] live itag %d: sq %ld..%ld baseTail=%s\n", format->itag, startSq, edgeSq,
               (int)strlen(base) > 40 ? base + strlen(base) - 40 : base);
    }
@@ -1192,21 +1192,28 @@ static int extract(const char *input, StreamInfo *out)
       }
    }
 
-   // a live stream (isLive:true) is a rolling DVR window played from the DASH manifest's segment template.
-   // VISIONOS only returns an HLS manifest for live, so re-resolve with ANDROID_VR for the DASH one before
-   // parsing formats.
+   // Active LIVE and the short post-live DVR recording are both numbered DASH segment streams.
    int liveNow = strstr(resp, "\"isLive\":true") != NULL;
-   if (liveNow && !strstr(resp, "\"dashManifestUrl\"")) {
+   int postLive = !liveNow && strstr(resp, "\"isPostLiveDvr\":true") != NULL;
+   if ((liveNow || postLive) && !strstr(resp, "\"dashManifestUrl\"")) {
       if (fetchPlayer(LIVE_BODY_FMT, LIVE_UA, "28", LIVE_VERSION, videoId, resp, &respLen) == 0)
          end = resp + respLen;
+      postLive = !liveNow && strstr(resp, "\"isPostLiveDvr\":true") != NULL;
    }
 
    parseFormats(resp, end, out);
    out->isLive = liveNow;
-   if (liveNow) {
-      logInfo("[yt] live stream (dash=%d formats=%d dur=%d)\n",
-              strstr(resp, "\"dashManifestUrl\"") ? 1 : 0, out->formatCount, out->durationSeconds);
-      parseLiveManifest(resp, end, out);
+   out->isPostLive = postLive;
+   if (liveNow || postLive) {
+      const char *streaming = strstr(resp, "\"streamingData\"");
+      out->liveDvr = strstr(resp, "\"isLiveDvrEnabled\":true") != NULL;
+      jsonInt(streaming ? streaming : resp, end, "targetDurationSec", &out->liveSegmentSec);
+      jsonInt(streaming ? streaming : resp, end, "maxDvrDurationSec", &out->liveWindowSec);
+      logInfo("[yt] %s (dash=%d formats=%d dur=%d) rewind=%s segment=%ds window=%ds\n",
+              liveNow ? "live stream" : "post-live recording",
+              strstr(resp, "\"dashManifestUrl\"") ? 1 : 0, out->formatCount, out->durationSeconds,
+              out->liveDvr ? "on" : "off", out->liveSegmentSec, out->liveWindowSec);
+      parseLiveManifest(resp, end, out, postLive ? "dashvod" : "dashseg");
    }
 
    int membersOnly = isMembersOnlyResponse(resp);

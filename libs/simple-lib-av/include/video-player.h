@@ -57,5 +57,7 @@ void  seekVideoPlayer(VideoPlayer *player, float seconds);
 void  seekVideoPlayerPast(VideoPlayer *player, float seconds);
 int   isVideoEnded(const VideoPlayer *player);       // decode reached end of stream and the ring drained
 float getVideoPositionSeconds(const VideoPlayer *player);
+uint64_t getVideoPositionNs(const VideoPlayer *player);
+long getVideoLiveFirstSq(const VideoPlayer *player);
 float getVideoDurationSeconds(const VideoPlayer *player);
 void  getAudioTrackInfo(const VideoPlayer *player, int *rate, int *channels);   // 0/0 if no audio track

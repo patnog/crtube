@@ -32,6 +32,7 @@ int64_t  readVideoSource(VideoSource *source, void *buffer, uint64_t length); //
 int      seekVideoSource(VideoSource *source, uint64_t offset);              // absolute seek; 0 / -1
 uint64_t getVideoSourcePosition(const VideoSource *source);
 uint64_t getVideoSourceSize(const VideoSource *source);
+long     getVideoSourceLiveFirstSq(const VideoSource *source);
 void     cancelVideoSource(VideoSource *source);   // unblock a live read waiting on the edge (before teardown)
 void     closeVideoSource(VideoSource *source);
 

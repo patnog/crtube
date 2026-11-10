@@ -246,6 +246,12 @@ void setH264DecoderAlternateSkip(H264Decoder *decoder, int enabled)
       logInfo("[decode-h264] alternating skip-non-reference mode enabled\n");
 }
 
+void setH264DecoderCatchUpSkip(H264Decoder *decoder, int enabled)
+{
+   if (decoder && decoder->backend == H264_BACKEND_TEE)
+      setH264TeeBackendCatchUpSkip(decoder->tee, enabled);
+}
+
 int decodeAuH264(H264Decoder *decoder, const uint8_t *data, int size, uint64_t pts)
 {
    if (!decoder || !data || size <= 0) return -1;
@@ -297,6 +303,11 @@ int getAuBacklogH264(const H264Decoder *decoder)
    if (decoder->backend == H264_BACKEND_TEE)
       return getH264TeeBackendBacklog(decoder->tee);
    return decoder->auFedCount - decoder->auDoneCount;
+}
+
+int getAuBacklogLimitH264(const H264Decoder *decoder, int auBufferCount)
+{
+   return decoder && decoder->backend == H264_BACKEND_TEE ? H264_TEE_BACKLOG_LIMIT : auBufferCount;
 }
 
 int getH264DecoderPicturesDecoded(const H264Decoder *decoder)

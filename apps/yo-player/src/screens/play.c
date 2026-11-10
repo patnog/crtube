@@ -51,8 +51,13 @@
 #define VOLUME_DEFAULT    VOLUME_METER_PILLS
 
 // seek controls (bar + time) show on activity / pause, then auto-hide. left/right scrub the target
-// instantly; the engine seek (a decoder flush + fragment reload each time) fires once input goes quiet.
+// instantly; VOD seeks by keyframe, LIVE DVR seeks by rebuilding both DASH streams at the target sq.
 #define SEEK_STEP_SECONDS   5.0f
+#define LIVE_SEGMENT_SEC_DEFAULT 5
+#define LIVE_WINDOW_SEC_DEFAULT 43200
+#define LIVE_START_BEHIND 3
+#define LIVE_WINDOW_MARGIN 6
+#define LIVE_EDGE_SLACK_SEC 3.0f
 #define CROSS_RESTART_HOLD_US 3000000ULL
 #define SEEK_ACCEL_1_US     1500000ULL
 #define SEEK_ACCEL_2_US     3000000ULL
@@ -344,7 +349,22 @@ static struct {
    sys_ppu_thread_t audioSwitchTid;
    float            audioSwitchPosition;
    int              audioSwitchTarget, audioSwitchFallback;
-   int              isLive;           // a live stream: no duration, no resume/save, no seek
+   int              isLive;           // active or recently-ended DASH LIVE stream
+   int              liveEnded;        // post-live recording: edge is fixed and playback ends there
+   int              liveDvr;          // rewind enabled by the broadcaster (always enabled for post-live)
+   int              liveSegmentSec;   // target duration of each numbered DASH segment
+   int              liveWindowSegs;   // advertised DVR window in segments
+   long             liveFloorSq;      // earliest segment available in the manifest
+   long             liveEdgeSq;       // newest segment at resolve time
+   uint64_t         liveEdgeUs;       // when that edge was observed
+   long             liveFirstSq;      // segment from which the current player was opened
+   uint64_t         liveFirstPtsNs;   // PTS of its first presented frame
+   int              liveAnchored;     // first frame has been presented
+   float            liveLatencySec;   // normal startup distance behind the live edge
+   char             liveVideoOpen[MAX_STREAM_URL + 48];
+   char             liveAudioOpen[MAX_STREAM_URL + 48];
+   VideoPlayer     *liveRetiringPlayer;
+   int              liveReopenThreadActive;
    const uint8_t   *lastFrame;        // fps measure: a changed pointer means a newly presented frame
    int              framesThisSecond, measuredFps;
    uint64_t         fpsTickUs;
@@ -453,6 +473,18 @@ static void fail(const char *reason)
    strCopy(state.message, sizeof state.message, reason);
    __sync_synchronize();   // publish message before the UI thread sees STAGE_FAILED
    state.stage = STAGE_FAILED;
+}
+
+static void writeLiveDescriptor(char *out, int cap, const char *descriptor, long edgeSq, long playSq)
+{
+   out[0] = 0;
+   if (strncmp(descriptor, "dashseg|", 8) != 0 && strncmp(descriptor, "dashvod|", 8) != 0) return;
+   long firstSq = atol(descriptor + 8);
+   const char *edge = strchr(descriptor + 8, '|');
+   if (!edge) return;
+   edge = strchr(edge + 1, '|');
+   if (!edge) return;
+   snprintf(out, cap, "%.7s|%ld|%ld|%ld|%s", descriptor, firstSq, edgeSq, playSq, edge + 1);
 }
 
 // Wait for the decoder/audio pipeline to produce a usable pre-roll. This runs on the
@@ -963,7 +995,7 @@ static void worker(uint64_t arg)
 
    const StreamFormat *video = pickBestPlaybackVideo(info);
    if (!video) { fail("no playable mp4 video"); goto done; }
-   int isLivePlayback = info->isLive || video->isLiveSegmented;
+   int isLivePlayback = info->isLive || info->isPostLive || video->isLiveSegmented;
    const StreamFormat *availableAudio = pickBestAudio(info);
    const StreamFormat *qualityFormats[MAX_PLAYBACK_QUALITIES] = {0};
    state.videoCount = 0;
@@ -1095,6 +1127,23 @@ static void worker(uint64_t arg)
    state.vidItag = video->itag; state.vidW = video->width; state.vidH = video->height; state.vidFps = video->fps;
    state.audItag = audio ? audio->itag : (video->hasAudio ? video->itag : 0);
    state.isLive = isLivePlayback;
+   state.liveEnded = info->isPostLive;
+   if (video->isLiveSegmented) {
+      state.liveDvr = info->liveDvr || state.liveEnded;
+      state.liveSegmentSec = info->liveSegmentSec > 0 ? info->liveSegmentSec : LIVE_SEGMENT_SEC_DEFAULT;
+      int windowSec = info->liveWindowSec > 0 ? info->liveWindowSec : LIVE_WINDOW_SEC_DEFAULT;
+      state.liveWindowSegs = windowSec / state.liveSegmentSec;
+      if (state.liveWindowSegs < 1) state.liveWindowSegs = 1;
+      state.liveFloorSq = video->liveStartSq > 0 ? video->liveStartSq : 0;
+      state.liveEdgeSq = video->liveEdgeSq;
+      state.liveEdgeUs = sys_time_get_system_time();
+      state.liveFirstSq = state.liveEnded ? state.liveFloorSq : state.liveEdgeSq - LIVE_START_BEHIND;
+      if (state.liveFirstSq < state.liveFloorSq) state.liveFirstSq = state.liveFloorSq;
+      state.liveLatencySec = state.liveEnded ? 0.0f : (float)((LIVE_START_BEHIND + 1) * state.liveSegmentSec);
+      logInfo("[yt] LIVE rewind=%s ended=%d sq=%ld..%ld segment=%ds window=%d segments\n",
+              state.liveDvr ? "on" : "off", state.liveEnded, state.liveFloorSq, state.liveEdgeSq,
+              state.liveSegmentSec, state.liveWindowSegs);
+   }
 
    // Open the resolver's normal pick first. For VOD only, wait for a decoded pre-roll;
    // if that rendition cannot become ready, automatically test muxed/AVC alternatives.
@@ -1725,6 +1774,10 @@ static int startResolutionSwitch(int target, int automaticFallback)
    state.resolutionSwitchWasPaused = isVideoPaused(state.player);
    state.resolutionSwitchWasFirstFrameSeen = state.firstFrameSeen;
    state.resolutionSwitchPosition = state.isLive ? 0.0f : getVideoPositionSeconds(state.player);
+   if (state.isLive) {
+      state.liveAnchored = 0;
+      state.liveFirstPtsNs = 0;
+   }
    strCopy(state.resolutionSwitchVideoUrl, sizeof state.resolutionSwitchVideoUrl, state.videoUrls[target]);
    strCopy(state.resolutionSwitchOldVideoUrl, sizeof state.resolutionSwitchOldVideoUrl,
            state.videoUrls[state.resolutionIndex]);
@@ -1740,7 +1793,7 @@ static int startResolutionSwitch(int target, int automaticFallback)
       strCopy(state.resolutionSwitchOldAudioUrl, sizeof state.resolutionSwitchOldAudioUrl, state.fallbackAudioUrl);
 
    setVideoPaused(state.player, 1);
-   if (state.firstFrameSeen && !state.isLive) {
+   if (state.firstFrameSeen && (!state.isLive || state.liveEnded)) {
       char historyId[12];
       if (extractPlaybackId(requestedInput, historyId)) {
          setWatchedDuration(historyId, (int)(getVideoDurationSeconds(state.player) + 0.5f));
@@ -1846,9 +1899,183 @@ static int findAskSponsorSegment(void);
 static int controlsVisible(void);
 static int fullPlaybackHudVisible(void);
 
+static double liveEdgeNow(void)
+{
+   if (state.liveEnded || state.liveSegmentSec <= 0) return (double)state.liveEdgeSq;
+   double elapsed = (double)(sys_time_get_system_time() - state.liveEdgeUs) / 1000000.0;
+   return (double)state.liveEdgeSq + elapsed / (double)state.liveSegmentSec;
+}
+
+static double livePositionSq(void)
+{
+   if (!state.player || !state.liveAnchored || state.liveSegmentSec <= 0)
+      return (double)state.liveFirstSq;
+   uint64_t pts = getVideoPositionNs(state.player);
+   double played = pts > state.liveFirstPtsNs ? (double)(pts - state.liveFirstPtsNs) / 1000000000.0 : 0.0;
+   return (double)state.liveFirstSq + played / (double)state.liveSegmentSec;
+}
+
+static double liveWindowStartSq(void)
+{
+   double start = liveEdgeNow() - (double)state.liveWindowSegs +
+                  (state.liveEnded ? 0.0 : (double)LIVE_WINDOW_MARGIN);
+   return start > (double)state.liveFloorSq ? start : (double)state.liveFloorSq;
+}
+
+static float liveTimelineLength(void)
+{
+   double segments = liveEdgeNow() + 1.0 - liveWindowStartSq();
+   float length = (float)(segments * state.liveSegmentSec) - state.liveLatencySec;
+   return length > 0.0f ? length : 0.0f;
+}
+
+static float liveTimelinePosition(void)
+{
+   float position = (float)((livePositionSq() - liveWindowStartSq()) * state.liveSegmentSec);
+   if (position < 0.0f) position = 0.0f;
+   float length = liveTimelineLength();
+   if (position > length) position = length;
+   return position;
+}
+
+// Normal segment startup latency is not considered a user rewind.
+static int isLiveBehindAtEdge(float behindSeconds)
+{
+   return behindSeconds <= LIVE_EDGE_SLACK_SEC + 0.5f * (float)state.liveSegmentSec;
+}
+
+static void liveReopenWorker(uint64_t arg)
+{
+   (void)arg;
+   VideoPlayer *old = state.liveRetiringPlayer;
+   state.liveRetiringPlayer = NULL;
+   if (old) destroyVideoPlayer(old);
+
+   VideoPlayer *replacement = NULL;
+   if (!playbackCancelRequested())
+      replacement = createVideoPlayerSplitCancelable(state.liveVideoOpen,
+                         state.liveAudioOpen[0] ? state.liveAudioOpen : NULL,
+                         allocGfxVideoBuffer, freeGfxVideoBuffer, &state.cancelRequested);
+   if (playbackCancelRequested() && replacement) {
+      destroyVideoPlayer(replacement);
+      replacement = NULL;
+   }
+   if (!replacement && !playbackCancelRequested()) fail("LIVE seek/reconnect failed");
+   state.pendingPlayer = replacement;
+   __sync_synchronize();
+   state.workerDone = 1;
+   exitThread();
+}
+
+static int reopenLiveAt(long playSq)
+{
+   if (!state.isLive || !state.player || state.threadActive || state.liveReopenThreadActive ||
+       state.resolutionSwitchThreadActive || state.audioSwitchThreadActive || state.resolutionIndex < 0)
+      return 0;
+
+   long edge = (long)liveEdgeNow();
+   if (state.liveEnded) {
+      if (playSq < state.liveFloorSq) playSq = state.liveFloorSq;
+      if (playSq > edge) playSq = edge;
+   } else if (playSq > edge - LIVE_START_BEHIND) {
+      playSq = -1;
+   }
+
+   const char *videoUrl = state.videoUrls[state.resolutionIndex];
+   const char *audioUrl = NULL;
+   if (state.audioPick >= 0 && state.audioPick < state.audioCount)
+      audioUrl = state.audioUrls[state.audioPick];
+   else if (state.fallbackAudioUrl[0] && !state.videoHasAudio[state.resolutionIndex])
+      audioUrl = state.fallbackAudioUrl;
+
+   writeLiveDescriptor(state.liveVideoOpen, sizeof state.liveVideoOpen, videoUrl, edge, playSq);
+   state.liveAudioOpen[0] = 0;
+   if (audioUrl && audioUrl[0]) {
+      writeLiveDescriptor(state.liveAudioOpen, sizeof state.liveAudioOpen, audioUrl, edge, playSq);
+      if (!state.liveAudioOpen[0]) strCopy(state.liveAudioOpen, sizeof state.liveAudioOpen, audioUrl);
+   }
+   if (!state.liveVideoOpen[0]) return 0;
+
+   state.liveEdgeSq = edge;
+   state.liveEdgeUs = sys_time_get_system_time();
+   state.liveFirstSq = playSq < 0 ? edge - LIVE_START_BEHIND : playSq;
+   if (state.liveFirstSq < state.liveFloorSq) state.liveFirstSq = state.liveFloorSq;
+   state.liveLatencySec = playSq < 0 && !state.liveEnded
+                        ? (float)((LIVE_START_BEHIND + 1) * state.liveSegmentSec) : 0.0f;
+   state.liveAnchored = 0;
+   state.seeking = 0;
+   state.pauseWhenReady = playSq < 0 ? 0 : isVideoPaused(state.player);
+
+   logInfo("[yt] LIVE rebuild at sq=%ld edge=%ld%s\\n",
+           state.liveFirstSq, edge, playSq < 0 ? " (near live edge)" : "");
+   finishGfx();
+   state.liveRetiringPlayer = state.player;
+   state.player = NULL;
+   state.firstFrameSeen = 0;
+   state.stage = STAGE_LOADING;
+   state.workerDone = 0;
+   state.threadActive = (spawnJoinableThread(&state.workerTid, liveReopenWorker, 0,
+                         THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-live-seek") == 0);
+   state.liveReopenThreadActive = state.threadActive;
+   if (!state.threadActive) {
+      state.player = state.liveRetiringPlayer;
+      state.liveRetiringPlayer = NULL;
+      state.stage = STAGE_PLAYING;
+      state.firstFrameSeen = 1;
+      state.liveReopenThreadActive = 0;
+      return 0;
+   }
+   return 1;
+}
+
+static void nudgeLiveSeek(float deltaSeconds, uint64_t nowUs)
+{
+   if (!state.liveDvr) {
+      showToast("This live stream has rewind turned off");
+      return;
+   }
+   if (!state.seeking) {
+      state.seeking = 1;
+      state.seekTarget = liveTimelinePosition();
+   }
+   state.seekTarget += deltaSeconds;
+   float length = liveTimelineLength();
+   if (state.seekTarget < 0.0f) state.seekTarget = 0.0f;
+   if (state.seekTarget > length) state.seekTarget = length;
+   state.lastSeekInputUs = nowUs;
+   showControls();
+}
+
+static void handleLiveSeekInput(uint64_t nowUs)
+{
+   static ButtonRepeat seekRepeat;
+   if (!state.liveDvr) {
+      if (isPadButtonPressed(PAD_BTN_LEFT) || isPadButtonPressed(PAD_BTN_RIGHT))
+         showToast("This live stream has rewind turned off");
+      return;
+   }
+
+   if      (isRepeatDue(&seekRepeat, getPadButtonState(PAD_BTN_RIGHT))) nudgeLiveSeek(+SEEK_STEP_SECONDS, nowUs);
+   else if (isRepeatDue(&seekRepeat, getPadButtonState(PAD_BTN_LEFT)))  nudgeLiveSeek(-SEEK_STEP_SECONDS, nowUs);
+
+   if (state.seeking && nowUs - state.lastSeekInputUs >= SEEK_APPLY_IDLE_US) {
+      float targetSeconds = state.seekTarget;
+      state.seeking = 0;
+      float behind = liveTimelineLength() - targetSeconds;
+      if (!state.liveEnded && isLiveBehindAtEdge(behind)) {
+         if (!isLiveBehindAtEdge(liveTimelineLength() - liveTimelinePosition())) reopenLiveAt(-1);
+      } else {
+         long targetSq = (long)(liveWindowStartSq() + targetSeconds / (float)state.liveSegmentSec);
+         if (targetSq < state.liveFloorSq) targetSq = state.liveFloorSq;
+         if (targetSq > (long)liveEdgeNow()) targetSq = (long)liveEdgeNow();
+         if (targetSq != (long)livePositionSq()) reopenLiveAt(targetSq);
+      }
+   }
+}
+
 static void handlePlaybackInput(void)
 {
-   if (state.audioSwitchThreadActive || state.resolutionSwitchThreadActive)
+   if (state.audioSwitchThreadActive || state.resolutionSwitchThreadActive || state.liveReopenThreadActive)
       return; // keep the source stable until the staged handoff commits
    uint64_t nowUs = sys_time_get_system_time();
 
@@ -1928,6 +2155,18 @@ static void handlePlaybackInput(void)
       }
       showToast("No previous video");
    }
+   if (isPadButtonPressed(PAD_BTN_R1) && state.isLive && !state.liveEnded && state.liveSegmentSec > 0) {
+      float actualBehind = liveTimelineLength() - liveTimelinePosition();
+      float targetBehind = liveTimelineLength() - (state.seeking ? state.seekTarget : liveTimelinePosition());
+      state.seeking = 0;
+      if (isVideoPaused(state.player) || !isLiveBehindAtEdge(actualBehind) ||
+          !isLiveBehindAtEdge(targetBehind)) {
+         if (reopenLiveAt(-1)) showToast("Back to LIVE");
+         else showToast("Could not return to LIVE");
+         return;
+      }
+   }
+
    if (isPadButtonPressed(PAD_BTN_R1)) {
       char forwardId[12];
       if (state.nextThreadActive || state.nextNoticeVisible) {
@@ -1937,8 +2176,6 @@ static void handlePlaybackInput(void)
          popScreen();
          launchVideo(forwardId, 0);
          return;
-      } else if (state.isLive) {
-         showToast("Unavailable for live streams");
       } else if (requestedIsLocal) {
          showToast("Unavailable for downloaded videos");
       } else {
@@ -1959,7 +2196,7 @@ static void handlePlaybackInput(void)
       setVideoPlayerAudioVolume(state.player, getVolumeMeterFraction(&volumeMeter));
    }
 
-   if (state.isLive) return;   // a live stream has no seek index; scrubbing would break the segment stream
+   if (state.isLive) { handleLiveSeekInput(nowUs); return; }
 
    static ButtonRepeat seekRepeat;
    static uint64_t seekHoldStartUs;
@@ -2904,6 +3141,7 @@ static void updatePlay(void)
       if (state.pendingPlayer) {
          state.player = state.pendingPlayer;
          state.pendingPlayer = NULL;
+         state.liveReopenThreadActive = 0;
          state.message[0] = 0;
          setVideoPlayerAudioVolume(state.player, getVolumeMeterFraction(&volumeMeter));
          if (state.pauseWhenReady) setVideoPaused(state.player, 1);
@@ -3169,14 +3407,14 @@ static void updatePlay(void)
 
    // With autoplay disabled, ending a VOD behaves like pressing Circle:
    // return to the screen that launched this video instead of requesting /next.
-   if (state.stage == STAGE_PLAYING && state.player && !state.isLive &&
+   if (state.stage == STAGE_PLAYING && state.player && (!state.isLive || state.liveEnded) &&
        isVideoEnded(state.player) && !getAutoplayEnabled()) {
       popScreen();
       return;
    }
 
    // Automatic playback: ask /next once after a VOD reaches its end. Network failure is non-fatal.
-   if (state.stage == STAGE_PLAYING && state.player && !state.isLive &&
+   if (state.stage == STAGE_PLAYING && state.player && (!state.isLive || state.liveEnded) &&
        isVideoEnded(state.player) && !state.nextAttempted && !state.nextThreadActive) {
       state.nextAttempted = 1;
       state.nextWorkerDone = 0;
@@ -3298,8 +3536,9 @@ static void drawSponsorSegments(int barLeft, int span, int barTopY, int barH, fl
 // plain rectangles (no spritesheet), with sponsor segments marked over the fill.
 static void drawSeekBar(void)
 {
-   float duration = getVideoDurationSeconds(state.player);
-   float position = state.seeking ? state.seekTarget : getVideoPositionSeconds(state.player);
+   float duration = state.isLive ? liveTimelineLength() : getVideoDurationSeconds(state.player);
+   float position = state.seeking ? state.seekTarget :
+                    (state.isLive ? liveTimelinePosition() : getVideoPositionSeconds(state.player));
    float progress = duration > 0.0f ? position / duration : 0.0f;
    if (progress < 0.0f) progress = 0.0f;
    if (progress > 1.0f) progress = 1.0f;
@@ -3314,8 +3553,8 @@ static void drawSeekBar(void)
 
    fillGfxRectangle(barLeft, barTopY, span, barH, activeTheme->seekTrack);
    fillGfxRectangle(barLeft, barTopY, filledW, barH, activeTheme->accent);   // progress (youtube red)
-   if (state.sbReady) drawSponsorSegments(barLeft, span, barTopY, barH, duration);
-   if (duration > 0.0f)   // chapter boundaries notch the bar, youtube-style
+   if (!state.isLive && state.sbReady) drawSponsorSegments(barLeft, span, barTopY, barH, duration);
+   if (!state.isLive && duration > 0.0f)   // chapter boundaries notch the bar, youtube-style
       for (int i = 1; i < state.chapters.count; i++)
          fillGfxRectangle(barLeft + (int)(state.chapters.chapters[i].start / duration * span), barTopY, 3, barH, activeTheme->seekNotch);
    fillGfxRectangle(barLeft + filledW - 3, barY - 11, 6, 22, activeTheme->textPrimary);   // scrubber handle
@@ -3592,6 +3831,14 @@ static void drawPlay(void)
             }
          }
          state.firstFrameSeen = 1;
+         if (state.isLive && !state.liveAnchored) {
+            long actualFirst = getVideoLiveFirstSq(state.player);
+            if (actualFirst >= 0) state.liveFirstSq = actualFirst;
+            state.liveFirstPtsNs = getVideoPositionNs(state.player);
+            state.liveAnchored = 1;
+            logInfo("[yt] LIVE playback anchored at sq=%ld pts=%llu\n",
+                    state.liveFirstSq, (unsigned long long)state.liveFirstPtsNs);
+         }
          int dx, dy, dw, dh;
          if (cropToFillEnabled) getCropToFillRect(w, h, &dx, &dy, &dw, &dh);
          else                   getGfxLetterboxRect(w, h, &dx, &dy, &dw, &dh);
@@ -3608,7 +3855,7 @@ static void drawPlay(void)
       if (state.showStats && frame) { updateStatLabels(); drawStatsOverlay(); }
       int overlayUp = state.chaptersVisible || state.descriptionVisible || optionsVisible;   // a full-screen overlay hides the HUD noise
       if (state.stage == STAGE_PLAYING && controlsVisible() && !overlayUp) {
-         if (!state.isLive) drawSeekBar();   // live has no timeline
+         if (!state.isLive || state.liveDvr) drawSeekBar();
       }
       if (state.stage == STAGE_PLAYING && fullPlaybackHudVisible() && !overlayUp) {
          drawTitle();
@@ -3669,7 +3916,7 @@ static void termPlay(void)
    // Save the resume position on exit. A finished video stores its full duration so the grid can
    // render a 100% progress line; the resume path already treats positions near the end as completed.
    // Only save after a frame played, and keep typed URLs out of the ID-keyed history.
-   if (state.player && state.firstFrameSeen && !state.isLive) {
+   if (state.player && state.firstFrameSeen && (!state.isLive || state.liveEnded)) {
       char historyId[12];
       if (extractPlaybackId(requestedInput, historyId)) {
          int savedPosition = isVideoEnded(state.player) ? (int)(getVideoDurationSeconds(state.player) + 0.5f)
@@ -3678,12 +3925,13 @@ static void termPlay(void)
          setWatchedPosition(historyId, savedPosition);
       }
    }
-   if (state.player || state.pendingPlayer || state.pendingResolutionPlayer || state.retiringResolutionPlayer)
+   if (state.player || state.pendingPlayer || state.pendingResolutionPlayer || state.retiringResolutionPlayer || state.liveRetiringPlayer)
       finishGfx();   // RSX may still be sampling a frame buffer
    if (state.player) { destroyVideoPlayer(state.player); state.player = NULL; }
    if (state.pendingPlayer) { destroyVideoPlayer(state.pendingPlayer); state.pendingPlayer = NULL; }
    if (state.pendingResolutionPlayer) { destroyVideoPlayer(state.pendingResolutionPlayer); state.pendingResolutionPlayer = NULL; }
    if (state.retiringResolutionPlayer) { destroyVideoPlayer(state.retiringResolutionPlayer); state.retiringResolutionPlayer = NULL; }
+   if (state.liveRetiringPlayer) { destroyVideoPlayer(state.liveRetiringPlayer); state.liveRetiringPlayer = NULL; }
    freeLabel(&statusLabel);
    for (int i = 0; i < STAT_LINES; i++) freeLabel(&statLabels[i]);
    freeLabel(&timeLeftLabel);

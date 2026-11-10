@@ -50,6 +50,11 @@ static inline uint64_t seekVideoDemuxer(VideoDemuxer *demuxer, uint64_t targetNs
    return demuxer->isMp4 ? seekMp4Demuxer(&demuxer->container.mp4, targetNs, landAfter) : seekMkvDemuxer(&demuxer->container.mkv, targetNs, landAfter);
 }
 
+static inline long getVideoDemuxerLiveFirstSq(const VideoDemuxer *demuxer)
+{
+   return demuxer && demuxer->isMp4 ? getVideoSourceLiveFirstSq(&demuxer->container.mp4.source) : -1;
+}
+
 static inline void closeVideoDemuxer(VideoDemuxer *demuxer)
 {
    if (demuxer->isMp4) closeMp4Demuxer(&demuxer->container.mp4);
