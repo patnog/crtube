@@ -11,6 +11,21 @@
 void initDownloads(void);       // set up the worker state + overlay; call after initFont
 void shutdownDownloads(void);   // cancel + clear the queue, join the worker, free the overlay; call at exit
 
+#define DOWNLOAD_MANAGEMENT_MAX_ITEMS 17
+#define DOWNLOAD_MANAGEMENT_TITLE_LEN 160
+typedef struct {
+   char videoId[16];
+   char title[DOWNLOAD_MANAGEMENT_TITLE_LEN];
+   int percent;
+   int active;
+   int cancelling;
+   int finalizing;
+} DownloadManagementItem;
+
+int getDownloadManagementItems(DownloadManagementItem *out, int capacity);
+// 0 = accepted, 1 = not found, -1 = already finalizing / cannot cancel.
+int cancelManagedDownload(const char *videoId);
+
 void enqueueDownload(const SearchResult *item);   // queue a video for download
 int getDownloadedVideos(SearchResults *out, int sortAZ);
 unsigned int getDownloadLibraryRevision(void);

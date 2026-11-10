@@ -42,6 +42,8 @@ static struct {
    sys_ppu_thread_t worker;
 
    volatile int     cancelAll;     // app exit: abort the current download and drain the queue
+   volatile int     cancelActive;  // UI requested cancellation of activeId
+   volatile int     finalizing;    // commit point: cancellation is no longer accepted
    volatile int     active;        // a download is currently running (drives the overlay)
    volatile int     percent;
    volatile unsigned int completionSerial; // incremented by the worker after a successful download
@@ -105,6 +107,58 @@ static void clearDownloadSubtitleSidecars(const char *videoId)
       }
    }
    deleteFile(manifestPath);
+}
+
+static int downloadCancellationRequested(void)
+{
+   return dl.cancelAll || dl.cancelActive;
+}
+
+// Remove every library artifact belonging to this ID. The directory scan also catches
+// language sidecars even if a crash/cancel happened before the .subs manifest was written.
+static int removeDownloadArtifacts(const char *videoId)
+{
+   VfsDir dir;
+   char name[256], match[256], path[MAX_PATH_LEN];
+   VfsEntryType type;
+   int failures = 0;
+   size_t idLength = strlen(videoId);
+
+   // Reopen the directory after each deletion. This avoids relying on whether a VFS
+   // backend advances its directory cursor safely when the current entry is removed.
+   for (;;) {
+      int found = 0;
+      if (openDir(DOWNLOAD_LIBRARY_DIR, &dir) != 0) {
+         failures++;
+         break;
+      }
+      int readResult;
+      while ((readResult = readDir(&dir, name, sizeof name, &type)) > 0) {
+         if (type != VFS_ENTRY_FILE || strncmp(name, videoId, idLength) != 0 || name[idLength] != '.') continue;
+         strCopy(match, sizeof match, name);
+         found = 1;
+         break;
+      }
+      closeDir(&dir);
+      if (readResult < 0) { failures++; break; }
+      if (!found) break;
+      snprintf(path, sizeof path, "%s/%s", DOWNLOAD_LIBRARY_DIR, match);
+      if (deleteFile(path) != 0 || fileExists(path)) {
+         logError("[dl] cleanup failed: %s\n", path);
+         failures++;
+         break;
+      }
+   }
+
+   // The XMB staging directory contains only the exported MP4 for this item.
+   if (getVideoStagingDir() && strcmp(DOWNLOAD_LIBRARY_DIR, getVideoStagingDir()) != 0) {
+      snprintf(path, sizeof path, "%s/%s.mp4", getVideoStagingDir(), videoId);
+      if (deleteFile(path) != 0 || fileExists(path)) {
+         logError("[dl] staging cleanup failed: %s\n", path);
+         failures++;
+      }
+   }
+   return failures ? -1 : 0;
 }
 
 static int languageBaseMatches(const char *a, const char *b)
@@ -612,7 +666,7 @@ static int remux(const char *videoUrl, const char *audioUrl, const char *outPath
    unsigned int videoSamplesWritten = 0;
    uint64_t lastVideoPts = 0;
 
-   while (!failed && !dl.cancelAll && (videoRc == 1 || audioRc == 1)) {
+   while (!failed && !downloadCancellationRequested() && (videoRc == 1 || audioRc == 1)) {
       if (videoRc == 1 && (audioRc != 1 || videoAu.pts <= audioAu.pts)) {
          if (writeMp4Video(&mux, videoAu.data, videoAu.size, videoAu.pts, videoAu.keyframe)) { failed = 1; break; }
          videoSamplesWritten++;
@@ -639,7 +693,7 @@ static int remux(const char *videoUrl, const char *audioUrl, const char *outPath
          failed = 1;
       }
    }
-   if (!failed && !dl.cancelAll) { dl.percent = 100; result = 0; }
+   if (!failed && !downloadCancellationRequested()) { dl.percent = 100; result = 0; }
 
 cleanup:
    if (videoOpen) closeVideoDemuxer(video);
@@ -651,19 +705,18 @@ cleanup:
 
 static void runOneDownload(const QueueItem *item)
 {
+   char finalPath[MAX_PATH_LEN] = "", partPath[MAX_PATH_LEN] = "";
    StreamInfo *info = (StreamInfo *)calloc(1, sizeof *info);
    const Extractor *extractor = findExtractor(item->videoId);
    int extractResult = (info && extractor) ? extractor->extract(item->videoId, info) : -1;
+   if (downloadCancellationRequested()) goto cancelled;
    if (!info || !extractor || extractResult != 0 || info->formatCount == 0) {
       logError("[dl] resolve failed for %s\n", item->videoId);
-      if (info) { free(info->captions); free(info); }
-      return;
+      goto failed;
    }
    if (info->isLive) {
       logInfo("[dl] %s is currently LIVE, not downloadable\n", item->videoId);
-      free(info->captions);
-      free(info);
-      return;
+      goto failed;
    }
 
    int maxHeight = 0;
@@ -676,8 +729,8 @@ static void runOneDownload(const QueueItem *item)
    const char *requestedAudioLanguage = getDownloadAudioLanguage();
    const StreamFormat *video = pickDownloadVideo(info, maxHeight,
       requestedAudioLanguage && strcmp(requestedAudioLanguage, "original") != 0);
-   if (!video) { logError("[dl] no downloadable video for %s\n", item->videoId); free(info->captions); free(info); return; }
-   if (video->isLiveSegmented) { logInfo("[dl] %s is a live stream, not downloadable\n", item->videoId); free(info->captions); free(info); return; }
+   if (!video) { logError("[dl] no downloadable video for %s\n", item->videoId); goto failed; }
+   if (video->isLiveSegmented) { logInfo("[dl] %s is a live stream, not downloadable\n", item->videoId); goto failed; }
 
    int allowAutoDubbed = getDownloadAutoDubEnabled();
    const StreamFormat *audio = NULL;
@@ -706,7 +759,6 @@ static void runOneDownload(const QueueItem *item)
       if (!actualAudioLanguage[0]) audioLanguageFromTrackId(info->defaultAudioTrackId, actualAudioLanguage, sizeof actualAudioLanguage);
    }
 
-   char finalPath[MAX_PATH_LEN], partPath[MAX_PATH_LEN];
    buildDownloadPath(finalPath, sizeof finalPath, item->videoId);
    snprintf(partPath, sizeof partPath, "%s.part", finalPath);
    logInfo("[dl] %s -> %s (video itag %d, audio itag %d, audio=%s)\n",
@@ -714,53 +766,84 @@ static void runOneDownload(const QueueItem *item)
            audio ? audio->itag : (video->hasAudio ? video->itag : 0),
            actualAudioLanguage[0] ? actualAudioLanguage : "unknown");
 
-   int rc = remux(video->url, audio ? audio->url : NULL, partPath);
-   if (rc != 0) {
-      free(info->captions); free(info); deleteFile(partPath);
-      logInfo("[dl] %s %s\n", item->videoId, dl.cancelAll ? "cancelled" : "failed");
-   } else if (renamePath(partPath, finalPath) != 0) {
-      free(info->captions); free(info); deleteFile(partPath);
-      logError("[dl] %s rename failed\n", item->videoId);
-   } else {
-      char metadataViews[32], metadataPublished[24], metadataLikes[32];
-      strCopy(metadataViews, sizeof metadataViews, info->viewCount);
-      strCopy(metadataPublished, sizeof metadataPublished, info->publishedDate);
-      strCopy(metadataLikes, sizeof metadataLikes, "Offline");
-      if (extractor->getVideoMetadata) {
-         char fetchedViews[32] = "", fetchedPublished[24] = "", fetchedLikes[32] = "";
-         if (extractor->getVideoMetadata(item->videoId, fetchedViews, sizeof fetchedViews,
-                                         fetchedPublished, sizeof fetchedPublished,
-                                         fetchedLikes, sizeof fetchedLikes) == 0) {
-            if (fetchedViews[0]) strCopy(metadataViews, sizeof metadataViews, fetchedViews);
-            if (fetchedPublished[0]) strCopy(metadataPublished, sizeof metadataPublished, fetchedPublished);
-            if (fetchedLikes[0]) strCopy(metadataLikes, sizeof metadataLikes, fetchedLikes);
-         }
-      }
-      if (!info->description[0])
-         logWarn("[dl] description unavailable after extraction for %s; metadata will not contain a description\n", item->videoId);
-      else
-         logInfo("[dl] description captured for %s (%d bytes)\n", item->videoId, (int)strlen(info->description));
-      saveDownloadMetadata(finalPath, info, item->title, metadataPublished, metadataViews, metadataLikes);
-      saveDownloadThumbnail(finalPath, item->videoId);
-      const char *primaryLanguage = getDownloadPrimarySubtitlesEnabled() ? actualAudioLanguage : "";
-      saveDownloadSubtitles(item->videoId, info, primaryLanguage,
-                            getDownloadSecondarySubtitleLanguage());
-      free(info->captions); free(info);
-      logInfo("[dl] %s done\n", item->videoId);
-      if (strcmp(DOWNLOAD_LIBRARY_DIR, getVideoStagingDir()) != 0) {
-         char exportPath[MAX_PATH_LEN];
-         uint8_t *copyBuffer = (uint8_t *)malloc(64 * 1024);
-         snprintf(exportPath, sizeof exportPath, "%s/%s.mp4", getVideoStagingDir(), item->videoId);
-         if (copyBuffer && copyFile(finalPath, exportPath, copyBuffer, 64 * 1024) == 0)
-            queueVideoExport(exportPath, item->title);
-         else
-            logWarn("[dl] retained in library; xmb export copy failed for %s\n", item->videoId);
-         free(copyBuffer);
-      } else {
-         queueVideoExport(finalPath, item->title);
-      }
-      __sync_add_and_fetch(&dl.completionSerial, 1);
+   if (downloadCancellationRequested()) goto cancelled;
+   if (remux(video->url, audio ? audio->url : NULL, partPath) != 0) {
+      if (downloadCancellationRequested()) goto cancelled;
+      logError("[dl] %s remux failed\n", item->videoId);
+      deleteFile(partPath);
+      goto failed;
    }
+   if (downloadCancellationRequested()) goto cancelled;
+   if (renamePath(partPath, finalPath) != 0) {
+      logError("[dl] %s rename failed\n", item->videoId);
+      deleteFile(partPath);
+      goto failed;
+   }
+
+   // Each post-remux stage can perform blocking I/O. Check between stages and
+   // clean the complete ID namespace if cancellation was requested meanwhile.
+   if (downloadCancellationRequested()) goto cancelled;
+   char metadataViews[32], metadataPublished[24], metadataLikes[32];
+   strCopy(metadataViews, sizeof metadataViews, info->viewCount);
+   strCopy(metadataPublished, sizeof metadataPublished, info->publishedDate);
+   strCopy(metadataLikes, sizeof metadataLikes, "Offline");
+   if (extractor->getVideoMetadata) {
+      char fetchedViews[32] = "", fetchedPublished[24] = "", fetchedLikes[32] = "";
+      if (extractor->getVideoMetadata(item->videoId, fetchedViews, sizeof fetchedViews,
+                                      fetchedPublished, sizeof fetchedPublished,
+                                      fetchedLikes, sizeof fetchedLikes) == 0) {
+         if (fetchedViews[0]) strCopy(metadataViews, sizeof metadataViews, fetchedViews);
+         if (fetchedPublished[0]) strCopy(metadataPublished, sizeof metadataPublished, fetchedPublished);
+         if (fetchedLikes[0]) strCopy(metadataLikes, sizeof metadataLikes, fetchedLikes);
+      }
+   }
+   if (downloadCancellationRequested()) goto cancelled;
+   saveDownloadMetadata(finalPath, info, item->title, metadataPublished, metadataViews, metadataLikes);
+   if (downloadCancellationRequested()) goto cancelled;
+   saveDownloadThumbnail(finalPath, item->videoId);
+   if (downloadCancellationRequested()) goto cancelled;
+   const char *primaryLanguage = getDownloadPrimarySubtitlesEnabled() ? actualAudioLanguage : "";
+   saveDownloadSubtitles(item->videoId, info, primaryLanguage, getDownloadSecondarySubtitleLanguage());
+   if (downloadCancellationRequested()) goto cancelled;
+
+   // Lock establishes a commit point: once finalizing is set, the UI can no longer
+   // accept cancellation and the export queue cannot race a cleanup request.
+   lock(&dl.mutex);
+   if (dl.cancelAll || dl.cancelActive) {
+      unlock(&dl.mutex);
+      goto cancelled;
+   }
+   dl.finalizing = 1;
+   unlock(&dl.mutex);
+
+   free(info->captions); free(info); info = NULL;
+   logInfo("[dl] %s done\n", item->videoId);
+   if (strcmp(DOWNLOAD_LIBRARY_DIR, getVideoStagingDir()) != 0) {
+      char exportPath[MAX_PATH_LEN];
+      uint8_t *copyBuffer = (uint8_t *)malloc(64 * 1024);
+      snprintf(exportPath, sizeof exportPath, "%s/%s.mp4", getVideoStagingDir(), item->videoId);
+      if (copyBuffer && copyFile(finalPath, exportPath, copyBuffer, 64 * 1024) == 0)
+         queueVideoExport(exportPath, item->title);
+      else
+         logWarn("[dl] retained in library; xmb export copy failed for %s\n", item->videoId);
+      free(copyBuffer);
+   } else {
+      queueVideoExport(finalPath, item->title);
+   }
+   __sync_add_and_fetch(&dl.completionSerial, 1);
+   return;
+
+cancelled:
+   if (info) { free(info->captions); free(info); }
+   if (partPath[0]) deleteFile(partPath);
+   if (removeDownloadArtifacts(item->videoId) != 0)
+      logError("[dl] cancellation cleanup incomplete for %s\n", item->videoId);
+   logInfo("[dl] %s cancelled\n", item->videoId);
+   return;
+
+failed:
+   if (info) { free(info->captions); free(info); }
+   return;
 }
 
 // ---- worker + queue ----
@@ -779,14 +862,71 @@ static void downloadWorker(uint64_t arg)
       for (int i = 1; i < dl.count; i++) dl.queue[i - 1] = dl.queue[i];
       dl.count--;
       dl.active = 1;
+      dl.cancelActive = 0;
+      dl.finalizing = 0;
       dl.percent = 0;
       strCopy(dl.activeTitle, sizeof dl.activeTitle, item.title);
       strCopy(dl.activeId, sizeof dl.activeId, item.videoId);
       unlock(&dl.mutex);
 
       runOneDownload(&item);
+      lock(&dl.mutex);
+      dl.active = 0;
+      dl.cancelActive = 0;
+      dl.finalizing = 0;
+      dl.percent = 0;
+      dl.activeId[0] = 0;
+      dl.activeTitle[0] = 0;
+      unlock(&dl.mutex);
    }
    exitThread();
+}
+
+int getDownloadManagementItems(DownloadManagementItem *out, int capacity)
+{
+   if (!out || capacity <= 0 || !dl.initialized) return 0;
+   int count = 0;
+   lock(&dl.mutex);
+   if (dl.active && count < capacity) {
+      DownloadManagementItem *entry = &out[count++];
+      memset(entry, 0, sizeof *entry);
+      strCopy(entry->videoId, sizeof entry->videoId, dl.activeId);
+      strCopy(entry->title, sizeof entry->title, dl.activeTitle);
+      entry->percent = dl.percent;
+      entry->active = 1;
+      entry->cancelling = dl.cancelActive;
+      entry->finalizing = dl.finalizing;
+   }
+   for (int i = 0; i < dl.count && count < capacity; i++) {
+      DownloadManagementItem *entry = &out[count++];
+      memset(entry, 0, sizeof *entry);
+      strCopy(entry->videoId, sizeof entry->videoId, dl.queue[i].videoId);
+      strCopy(entry->title, sizeof entry->title, dl.queue[i].title);
+      entry->percent = 0;
+   }
+   unlock(&dl.mutex);
+   return count;
+}
+
+int cancelManagedDownload(const char *videoId)
+{
+   if (!videoId || !videoId[0] || !dl.initialized) return 1;
+   int result = 1;
+   lock(&dl.mutex);
+   if (dl.active && strcmp(dl.activeId, videoId) == 0) {
+      result = dl.finalizing ? -1 : 0;
+      if (result == 0) dl.cancelActive = 1;
+   } else {
+      for (int i = 0; i < dl.count; i++) {
+         if (strcmp(dl.queue[i].videoId, videoId) != 0) continue;
+         for (int j = i + 1; j < dl.count; j++) dl.queue[j - 1] = dl.queue[j];
+         dl.count--;
+         result = 0;
+         break;
+      }
+   }
+   unlock(&dl.mutex);
+   return result;
 }
 
 void enqueueDownload(const SearchResult *item)
