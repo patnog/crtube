@@ -7,6 +7,7 @@
 // thread; the queue is cancelled and cleared on app exit.
 
 #include "extractor.h"   // SearchResult / CaptionTrack
+#include "chapters.h"
 
 void initDownloads(void);       // set up the worker state + overlay; call after initFont
 void shutdownDownloads(void);   // cancel + clear the queue, join the worker, free the overlay; call at exit
@@ -31,6 +32,7 @@ int getDownloadedVideos(SearchResults *out, int sortAZ);
 unsigned int getDownloadLibraryRevision(void);
 int deleteDownloadedVideo(const char *videoId);
 int getDownloadedSubtitleTracks(const char *videoPath, CaptionTrack *out, int capacity);
+int loadDownloadedChapters(const char *videoPath, ChapterList *chapters);
 int getDownloadedVideoPath(const char *videoId, char *path, int cap);
 int loadDownloadedMetadata(const char *videoPath, char *title, int titleCap,
                            char *author, int authorCap, char *description, int descriptionCap,

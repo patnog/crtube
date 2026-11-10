@@ -8,6 +8,7 @@
 #include "extractor.h"
 #include "settings.h"
 #include "subtitles.h"
+#include "chapters.h"
 #include "video-export.h"   // hand the finished file to the xmb
 
 #include "vfs.h"                // renamePath/deleteFile + MAX_PATH_LEN
@@ -299,6 +300,57 @@ static void saveDownloadMetadata(const char *videoPath, const StreamInfo *info, 
       if (writeFile(path, data, (uint64_t)length) != 0)
          logWarn("[dl] metadata write failed for %s\n", videoPath);
    }
+}
+
+static void saveDownloadChapters(const char *videoId, const ChapterList *chapters)
+{
+   if (!chapters || chapters->count <= 0) return;
+   char path[MAX_PATH_LEN], data[4096];
+   snprintf(path, sizeof path, "%s/%s.chapters", DOWNLOAD_LIBRARY_DIR, videoId);
+   int used = 0;
+   for (int i = 0; i < chapters->count && used < (int)sizeof data - 1; i++) {
+      int n = snprintf(data + used, sizeof data - used, "%d\t%s\n",
+                       (int)chapters->chapters[i].start, chapters->chapters[i].title);
+      if (n <= 0 || n >= (int)sizeof data - used) break;
+      used += n;
+   }
+   if (used > 0 && writeFile(path, data, (uint64_t)used) != 0)
+      logWarn("[dl] chapter metadata write failed for %s\n", videoId);
+}
+
+int loadDownloadedChapters(const char *videoPath, ChapterList *chapters)
+{
+   if (!chapters) return 0;
+   chapters->count = 0;
+   const char *base = strrchr(videoPath, '/');
+   base = base ? base + 1 : videoPath;
+   if (strlen(base) != 15 || strcmp(base + 11, ".mp4") != 0) return 0;
+   char path[MAX_PATH_LEN], data[4096];
+   snprintf(path, sizeof path, "%s/%.*s.chapters", DOWNLOAD_LIBRARY_DIR, 11, base);
+   int length = readFile(path, data, sizeof data - 1);
+   if (length <= 0) return 0;
+   data[length] = 0;
+   char *line = data;
+   while (*line && chapters->count < MAX_CHAPTERS) {
+      char *end = strchr(line, '\n');
+      if (end) *end = 0;
+      char *tab = strchr(line, '\t');
+      if (tab) {
+         *tab++ = 0;
+         char *numberEnd = NULL;
+         long seconds = strtol(line, &numberEnd, 10);
+         if (numberEnd != line && !*numberEnd && seconds >= 0 && tab[0]) {
+            Chapter *chapter = &chapters->chapters[chapters->count++];
+            chapter->start = (float)seconds;
+            strCopy(chapter->title, sizeof chapter->title, tab);
+         }
+      }
+      if (!end) break;
+      line = end + 1;
+   }
+   for (int i = 1; i < chapters->count; i++)
+      if (chapters->chapters[i].start <= chapters->chapters[i - 1].start) { chapters->count = 0; break; }
+   return chapters->count;
 }
 
 static void saveDownloadThumbnail(const char *videoPath, const char *videoId)
@@ -616,6 +668,8 @@ int deleteDownloadedVideo(const char *videoId)
    deleteFile(path);
    snprintf(path, sizeof path, "%s/%s.jpg", DOWNLOAD_LIBRARY_DIR, videoId);
    deleteFile(path);
+   snprintf(path, sizeof path, "%s/%s.chapters", DOWNLOAD_LIBRARY_DIR, videoId);
+   deleteFile(path);
    clearDownloadSubtitleSidecars(videoId);
    return 0;
 }
@@ -799,6 +853,10 @@ static void runOneDownload(const QueueItem *item)
    }
    if (downloadCancellationRequested()) goto cancelled;
    saveDownloadMetadata(finalPath, info, item->title, metadataPublished, metadataViews, metadataLikes);
+   if (downloadCancellationRequested()) goto cancelled;
+   ChapterList downloadedChapters;
+   if (fetchChapters(item->videoId, &downloadedChapters) > 0)
+      saveDownloadChapters(item->videoId, &downloadedChapters);
    if (downloadCancellationRequested()) goto cancelled;
    saveDownloadThumbnail(finalPath, item->videoId);
    if (downloadCancellationRequested()) goto cancelled;

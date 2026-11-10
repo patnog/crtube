@@ -110,6 +110,9 @@ static int preferredQualityHeight, preferredQualityFps; // 0/0 means Auto; persi
 static int optionsVisible, optionsDropdownOpen, optionsSelected, optionsDropdownSelected;
 static int lastSubtitlePick = -1;     // preserve the selected track while captions are switched OFF
 static int suppressPlaybackCrossUntilRelease;
+static uint64_t l1HoldStartUs, r1HoldStartUs;
+static int l1HoldTriggered, r1HoldTriggered;
+#define PLAYBACK_NAV_HOLD_US 2000000ULL
 static ButtonRepeat optionsNavigateRepeat, optionsDropdownRepeat, chapterNavigateRepeat;
 static Label optionsLabels[OPTIONS_COUNT];
 static Label optionsValueLabels[OPTIONS_DROPDOWN_MAX];
@@ -980,6 +983,7 @@ static void worker(uint64_t arg)
          }
       }
       parseChapters(state.description, &state.chapters);
+      { ChapterList downloadedChapters; if (loadDownloadedChapters(requestedLocalPath, &downloadedChapters) > 0) state.chapters = downloadedChapters; }
       if (!state.likeCount[0]) strCopy(state.likeCount, sizeof state.likeCount, "Offline");
       if (!state.viewCount[0]) strCopy(state.viewCount, sizeof state.viewCount, "Offline");
       if (!state.publishedDate[0]) strCopy(state.publishedDate, sizeof state.publishedDate, "Offline");
@@ -2299,66 +2303,70 @@ static void handlePlaybackInput(void)
 
    if (isPadButtonPressed(PAD_BTN_TRIANGLE)) toggleSubtitles();
 
-   if (isPadButtonPressed(PAD_BTN_L1)) {
+   // L1/R1 short press changes chapter; holding either for two seconds changes video.
+   PadButtonState l1State = getPadButtonState(PAD_BTN_L1);
+   PadButtonState r1State = getPadButtonState(PAD_BTN_R1);
+   if (l1State == PAD_BUTTON_STATE_PRESSED) { l1HoldStartUs = nowUs; l1HoldTriggered = 0; }
+   if (r1State == PAD_BUTTON_STATE_PRESSED) { r1HoldStartUs = nowUs; r1HoldTriggered = 0; }
+
+   if (l1State == PAD_BUTTON_STATE_HELD && l1HoldStartUs && !l1HoldTriggered && nowUs - l1HoldStartUs >= PLAYBACK_NAV_HOLD_US) {
+      l1HoldTriggered = 1;
       if (requestedIsLocal) {
-         if (downloadedQueueCount > 0 && downloadedQueueCursor > 0)
-            launchDownloadedQueueIndex(downloadedQueueCursor - 1);
-         else
-            showToast("No previous download");
-         return;
+         if (downloadedQueueCount > 0 && downloadedQueueCursor > 0) { launchDownloadedQueueIndex(downloadedQueueCursor - 1); return; }
+         else showToast("No previous download");
+      } else {
+         char previousId[12];
+         if (previousPlaybackId(previousId)) { popScreen(); launchVideo(previousId, 0); return; }
+         showToast("No previous video");
       }
-      char previousId[12];
-      if (previousPlaybackId(previousId)) {
-         popScreen();
-         launchVideo(previousId, 0);
-         return;
-      }
-      showToast("No previous video");
    }
-   if (isPadButtonPressed(PAD_BTN_R1) && state.isLive && !state.liveEnded && state.liveSegmentSec > 0) {
-      float actualBehind = liveTimelineLength() - liveTimelinePosition();
-      float targetBehind = liveTimelineLength() - (state.seeking ? state.seekTarget : liveTimelinePosition());
-      state.seeking = 0;
-      if (isVideoPaused(state.player) || !isLiveBehindAtEdge(actualBehind) ||
-          !isLiveBehindAtEdge(targetBehind)) {
-         if (reopenLiveAt(-1)) {
-            state.toastShownUs = 0;
-            state.toastDurationUs = 0;
-            state.liveReturnNoticeUs = 0;
-            state.liveReturnNoticePending = 1;
-         } else showToast("Could not return to LIVE");
-         return;
+   if (r1State == PAD_BUTTON_STATE_HELD && r1HoldStartUs && !r1HoldTriggered && nowUs - r1HoldStartUs >= PLAYBACK_NAV_HOLD_US) {
+      r1HoldTriggered = 1;
+      if (requestedIsLocal) {
+         if (downloadedQueueCount > 0 && downloadedQueueCursor + 1 < downloadedQueueCount) { launchDownloadedQueueIndex(downloadedQueueCursor + 1); return; }
+         else showToast("No next download");
+      } else {
+         char nextId[12];
+         if (state.nextThreadActive || state.nextNoticeVisible) showToast("Next video is already loading");
+         else if (nextPlaybackId(nextId)) { popScreen(); launchVideo(nextId, 0); return; }
+         else {
+            state.nextAttempted = 1;
+            state.nextWorkerDone = 0;
+            state.nextVideoId[0] = 0;
+            state.nextVideoTitle[0] = 0;
+            state.nextThreadActive = (spawnJoinableThread(&state.nextWorkerTid, autoplayWorker, 0,
+                                      THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-next") == 0);
+            if (!state.nextThreadActive) showToast("Next video unavailable");
+            else showToast("Loading next recommendation...");
+         }
       }
    }
 
-   if (isPadButtonPressed(PAD_BTN_R1)) {
-      if (requestedIsLocal) {
-         if (downloadedQueueCount > 0 && downloadedQueueCursor + 1 < downloadedQueueCount)
-            launchDownloadedQueueIndex(downloadedQueueCursor + 1);
-         else
-            showToast("No next download");
-         return;
+   if (l1State == PAD_BUTTON_STATE_RELEASED) {
+      if (!l1HoldTriggered) {
+         if (state.chapters.count == 0) showToast("No chapters");
+         else {
+            float position = getVideoPositionSeconds(state.player);
+            int current = 0;
+            for (int i = 0; i < state.chapters.count; i++) if (state.chapters.chapters[i].start <= position) current = i;
+            if (current > 0) { state.seeking = 0; seekVideoPlayer(state.player, state.chapters.chapters[current - 1].start); showControls(); }
+            else showToast("No previous chapter");
+         }
       }
-      char forwardId[12];
-      if (state.nextThreadActive || state.nextNoticeVisible) {
-         showToast("Next video is already loading");
-      } else if (nextPlaybackId(forwardId)) {
-         // Reuse the already-known forward entry before asking YouTube for another video.
-         popScreen();
-         launchVideo(forwardId, 0);
-         return;
-      } else if (requestedIsLocal) {
-         showToast("Unavailable for downloaded videos");
-      } else {
-         state.nextAttempted = 1;
-         state.nextWorkerDone = 0;
-         state.nextVideoId[0] = 0;
-         state.nextVideoTitle[0] = 0;
-         state.nextThreadActive = (spawnJoinableThread(&state.nextWorkerTid, autoplayWorker, 0,
-                                   THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-next") == 0);
-         if (!state.nextThreadActive) showToast("Next video unavailable");
-         else showToast("Loading next recommendation...");
+      l1HoldStartUs = 0; l1HoldTriggered = 0;
+   }
+   if (r1State == PAD_BUTTON_STATE_RELEASED) {
+      if (!r1HoldTriggered) {
+         if (state.chapters.count == 0) showToast("No chapters");
+         else {
+            float position = getVideoPositionSeconds(state.player);
+            int current = 0;
+            for (int i = 0; i < state.chapters.count; i++) if (state.chapters.chapters[i].start <= position) current = i;
+            if (current + 1 < state.chapters.count) { state.seeking = 0; seekVideoPlayer(state.player, state.chapters.chapters[current + 1].start); showControls(); }
+            else showToast("No next chapter");
+         }
       }
+      r1HoldStartUs = 0; r1HoldTriggered = 0;
    }
 
    // volume: the widget steps itself on up/down; apply + persist the new level (works on live streams too)
