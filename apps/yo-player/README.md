@@ -115,7 +115,7 @@ Treat `account.txt` as a credential: anyone who can read the file may be able to
 
 ## Screens & controls
 
-The app boots into the home feed. The sidebar switches between account feeds, PS3-local lists and playlists, Trending and Live. The PS3-local Playlists page has separate Watch Later and PS3 tabs. Searching or opening a channel pushes a list screen; playing pushes the player. **Circle** opens the sidebar on the home screen and backs out of nested screens. Button hints along the bottom use the console's own controller glyphs.
+The app boots into the home feed. The sidebar switches between account feeds, PS3-local lists and playlists, Trending and Live. The PS3-local Playlists page has separate Watch Later and PS3 tabs. Searching or opening a channel pushes a list screen; playing pushes the player. **Circle** opens the sidebar on the home screen and backs out of nested screens. Button hints along the bottom use the console's own controller glyphs and change with the active category or overlay; when a hint differs from a general control summary, follow the on-screen hint.
 
 ### Home / search / channel lists
 
@@ -123,7 +123,7 @@ The app boots into the home feed. The sidebar switches between account feeds, PS
   tile with just left and right.
 - **X** — play the highlighted video.
 - **Square** — tap to add/remove the highlighted video from PS3-local **Watch Later**; hold to open the local-playlist picker and add it to a PS3 playlist.
-- **L2** — cycle the current feed or playlist sort order where supported.
+- **L2** — cycle the sort order only on supported lists: Trending, PS3 Subscriptions, Live subcategories, account Recommended/Subscriptions, account Playlists, PS3-local Playlists (the active Watch Later or PS3 tab), and Downloads. Other categories do not have an L2 sort action.
 - **L3** — on the PS3 tab of the PS3-local Playlists page, create an empty playlist.
 - **R3 (right stick click) — **download** the highlighted video (see Downloads below). Live streams can't be
   downloaded.
@@ -131,7 +131,11 @@ The app boots into the home feed. The sidebar switches between account feeds, PS
   Triangle instead **subscribes / unsubscribes** from that channel.
 - **Select** — open YouTube search. Typing a YouTube link opens it directly.
 - **Start** — open the home Settings panel.
-- **L1 / R1** (home only) — switch the current home category; on the PS3-local Playlists page, switch between its Watch Later and PS3 tabs.
+- **L1 / R1** — context-sensitive navigation:
+  - On the home feed ring, move to the previous / next category. The ring order differs when signed in because account feeds are included.
+  - On the Live page, cycle its six subcategories: Popular, Music, Gaming, Sports, Podcasts and News.
+  - On the PS3-local Playlists page, switch between the Watch Later and PS3 tabs.
+  - They do not switch categories inside playlist contents, on the account Playlists page, or in Downloads.
 - **R2** (home only) — refresh the current category.
 - **Circle** — open the sidebar; in nested screens, back out one level.
 - **Left** — from the first grid column, open the sidebar.
@@ -144,8 +148,12 @@ The app boots into the home feed. The sidebar switches between account feeds, PS
   be seeked.
 - **X** — pause / resume. Hold to restart a VOD from the beginning; live streams use a normal pause/resume press.
 - **Square** — skip the active SponsorBlock segment when its category is set to Ask.
-- **L1 / R1** — play the previous / next video. R1 can request the next recommendation when no next item is
-  already queued.
+- **L1** — play the previous video when one is available. This action is unavailable during local downloaded-video playback.
+- **R1** — context-sensitive:
+  - On a Live stream that is paused or behind the live edge, return playback to the current live point.
+  - When the Live stream is already at the live edge, continue to the next queued video or request the next recommendation.
+  - On VOD, play the next queued video or request the next recommendation when the queue is empty.
+  - Previous/next navigation is unavailable for locally downloaded-video playback.
 - **L2** — show the full playback information HUD.
 - **R2** — toggle Crop-to-Fill mode.
 - **Right Analog Stick** — while Crop-to-Fill is enabled, move the cropped picture horizontally and vertically to adjust which part of the image is visible.

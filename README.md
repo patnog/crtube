@@ -112,17 +112,17 @@ in the app take precedence if a screen has a context-specific action.
 |---|---|
 | D-pad | Move the selection through the video grid |
 | **X** | Play the selected video |
-| **Square** | Tap to add/remove the selected video from Watch Later; hold to open the PS3 playlist picker and add it to a local playlist |
-| **L2** | Cycle the current feed or playlist sort order where sorting is supported |
+| **Square** | Context-sensitive: add/remove a video from PS3-local Watch Later (hold to open the playlist picker); remove a video from a PS3 playlist; hold to delete a download; save an account playlist; or, on the PS3-local Playlists page, remove Watch Later entries or rename/delete a PS3 playlist |
+| **L2** | Cycle the sort order where supported: Trending, PS3 Subscriptions, Live subcategories, account Recommended/Subscriptions, account Playlists, PS3-local Playlists (current tab), and Downloads |
 | **L3** | In the PS3 tab of the PS3-local Playlists page, create an empty playlist |
-| **R3** (right-stick click) | Queue the selected VOD for background download; live streams cannot be downloaded |
+| **R3** (right-stick click) | Queue the selected VOD for background download; live streams cannot be downloaded. Hidden on playlist/library pages |
 | **Triangle** | Open the selected video's channel; inside a channel listing, subscribe to or unsubscribe from that channel |
 | **SELECT** | Open YouTube search; entering a YouTube URL opens that video directly |
 | **START** | Open the home Settings panel; press **START** again or **CIRCLE** to close it. UI Scaling, Overscan, Region and other application preferences are configured there |
 | **CIRCLE** | Open the sidebar; in a nested screen, go back. While the sidebar is open, **LEFT**, **RIGHT** or **CIRCLE** closes it |
 | **LEFT** | From the first grid column, open the sidebar |
-| **L1 / R1** | Switch home categories; on the PS3-local Playlists page, switch between Watch Later and PS3 tabs |
-| **R2** | Refresh the current home category |
+| **L1 / R1** | Context-sensitive category navigation: cycle the home feed ring (different order when signed in); cycle the six Live subcategories on the Live page; or switch between Watch Later and PS3 tabs on the PS3-local Playlists page. They do not switch categories inside playlist contents, account Playlists, or Downloads |
+| **R2** | Refresh the current category or list |
 | **PS button** | Exit the application |
 
 ### Playback
@@ -134,7 +134,7 @@ in the app take precedence if a screen has a context-specific action.
 | **UP / DOWN** | Decrease or increase the playback volume |
 | **TRIANGLE** | Toggle subtitles |
 | **SQUARE** | Skip the currently active SponsorBlock segment when its category is set to Ask |
-| **L1 / R1** | Play the previous / next video. If no next item is already queued, R1 can request the next recommendation |
+| **L1 / R1** | **L1** plays the previous video when available. **R1** advances to the next video; on a delayed/paused Live stream it first returns to the live edge, and only when already live does it advance/request a recommendation. Local downloaded playback does not support previous/next navigation |
 | **L2** | Show the full playback information HUD |
 | **R2** | Toggle crop-to-fill mode |
 | **Right Analog Stick** | While crop-to-fill is enabled, move the cropped picture horizontally and vertically to adjust which part of the image is visible |
@@ -143,7 +143,7 @@ in the app take precedence if a screen has a context-specific action.
 | **START** | Open playback Options, including Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay; press **START** again or **CIRCLE** to close the panel. Playback Settings contains Subtitle Style |
 | **CIRCLE** | Return to the video list |
 
-Live streams have no normal VOD seek bar and cannot be downloaded. The description and chapter overlays temporarily take control of navigation while open. Audio tracks, quality and chapters are selected from playback Options; Square is reserved for SponsorBlock Ask actions. Completed downloads appear in the app's Downloads category.
+Live playback has a separate timeline: when a stream is paused or has fallen behind the live edge, **R1** returns playback to the current live point. When it is already at the live edge, **R1** continues with the next queued video or requests a recommendation. For VOD, **R1** advances to the next queued video or requests a recommendation; **L1** opens the previous video when one is available. These previous/next actions are unavailable for locally downloaded playback. Live streams cannot be downloaded. The description and chapter overlays temporarily take control of navigation while open. Audio tracks, quality and chapters are selected from playback Options; Square is reserved for SponsorBlock Ask actions. Completed downloads appear in the app's Downloads category.
 
 ## Build and installation
 
