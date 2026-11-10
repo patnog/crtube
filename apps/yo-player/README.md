@@ -20,22 +20,21 @@ It reuses what this repo already has:
 
 ## Features
 
-- **Browse & search** — a sidebar with Recommended, account Subscriptions / History / Watch Later, separate PS3-local Subscriptions / History / Watch Later, Trending and Live. Search has Relevance / Views sort orders; channel views have Latest / Popular / Oldest. Pasting a YouTube link into search opens it directly. Trending tabs are Gaming, Sports and Podcasts; Live tabs are Popular, Music, Gaming, Sports, Podcasts and News.
+- **Browse & search** — a sidebar with Recommended, account Subscriptions / History / Watch Later / Playlists, separate PS3-local Subscriptions / History / Watch Later / Playlists, Trending and Live. Search has Relevance / Views sort orders; channel views have Latest / Popular / Oldest. Pasting a YouTube link into search opens it directly. Trending tabs are Gaming, Sports and Podcasts; Live tabs are Popular, Music, Gaming, Sports, Podcasts and News.
 - **Playback with sound** — streamed as it plays (nothing is downloaded in full first), H.264 + AAC. Sony VDEC is the default decoder. An experimental setting can enable the integrated TEE Decoder for supported 1080p50/60 H.264 streams. During the first five seconds, the player measures presented frame rate; if it is below the internal threshold, it can switch only the current video to an available 30 FPS rendition. This fallback does not modify global settings.
   Pause and seek with a scrub bar showing current / total time.
 - **Live streams** — plays anything with a LIVE badge (sports, news), a few seconds behind the live edge.
 - **Resume** — videos pick up from where you last stopped; already-watched videos are dimmed in the grid.
 - **Subscriptions** — subscribe / unsubscribe from inside a channel; the Subscriptions feed gathers the latest
   uploads from every channel you follow, newest first.
-- **Watch Later** — its own home category; add or remove any video from the pad, tagged on the thumbnail.
-- **Download** — combine a video's video + audio into one `.mp4` file, in the background, with a queue and a
-  progress readout. LIVE videos are rejected before queueing and checked again by the worker. Finished downloads are registered with the XMB and show up in its Video column; the Downloads category displays local thumbnails and video durations.
+- **Watch Later and PS3 playlists** — Watch Later remains its own list. The PS3-local Playlists page has Watch Later and PS3 tabs; create empty playlists, create a playlist while saving a video, add/remove videos, rename or delete playlists, and sort local playlists by Newest or A-Z.
+- **Download** — combine a video's video + audio into one `.mp4` file in the background, with a queue and progress readout. LIVE videos are rejected before queueing and checked again by the worker. Download settings let you choose resolution, audio language/source, primary subtitles that follow the selected audio language, and an optional secondary subtitle language. The Downloads category displays local thumbnails and video durations; downloaded videos can be played locally or deleted from that category.
 - **Volume** — adjust in the player with a pill meter; the level is remembered across videos.
 - **Description** — read the full video description over the playing video, scrollable, without pausing.
 - **Chapters** — jump around by chapter. Chapters come from the description's timestamps, falling back to
   YouTube's own chapter list when the description has none. Chapter boundaries are notched onto the seek bar.
 - **Subtitles** — cycle through the video's available subtitle languages (off by default); the chosen language
-  shows in the player, and lines are drawn above the seek bar.
+  shows in the player, and lines are drawn above the seek bar. Downloaded subtitle tracks are stored with their video and remain available for local playback.
 - **SponsorBlock** — community-marked segments are shown on the seek bar. Each category can be configured as Skip, Ask (Square skips the active segment) or Keep.
 - **No PSN, no ads** — talks to YouTube directly; appears under the XMB **Video** column like the old app.
 
@@ -116,21 +115,23 @@ Treat `account.txt` as a credential: anyone who can read the file may be able to
 
 ## Screens & controls
 
-The app boots into the home feed. The sidebar switches between account feeds, PS3-local lists, Trending and Live. Searching or opening a channel pushes a list screen; playing pushes the player. **Circle** opens the sidebar on the home screen and backs out of nested screens. Button hints along the bottom use the console's own controller glyphs.
+The app boots into the home feed. The sidebar switches between account feeds, PS3-local lists and playlists, Trending and Live. The PS3-local Playlists page has separate Watch Later and PS3 tabs. Searching or opening a channel pushes a list screen; playing pushes the player. **Circle** opens the sidebar on the home screen and backs out of nested screens. Button hints along the bottom use the console's own controller glyphs.
 
 ### Home / search / channel lists
 
 - **D-pad** — move the highlight. Left / right wrap onto the previous / next row, so you can run through every
   tile with just left and right.
 - **X** — play the highlighted video.
-- **Square** — add the highlighted video to the PS3-local **Watch Later** list, or remove it if it's already there.
-- **R3** (right stick click) — **download** the highlighted video (see Downloads below). Live streams can't be
+- **Square** — tap to add/remove the highlighted video from PS3-local **Watch Later**; hold to open the local-playlist picker and add it to a PS3 playlist.
+- **L2** — cycle the current feed or playlist sort order where supported.
+- **L3** — on the PS3 tab of the PS3-local Playlists page, create an empty playlist.
+- **R3 (right stick click) — **download** the highlighted video (see Downloads below). Live streams can't be
   downloaded.
 - **Triangle** — open the highlighted video's **channel** (that channel's videos only). Inside a channel,
   Triangle instead **subscribes / unsubscribes** from that channel.
 - **Select** — open YouTube search. Typing a YouTube link opens it directly.
 - **Start** — open the home Settings panel.
-- **L1 / R1** (home only) — switch the current home category.
+- **L1 / R1** (home only) — switch the current home category; on the PS3-local Playlists page, switch between its Watch Later and PS3 tabs.
 - **R2** (home only) — refresh the current category.
 - **Circle** — open the sidebar; in nested screens, back out one level.
 - **Left** — from the first grid column, open the sidebar.
@@ -174,13 +175,11 @@ The scale is intended for library/navigation UI. Playback controls and overlays 
 
 ## Downloads
 
-Pressing **R3** on a video queues a download. The app rejects videos identified as currently LIVE, and the background worker performs a second LIVE check before fetching media. The picture and sound streams are combined into one `.mp4` file.
+Pressing **R3** on a video queues a download. The app rejects videos identified as currently LIVE, and the background worker performs a second LIVE check before fetching media. The picture and sound streams are combined into one `.mp4` file. Before downloading, configure **Settings → Download settings**: choose Auto / 480p / 720p / 1080p, the audio language (or Original upload), whether auto-dubbed audio is allowed for a translated language, whether primary subtitles should automatically match the selected audio language, and an optional secondary subtitle language. These preferences affect downloads, not streaming playback.
 Downloads run in the background so you can keep browsing, queue up if you start several, and show progress in
 the top-right corner. Live streams can't be downloaded.
 
-A finished download is handed to the system with `cellVideoExport`, which moves it out of the app's folder and
-registers it in the console's media database. The Downloads category keeps a local library entry with the
-thumbnail, title, description and duration; older MP4 files can have their duration recovered from the MP4 movie header. That is what makes it appear in the XMB's Video column, named
+The Downloads category keeps a local library entry with the thumbnail, title, description and duration; older MP4 files can have their duration recovered from the MP4 movie header. Select a completed item and press **X** to play it directly from local storage. Hold **Square** to open the delete confirmation. Downloaded subtitle files are kept with the video and can be used during local playback. That is what makes it appear in the XMB's Video column, named
 after the video, next to anything you would normally copy over from a USB stick. Copying a file into
 `/dev_hdd0/video` by hand does not work: the XMB lists videos from that database, not from the folder.
 
@@ -199,6 +198,11 @@ overscan are saved immediately. A bad value quietly falls back to its default.
 - **`autoplay`** — `on` (default) plays the next recommendation when a video ends; `off` returns to the library.
 - **`enable-1080p60`** — `off` (default) or `on`; enables experimental TEE Decoder selection for supported H.264 50/60-fps streams.
 - **`subtitle-language`** — preferred language code (default `en`); creator-provided tracks are tried before English auto-generated captions.
+- **`download-resolution`** — `0` (Auto, default), `1` (480p), `2` (720p) or `3` (1080p).
+- **`download-audio-language`** — `original` (default) or a supported language code for downloaded audio.
+- **`download-audio-auto-dub`** — `on` (default) allows YouTube auto-dubbed tracks when a translated audio language is selected; `off` prefers uploaded tracks only. This option is not applicable to Original upload.
+- **`download-primary-subtitles`** — `on` (default) automatically downloads a primary subtitle track matching the selected audio language; `off` disables it.
+- **`download-secondary-subtitle`** — `off` (default) or a supported language code for an optional second subtitle track.
 - **`region`** — two-letter country code for content lists (default `US`).
 - **`sponsorblock-mode`** — legacy global mode (`off`, `ads`, `all`) used to migrate older settings files; per-category settings take precedence.
 - **`sponsorblock-sponsor`, `sponsorblock-selfpromo`, `sponsorblock-interaction`, `sponsorblock-intro`, `sponsorblock-outro`, `sponsorblock-music-offtopic`, `sponsorblock-filler`** — each accepts `skip`, `ask` or `keep`.
@@ -221,13 +225,14 @@ transparency. Changes apply on the next launch; delete the file to get the shipp
 ## Storage
 
 Everything is plain files under `/dev_hdd0/tmp/yo-player/` — no account binding, so copy the folder to back it up
-or move it to another console:
+or move it to another console. PS3-local playlists and their index are stored alongside the other local library data:
 
 - `settings.txt` — user settings (above).
 - `subscriptions.txt` — subscribed channel ids, one per line (seeded with a few defaults on first run; editable
   by hand). Subscriptions are also toggled with Triangle inside a channel.
 - `watchlater.txt` — the Watch Later queue. It keeps full video details so the list opens instantly without
   re-fetching.
+- PS3-local playlist index and per-playlist files — playlist names and video entries for the PS3 tab.
 - watch history and last-position files — used to dim already-watched tiles and to resume playback.
 
 ## Build & deploy

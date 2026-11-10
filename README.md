@@ -13,15 +13,15 @@ This repository is a fork of [vortigauntlet/yo-player-signin](https://github.com
 ## Highlights
 
 - **Optional YouTube account sign-in:** Sign in using YouTube's device authorization flow. Approve the code on a phone or computer; no browser is required on the PS3.
-- **Account and PS3-local libraries:** Browse Recommended, account Subscriptions / History / Watch Later / Playlists, and separate PS3-local Subscriptions / History / Watch Later lists. Open account playlists and browse their videos; Watch Later remains a separate feed. Playback itself remains on the anonymous player client.
+- **Account and PS3-local libraries:** Browse Recommended, account Subscriptions / History / Watch Later / Playlists, and separate PS3-local Subscriptions / History / Watch Later / Playlists. Create local playlists, add or remove videos, and rename or delete playlists. Open account playlists and browse their videos; Watch Later remains a separate feed. Playback itself remains on the anonymous player client.
 - **Dynamic display layout:** The app follows the PS3's active video output. 16:9 keeps the standard widescreen UI; SD 4:3 activates a dedicated CRT layout, including a two-column video grid and adjusted navigation hints.
 - **Adjustable UI scale:** Configure the interface scale (1.0x or 1.5x) through **UI Scaling** in the home Settings panel. It applies to the navigation interface at every output resolution, including 480p, 720p and 1080p.
 - **Improved YouTube playback handling:** VOD and live playback use separate InnerTube client paths. VOD uses the VISIONOS client; live streams use the Android VR client to obtain the DASH segment data required by the live player.
 - **VOD client fallback:** When the primary VISIONOS request explicitly reports an unplayable VOD, the extractor can retry supported alternate clients. Live streams are kept out of this fallback path.
 - **Members-only identification:** Restricted videos can be identified and marked in the video grid instead of being mistaken for ordinary playable videos.
 - **Streaming playback:** H.264 video and AAC audio are streamed during playback. The app includes the TEE H.264 decoder as an experimental option for supported 1080p50/60 streams, with Sony VDEC remaining the default. If the measured average presented frame rate is too low during the first five seconds, the player can switch that video to an available 30 FPS rendition without changing global settings.
-- **Navigation and feeds:** A sidebar provides Search, Recommended, account feeds and Playlists, PS3-local lists, Trending, Live, Account, Settings and Exit. Playlists is a dedicated account-library page outside the L1/R1 category cycle. Trending has Gaming, Sports and Podcasts tabs; Live has Popular, Music, Gaming, Sports, Podcasts and News.
-- **Playback and settings:** Search, channel browsing, resume, customizable subtitle styling, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, region selection and background downloads. LIVE streams are identified and excluded from download queues.
+- **Navigation and feeds:** A sidebar provides Search, Recommended, account feeds and Playlists, PS3-local lists and playlists, Trending, Live, Account, Settings and Exit. Account Playlists is a dedicated library page outside the L1/R1 category cycle; PS3-local Playlists has separate Watch Later and PS3 tabs. Trending has Gaming, Sports and Podcasts tabs; Live has Popular, Music, Gaming, Sports, Podcasts and News.
+- **Playback and settings:** Search, channel browsing, resume, customizable subtitle styling, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, region selection and background downloads. Download settings include resolution, audio language/source, and primary/secondary subtitle selection. LIVE streams are identified and excluded from download queues.
 
 ## What this fork adds
 
@@ -37,6 +37,8 @@ The fork is based on `vortigauntlet/yo-player-signin`. In addition to the accoun
 | Diagnostics | Additional boot-stage and playback/extraction logging to make failures easier to diagnose on real hardware |
 | H.264 decoding | Optional TEE Decoder backend for supported 1080p50/60 H.264 streams, with automatic recovery to a lower rendition through Sony VDEC if TEE decoding fails; a separate early-playback frame-rate fallback can switch a struggling video to 30 FPS |
 | Account playlists | Authenticated YouTube TV playlist discovery, playlist video browsing and continuation-based pagination; Watch Later remains a separate account feed |
+| PS3-local playlists | Create empty playlists or create one while saving a video; add/remove videos, rename or delete playlists, and sort the playlist list |
+| Download configuration | Choose Auto/480p/720p/1080p, audio language and auto-dub policy, automatic primary subtitles matching the audio, and an optional second subtitle language |
 | Playlist thumbnails | Playlist cover images are resolved asynchronously from the first video. A single low-priority thumbnail request runs at a time; the queue is reprioritized for the current viewport and the playlist image cache is kept near the visible grid |
 | Video-grid progress | A red progress strip along a thumbnail's bottom edge shows the saved playback position for VODs with a resume point; watched items without a saved position retain the existing dimming treatment |
 | Subtitle styling | Independent subtitle text/background colors, background opacity, highlight effects and font size, with a live `Lorem Ipsum` preview in Playback Settings |
@@ -49,10 +51,10 @@ The original account functionality remains optional. Without signing in, the app
 
 ### Navigation, account and feeds
 - Open the sidebar with **CIRCLE**, or press **LEFT** while the grid selection is in its first column. While the sidebar is open, **LEFT**, **RIGHT** or **CIRCLE** closes it.
-- The sidebar separates account Subscriptions / History / Watch Later / Playlists from the PS3-local versions of those lists. Playlists opens a dedicated account-library page and is not part of the L1/R1 category cycle. It also links to Recommended, Trending, Live, Account, Settings and Exit.
+- The sidebar separates account Subscriptions / History / Watch Later / Playlists from PS3-local Subscriptions / History / Watch Later / Playlists. The PS3-local Playlists page has Watch Later and PS3 tabs; L1/R1 switches between them. The account Playlists page is separate from the L1/R1 category cycle. The sidebar also links to Recommended, Trending, Live, Account, Settings and Exit.
 - Open **Account** in the sidebar to sign in or sign out. Enter the device code at the verification URL on another device.
 - Access tokens are refreshed when needed. Signing out removes the locally saved token and attempts to revoke it.
-- The Playlists page discovers the signed-in account's playlists, displays each playlist's name and video count, and opens its videos in the normal grid. Watch Later remains its own feed.
+- The account Playlists page discovers the signed-in account's playlists, displays each playlist's name and video count, and opens its videos in the normal grid. The PS3-local Playlists page has separate Watch Later and PS3 tabs. In the PS3 tab, create an empty playlist with L3, open a playlist with X, hold Square on a playlist to rename it (release) or request deletion (hold), and use L2 to switch between Newest and A-Z sorting. Watch Later remains its own feed.
 - Playlist cover thumbnails are fetched asynchronously from each playlist's first video. Only one thumbnail request is active at a time; pending work is reprioritized as the visible grid changes, and off-screen playlist images are evicted from the bounded cache.
 - Account authorization is used for account feeds and playlists; video playback remains separate from the signed-in account.
 
@@ -69,10 +71,11 @@ The original account functionality remains optional. Without signing in, the app
 
 ### Personal library and downloads
 - Subscribe to channels and browse their latest uploads.
-- Save videos to the local Watch Later list.
+- Save videos to the local Watch Later list, or hold Square on a video to open the local-playlist picker and add it to a PS3 playlist (including creating a playlist from that flow).
+- Create empty PS3 playlists, add or remove videos, rename playlists, and delete playlists.
 - Keep local watch history and playback positions.
 - Queue VOD downloads in the background. The app checks that a video is not currently LIVE before queuing and checks again in the download worker; LIVE streams are not downloadable.
-- The Downloads category displays completed local files with their video thumbnails and duration badges. Video metadata is retained alongside the downloaded MP4.
+- The Downloads category displays completed local files with their video thumbnails and duration badges. Press X to play a downloaded video locally; hold Square to delete it after confirmation. Video metadata and downloaded subtitle files are retained alongside the downloaded MP4.
 - Completed downloads are kept on the PS3 HDD. The Sony SDK build uses the application's content directory (`/dev_hdd0/game/YOPCRT001/USRDIR`); if the system content directory cannot be obtained, it falls back to `/dev_hdd0/tmp/crtube_sdk/downloads`. The PSL1GHT build stores downloads in `/dev_hdd0/tmp/crtube/downloads`.
 
 ### CRT and SD display
@@ -92,8 +95,9 @@ Open **Settings** from the sidebar or press **START** on the home screen. The me
 - **Autoplay** — enable or disable automatic playback of the next recommended video when the current video ends.
 - **Enable 1080p60 (experimental)** — opt in to the TEE H.264 decoder path for supported 1080p50/60 streams. It is disabled by default; Sony VDEC remains the standard playback path.
 - **SponsorBlock** — configure each supported segment category independently as **Skip**, **Ask** or **Keep**.
+- **Download settings** — choose Auto, 480p, 720p or 1080p; select the audio language (or Original upload); allow or reject auto-dubbed audio when a translated language is selected; enable/disable primary subtitles that follow the chosen audio language; and optionally select a second subtitle language.
 
-The home Settings menu controls application-wide preferences. Playback **Options** contains per-video controls such as Quality, Audio, Subtitles, Chapters and Crop to Fill, plus **Playback Settings**. Open **Playback Settings → Subtitle Style** to customize subtitle text color, background color and opacity, highlight effect, and font size. Changes are previewed immediately with `Lorem Ipsum`, including when subtitles are disabled, and are saved independently of the application theme.
+The home Settings menu controls application-wide preferences and includes **Download settings**. That panel configures download resolution (Auto / 480p / 720p / 1080p), audio language, whether auto-dubbed audio is allowed, whether primary subtitles should follow the selected audio language, and an optional secondary subtitle language. These preferences are saved for subsequent downloads. Playback **Options** contains per-video controls such as Quality, Audio, Subtitles, Chapters and Crop to Fill, plus **Playback Settings**. Open **Playback Settings → Subtitle Style** to customize subtitle text color, background color and opacity, highlight effect, and font size. Changes are previewed immediately with `Lorem Ipsum`, including when subtitles are disabled, and are saved independently of the application theme.
 
 ## Controls
 
@@ -108,14 +112,16 @@ in the app take precedence if a screen has a context-specific action.
 |---|---|
 | D-pad | Move the selection through the video grid |
 | **X** | Play the selected video |
-| **Square** | Add the selected video to the PS3-local Watch Later list, or remove it if it is already saved |
+| **Square** | Tap to add/remove the selected video from Watch Later; hold to open the PS3 playlist picker and add it to a local playlist |
+| **L2** | Cycle the current feed or playlist sort order where sorting is supported |
+| **L3** | In the PS3 tab of the PS3-local Playlists page, create an empty playlist |
 | **R3** (right-stick click) | Queue the selected VOD for background download; live streams cannot be downloaded |
 | **Triangle** | Open the selected video's channel; inside a channel listing, subscribe to or unsubscribe from that channel |
 | **SELECT** | Open YouTube search; entering a YouTube URL opens that video directly |
 | **START** | Open the home Settings panel; press **START** again or **CIRCLE** to close it. UI Scaling, Overscan, Region and other application preferences are configured there |
 | **CIRCLE** | Open the sidebar; in a nested screen, go back. While the sidebar is open, **LEFT**, **RIGHT** or **CIRCLE** closes it |
 | **LEFT** | From the first grid column, open the sidebar |
-| **L1 / R1** | Switch home categories |
+| **L1 / R1** | Switch home categories; on the PS3-local Playlists page, switch between Watch Later and PS3 tabs |
 | **R2** | Refresh the current home category |
 | **PS button** | Exit the application |
 
