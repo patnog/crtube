@@ -134,7 +134,7 @@ static int playbackSubtitleStyleOpen, playbackSubtitleStyleSelected;
 static ButtonRepeat playbackSubtitleStyleRepeat;
 static Label playbackSubtitleStyleTitle, playbackSubtitleStyleLabels[PLAYBACK_SUBTITLE_STYLE_COUNT], playbackSubtitlePreview;
 static int playbackSponsorOpen, playbackSponsorSelected;
-static ButtonRepeat playbackSettingsRepeat, playbackSponsorRepeat;
+static ButtonRepeat playbackSettingsRepeat, playbackSponsorRepeat, playbackSubtitleOffsetRepeat;
 static Label playbackSettingsTitle, playbackSettingsLabels[PLAYBACK_SETTINGS_COUNT];
 static Label playbackSettingsValues[PLAYBACK_SETTINGS_COUNT];
 static Label playbackSettingsToggleLabels[2];
@@ -2621,6 +2621,7 @@ static void openPlaybackSettings(void)
    playbackSubtitleStyleOpen = 0;
    playbackSettingsSelected = 0;
    playbackSettingsRepeat.timer = playbackSettingsRepeat.repeats = 0;
+   playbackSubtitleOffsetRepeat.timer = playbackSubtitleOffsetRepeat.repeats = 0;
 }
 
 static void openPlaybackSponsorSettings(void)
@@ -2699,6 +2700,22 @@ static void updatePlaybackSettings(void)
    int left = isPadButtonPressed(PAD_BTN_LEFT);
    int right = isPadButtonPressed(PAD_BTN_RIGHT);
    int cross = isPadButtonPressed(PAD_BTN_CROSS);
+
+   // Cross is not an adjustment control for these numeric/display settings.
+   if (playbackSettingsSelected == 1 || playbackSettingsSelected == 2 ||
+       playbackSettingsSelected == 4)
+      cross = 0;
+
+   if (playbackSettingsSelected == 4) {
+      int offsetDelta = isRepeatDue(&playbackSubtitleOffsetRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
+                        isRepeatDue(&playbackSubtitleOffsetRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
+      if (offsetDelta) {
+         int offset = getSubtitleOffset() + offsetDelta;
+         if (setSubtitleOffset(offset) != 0) showToast("Could not save subtitle offset");
+      }
+      return;
+   }
+
    if (!left && !right && !cross) return;
 
    if (playbackSettingsSelected == 0) {
@@ -2718,9 +2735,6 @@ static void updatePlaybackSettings(void)
       playbackSubtitleStyleOpen = 1;
       playbackSubtitleStyleSelected = 0;
       playbackSubtitleStyleRepeat.timer = playbackSubtitleStyleRepeat.repeats = 0;
-   } else if (playbackSettingsSelected == 4) {
-      int offset = getSubtitleOffset() + (left ? -1 : 1);
-      if (setSubtitleOffset(offset) != 0) showToast("Could not save subtitle offset");
    } else if (playbackSettingsSelected == 5 && (cross || right)) {
       openPlaybackSponsorSettings();
    }
