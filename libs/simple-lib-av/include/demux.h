@@ -20,6 +20,8 @@ typedef struct {
    int        audioRate;        // output sampling frequency in Hz
    int        audioAdtsRate;    // rate to write in the ADTS header (core rate; = audioRate except HE-AAC)
    int        audioChannels;
+   uint8_t    audioConfig[64];  // original MP4 AAC AudioSpecificConfig; MKV leaves this empty
+   int        audioConfigSize;
    uint64_t   frameDurationNs;  // nanoseconds per video frame (0 if the file doesn't say)
    uint64_t   durationNs;       // total stream duration in nanoseconds (0 if unknown)
 } VideoDemuxer;

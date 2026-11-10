@@ -40,6 +40,8 @@ typedef struct {
    int      avccLength;
    int      width, height;
    int      audioRate, audioChannels;
+   uint8_t  audioConfig[64];
+   int      audioConfigSize;
    uint32_t frameDurationTicks;   // video timescale ticks per frame (0 if the source didn't say)
 } Mp4Muxer;
 
@@ -48,7 +50,8 @@ typedef struct {
 // audioChannels > 0 to add an AAC track, or 0 for video-only. returns 0 on success, -1 on failure
 // (leaves nothing open, removes a partially written file).
 int openMp4Muxer(Mp4Muxer *mux, const char *path, const H264Config *h264, int width, int height,
-                 uint64_t frameDurationNs, int audioRate, int audioChannels);
+                 uint64_t frameDurationNs, int audioRate, int audioChannels,
+                 const uint8_t *audioConfig, int audioConfigSize);
 
 // append one video access unit (Annex-B) presenting at ptsNs; keyframe = 1 for an IDR. 0 / -1.
 int writeMp4Video(Mp4Muxer *mux, const uint8_t *annexB, int size, uint64_t ptsNs, int keyframe);

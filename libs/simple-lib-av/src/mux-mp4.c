@@ -408,20 +408,26 @@ static void putAvc1Box(ByteBuffer *buffer, const Mp4Muxer *mux)
    endBox(buffer, start);
 }
 
-// esds: the MPEG-4 descriptor chain that names the codec (AAC-LC) and carries its AudioSpecificConfig.
+// esds: preserve the source AudioSpecificConfig; synthesize AAC-LC only for sources without one.
 static void putEsdsBox(ByteBuffer *buffer, const Mp4Muxer *mux)
 {
-   uint8_t asc[2];
-   buildAacAsc(mux->audioRate, mux->audioChannels, asc);
+   uint8_t fallbackAsc[2];
+   const uint8_t *asc = mux->audioConfig;
+   int ascSize = mux->audioConfigSize;
+   if (ascSize <= 0) {
+      buildAacAsc(mux->audioRate, mux->audioChannels, fallbackAsc);
+      asc = fallbackAsc;
+      ascSize = sizeof fallbackAsc;
+   }
 
    int start = beginFullBox(buffer, "esds", 0, 0);
    putU8(buffer, 0x03);                       // ES_Descriptor
-   putU8(buffer, (uint8_t)(3 + (2 + 13 + 2 + sizeof asc) + (2 + 1)));
+   putU8(buffer, (uint8_t)(3 + (2 + 13 + 2 + ascSize) + (2 + 1)));
    putU16(buffer, 1);                         // ES_ID
    putU8(buffer, 0);                          // no dependency, no url, no OCR, priority 0
 
    putU8(buffer, 0x04);                       // DecoderConfigDescriptor
-   putU8(buffer, (uint8_t)(13 + 2 + sizeof asc));
+   putU8(buffer, (uint8_t)(13 + 2 + ascSize));
    putU8(buffer, 0x40);                       // objectTypeIndication: MPEG-4 audio
    putU8(buffer, 0x15);                       // streamType: audio, not upstream
    putZeros(buffer, 3);                       // bufferSizeDB
@@ -429,8 +435,8 @@ static void putEsdsBox(ByteBuffer *buffer, const Mp4Muxer *mux)
    putU32(buffer, 0);                         // avgBitrate, unknown
 
    putU8(buffer, 0x05);                       // DecoderSpecificInfo
-   putU8(buffer, (uint8_t)sizeof asc);
-   putBytes(buffer, asc, sizeof asc);
+   putU8(buffer, (uint8_t)ascSize);
+   putBytes(buffer, asc, ascSize);
 
    putU8(buffer, 0x06);                       // SLConfigDescriptor
    putU8(buffer, 1);
@@ -647,13 +653,18 @@ static int writeMoovBox(Mp4Muxer *mux)
 // ---- public interface ----
 
 int openMp4Muxer(Mp4Muxer *mux, const char *path, const H264Config *h264, int width, int height,
-                 uint64_t frameDurationNs, int audioRate, int audioChannels)
+                 uint64_t frameDurationNs, int audioRate, int audioChannels,
+                 const uint8_t *audioConfig, int audioConfigSize)
 {
    memset(mux, 0, sizeof *mux);
    mux->width = width;
    mux->height = height;
    mux->audioRate = audioRate;
    mux->audioChannels = audioChannels;
+   if (audioConfig && audioConfigSize > 0 && audioConfigSize <= (int)sizeof mux->audioConfig) {
+      memcpy(mux->audioConfig, audioConfig, audioConfigSize);
+      mux->audioConfigSize = audioConfigSize;
+   }
    mux->hasAudio = (audioRate > 0 && audioChannels > 0);
    mux->frameDurationTicks = nsToTicks(frameDurationNs, VIDEO_TIMESCALE);
 

@@ -142,28 +142,56 @@ done:
    return samples;
 }
 
-// advances past one MP4 descriptor's expandable length field (1-4 bytes, high bit = continue)
-static int skipDescriptorLen(const uint8_t *data, int len, int pos)
+// Reads an MPEG-4 expandable descriptor length (7 payload bits per byte).
+static int readDescriptorLength(const uint8_t *data, int len, int *pos, int *value)
 {
-   for (int i = 0; i < 4 && pos < len; i++) if (!(data[pos++] & 0x80)) break;
-   return pos;
+   int result = 0;
+   for (int i = 0; i < 4; i++) {
+      if (*pos >= len) return -1;
+      uint8_t byte = data[(*pos)++];
+      result = (result << 7) | (byte & 0x7F);
+      if (!(byte & 0x80)) { *value = result; return 0; }
+   }
+   return -1;
 }
 
-// returns the AAC AudioObjectType from an esds box payload, or -1. AOT 5 (SBR) / 29 (PS) mean HE-AAC,
-// whose core frames run at half the reported sample rate. Walks ES_Descriptor -> DecoderConfig ->
-// DecoderSpecificInfo (the AudioSpecificConfig, whose top 5 bits are the AOT).
-static int getAacObjectType(const uint8_t *esds, int len)
+// Finds and copies DecoderSpecificInfo (AudioSpecificConfig) from an esds payload. The returned
+// bytes are kept verbatim so remuxing does not turn HE-AAC into a fabricated AAC-LC stream.
+static int getAacSpecificConfig(const uint8_t *esds, int len, uint8_t *out, int capacity)
 {
    int pos = 4;   // skip the esds fullbox version/flags
    if (pos >= len || esds[pos++] != 0x03) return -1;   // ES_Descriptor
-   pos = skipDescriptorLen(esds, len, pos) + 3;        // + ES_ID(2) + flags(1), assuming no dependency/URL/OCR
-   if (pos >= len || esds[pos++] != 0x04) return -1;   // DecoderConfigDescriptor
-   pos = skipDescriptorLen(esds, len, pos) + 13;       // + objectTypeIndication(1)+streamType/buffer(4)+max/avgBitrate(8)
-   if (pos >= len || esds[pos++] != 0x05) return -1;   // DecoderSpecificInfo (AudioSpecificConfig)
-   pos = skipDescriptorLen(esds, len, pos);
-   if (pos >= len) return -1;
-   int aot = esds[pos] >> 3;
-   if (aot == 31 && pos + 1 < len) aot = 32 + (((esds[pos] & 7) << 3) | (esds[pos + 1] >> 5));
+   int descriptorSize;
+   if (readDescriptorLength(esds, len, &pos, &descriptorSize) != 0 || descriptorSize > len - pos) return -1;
+   int descriptorEnd = pos + descriptorSize;
+   if (pos + 3 > descriptorEnd) return -1;
+   uint8_t flags = esds[pos + 2];
+   pos += 3;     // ES_ID + flags
+   if (flags & 0x80) pos += 2;
+   if (flags & 0x40) {
+      if (pos >= descriptorEnd) return -1;
+      pos += 1 + esds[pos];
+   }
+   if (flags & 0x20) pos += 2;
+   if (pos >= descriptorEnd || esds[pos++] != 0x04) return -1;   // DecoderConfigDescriptor
+   if (readDescriptorLength(esds, descriptorEnd, &pos, &descriptorSize) != 0 || descriptorSize > descriptorEnd - pos) return -1;
+   int decoderConfigEnd = pos + descriptorSize;
+   if (pos + 13 > decoderConfigEnd) return -1;
+   pos += 13;    // object type, stream type, buffer size, max/average bitrate
+   if (pos >= decoderConfigEnd || esds[pos++] != 0x05) return -1;   // DecoderSpecificInfo
+   if (readDescriptorLength(esds, decoderConfigEnd, &pos, &descriptorSize) != 0 || descriptorSize <= 0 ||
+       descriptorSize > capacity || descriptorSize > decoderConfigEnd - pos) return -1;
+   memcpy(out, esds + pos, descriptorSize);
+   return descriptorSize;
+}
+
+// Returns the AAC AudioObjectType from an AudioSpecificConfig, or -1. AOT 5 (SBR) / 29 (PS)
+// identify HE-AAC, whose raw frames use the core rate (usually half the output rate).
+static int getAacObjectType(const uint8_t *asc, int len)
+{
+   if (!asc || len < 2) return -1;
+   int aot = asc[0] >> 3;
+   if (aot == 31 && len >= 2) aot = 32 + (((asc[0] & 7) << 3) | (asc[1] >> 5));
    return aot;
 }
 
@@ -235,11 +263,18 @@ static void parseMp4Trak(Mp4Demuxer *demuxer, uint64_t trakStart, uint64_t trakE
       int adtsRate = rate;
       uint64_t esdsStart, esdsEnd;
       if (findMp4ChildBox(source, entryPos + 8 + 28, entryEnd, FOURCC('e','s','d','s'), &esdsStart, &esdsEnd) == 0) {
-         uint8_t esds[64];
+         uint8_t esds[256];
          int n = (int)(esdsEnd - esdsStart);
          if (n > (int)sizeof esds) n = sizeof esds;
-         int aot = (n > 4 && readVideoSourceAt(source, esdsStart, esds, n) == 0) ? getAacObjectType(esds, n) : -1;
-         if (aot == 5 || aot == 29) adtsRate = rate / 2;
+         uint8_t asc[64];
+         int ascSize = (n > 4 && readVideoSourceAt(source, esdsStart, esds, n) == 0)
+                     ? getAacSpecificConfig(esds, n, asc, sizeof asc) : -1;
+         if (ascSize > 0) {
+            memcpy(demuxer->audioConfig, asc, ascSize);
+            demuxer->audioConfigSize = ascSize;
+            int aot = getAacObjectType(asc, ascSize);
+            if (aot == 5 || aot == 29) adtsRate = rate / 2;
+         }
       }
 
       // plain files carry the sample table here; a fragmented (audio-only) file has none and loads

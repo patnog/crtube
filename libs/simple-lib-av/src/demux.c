@@ -50,6 +50,8 @@ int openVideoDemuxer(VideoDemuxer *demuxer, const char *path)
       demuxer->hasAudio = mp4->hasAudio;
       demuxer->audioRate = mp4->audioRate;              demuxer->audioChannels = mp4->audioChannels;
       demuxer->audioAdtsRate = mp4->audioAdtsRate;
+      demuxer->audioConfigSize = mp4->audioConfigSize;
+      if (mp4->audioConfigSize > 0) memcpy(demuxer->audioConfig, mp4->audioConfig, mp4->audioConfigSize);
       demuxer->frameDurationNs = mp4->frameDurationNs;  demuxer->durationNs = mp4->durationNs;
    } else {
       MkvDemuxer *mkv = &demuxer->container.mkv;
@@ -77,6 +79,8 @@ int openAudioDemuxer(VideoDemuxer *demuxer, const char *path)
    demuxer->audioRate     = demuxer->container.mp4.audioRate;
    demuxer->audioAdtsRate = demuxer->container.mp4.audioAdtsRate;
    demuxer->audioChannels = demuxer->container.mp4.audioChannels;
+   demuxer->audioConfigSize = demuxer->container.mp4.audioConfigSize;
+   if (demuxer->audioConfigSize > 0) memcpy(demuxer->audioConfig, demuxer->container.mp4.audioConfig, demuxer->audioConfigSize);
    demuxer->durationNs    = demuxer->container.mp4.durationNs;
    if (!demuxer->hasAudio) { closeMp4Demuxer(&demuxer->container.mp4); return -1; }   // don't leak the open source
    return 0;

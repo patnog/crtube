@@ -30,6 +30,8 @@ typedef struct {
    int      audioRate;          // output sampling frequency in Hz (post-SBR for HE-AAC)
    int      audioAdtsRate;      // rate to write in the ADTS header: the core rate (= audioRate/2 for HE-AAC/SBR)
    int      audioChannels;
+   uint8_t  audioConfig[64];  // original MPEG-4 AudioSpecificConfig from esds (empty when unavailable)
+   int      audioConfigSize;
 
    uint64_t frameDurationNs;    // nanoseconds per video frame (first stts delta; 0 if unknown)
    uint64_t durationNs;         // total stream duration in nanoseconds (0 if unknown)

@@ -437,9 +437,15 @@ static int remux(const char *videoUrl, const char *audioUrl, const char *outPath
    if (audio && openAudioDemuxer(audio, audioUrl) == 0) separateAudioOpen = 1;
    else if (video->hasAudio && video->audioRate > 0 && video->audioChannels > 0) muxedAudio = 1;
 
+   const uint8_t *audioConfig = separateAudioOpen ? audio->audioConfig
+                               : (muxedAudio ? video->audioConfig : NULL);
+   int audioConfigSize = separateAudioOpen ? audio->audioConfigSize
+                        : (muxedAudio ? video->audioConfigSize : 0);
+
    if (openMp4Muxer(&mux, outPath, &video->h264, video->width, video->height, video->frameDurationNs,
                     separateAudioOpen ? audio->audioRate : (muxedAudio ? video->audioRate : 0),
-                    separateAudioOpen ? audio->audioChannels : (muxedAudio ? video->audioChannels : 0)) != 0)
+                    separateAudioOpen ? audio->audioChannels : (muxedAudio ? video->audioChannels : 0),
+                    audioConfig, audioConfigSize) != 0)
       goto cleanup;
 
    logInfo("[dl] remux audio source=%s\\n",
@@ -644,7 +650,6 @@ void enqueueDownload(const SearchResult *item)
          strCopy(dl.queue[dl.count].videoId, sizeof dl.queue[dl.count].videoId, item->videoId);
          strCopy(dl.queue[dl.count].title,   sizeof dl.queue[dl.count].title,   item->title);
          dl.count++;
-         startToastShownAt = getTimeUs();
          if (!dl.workerSpawned) { dl.workerSpawned = 1; spawn = 1; }
       }
    }
