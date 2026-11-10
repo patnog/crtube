@@ -18,6 +18,7 @@
 #include "ui/button-hints.h"
 #include "ui/console-glyphs.h"
 #include "ui/icon-font.h"
+#include "vfs.h"                 // measureTree / getFreeSpace
 
 #include "gfx.h"
 #include "theme.h"
@@ -165,6 +166,9 @@ static struct {
 
 static Font        uiFont;
 static Label       titleLabel, statusLabel, playlistErrorLabel, playlistToastLabel;
+static Label       downloadSpacePrefixLabel, downloadSpaceAvailableLabel;
+static uint64_t    downloadSpaceStatsUpdatedUs;
+static int         downloadSpaceAvailableLow;
 static Label       downloadManagerTitle, downloadManagerRows[7], downloadManagerStatuses[7], downloadManagerFooter;
 static ButtonHints downloadManagerHints;
 static uint64_t    playlistToastShownAt;
@@ -617,6 +621,7 @@ static void switchToCategory(int category)
        category == home.category) return;
    cacheCurrent();
    home.category = category;
+   if (category == HOME_DOWNLOADS) downloadSpaceStatsUpdatedUs = 0;
    loadCategory();
    setSidebarForCategory();
    updateHomeSortHint();
@@ -1401,6 +1406,72 @@ static void drawHomeIconFixed(Icon *icon, int x, int y, uint32_t color)
                                0.0f, 0.0f, 1.0f, 1.0f, color, GFX_FILTER_LINEAR);
 }
 
+#define DOWNLOAD_SPACE_REFRESH_US (15ULL * 1000000ULL)
+#define DOWNLOAD_SPACE_LOW_BYTES  (1024ULL * 1024ULL * 1024ULL)
+
+static void formatDownloadSpace(uint64_t bytes, char *out, int capacity)
+{
+   const uint64_t gb = 1024ULL * 1024ULL * 1024ULL;
+   const uint64_t unit = bytes >= gb ? gb : 1024ULL * 1024ULL;
+   const char *suffix = bytes >= gb ? "GB" : "MB";
+   unsigned long long whole = (unsigned long long)(bytes / unit);
+   unsigned long long fraction = (unsigned long long)((bytes % unit) * 100ULL / unit);
+   snprintf(out, capacity, "%llu.%02llu %s", whole, fraction, suffix);
+}
+
+static void updateDownloadSpaceStats(void)
+{
+   uint64_t now = getTimeUs();
+   if (downloadSpaceStatsUpdatedUs && now - downloadSpaceStatsUpdatedUs < DOWNLOAD_SPACE_REFRESH_US)
+      return;
+
+   char downloadsPath[MAX_PATH_LEN];
+   snprintf(downloadsPath, sizeof downloadsPath, "%s/downloads", CRTUBE_DATA_DIR);
+   makeDir(downloadsPath);
+
+   uint64_t usedBytes = measureTree(downloadsPath, NULL);
+   uint64_t availableBytes = 0;
+   int availableOk = getFreeSpace("/dev_hdd0", &availableBytes, NULL) == 0;
+
+   char usedText[24], availableValue[24], availableText[48], prefix[96];
+   formatDownloadSpace(usedBytes, usedText, sizeof usedText);
+   if (availableOk) {
+      formatDownloadSpace(availableBytes, availableValue, sizeof availableValue);
+      snprintf(availableText, sizeof availableText, " Available: %s", availableValue);
+      downloadSpaceAvailableLow = availableBytes <= DOWNLOAD_SPACE_LOW_BYTES;
+   } else {
+      strCopy(availableText, sizeof availableText, " Available: N/A");
+      downloadSpaceAvailableLow = 0;
+   }
+   snprintf(prefix, sizeof prefix, "Used: %s /", usedText);
+   setLabelText(&downloadSpacePrefixLabel, prefix);
+   setLabelText(&downloadSpaceAvailableLabel, availableText);
+   downloadSpaceStatsUpdatedUs = now;
+}
+
+static void drawDownloadSpaceStatus(void)
+{
+   if (home.category != HOME_DOWNLOADS) return;
+   refreshLabelScale(&downloadSpacePrefixLabel);
+   refreshLabelScale(&downloadSpaceAvailableLabel);
+
+   // Right-align the status immediately before the sort badges.
+   int right = homeSortGroupLeft() - 18;
+   int totalWidth = downloadSpacePrefixLabel.tt.tex.w + downloadSpaceAvailableLabel.tt.tex.w;
+   int x = right - totalWidth;
+
+   int textHeight = downloadSpacePrefixLabel.tt.tex.h;
+   if (downloadSpaceAvailableLabel.tt.tex.h > textHeight)
+      textHeight = downloadSpaceAvailableLabel.tt.tex.h;
+   int y = titleLabel.y + (titleLabel.tt.tex.h - textHeight) / 2;
+
+   setLabelColor(&downloadSpacePrefixLabel, activeTheme->textSecondary);
+   setLabelColor(&downloadSpaceAvailableLabel,
+                 downloadSpaceAvailableLow ? 0xFFFF4444 : activeTheme->textSecondary);
+   drawLabelAt(&downloadSpacePrefixLabel, x, y);
+   drawLabelAt(&downloadSpaceAvailableLabel, x + downloadSpacePrefixLabel.tt.tex.w, y);
+}
+
 static void drawHomeSortPills(void)
 {
    int playlistMode = homeSupportsPlaylistSort();
@@ -1682,6 +1753,14 @@ static void initHome(void)
    initLabel(&titleLabel,  &uiFont, MARGIN_X + categoryTitleOffset, headerY,
              home.screenW - 2 * MARGIN_X - categoryTitleOffset, AUTO, TITLE_SIZE,
              activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
+   initLabel(&downloadSpacePrefixLabel, &uiFont, 0, 0, AUTO, AUTO, 18,
+             activeTheme->textSecondary, TEXT_NOWRAP, "Used: -- /");
+   initLabel(&downloadSpaceAvailableLabel, &uiFont, 0, 0, AUTO, AUTO, 18,
+             activeTheme->textSecondary, TEXT_NOWRAP, " Available: --");
+   setLabelScaleWithUi(&downloadSpacePrefixLabel, 1);
+   setLabelScaleWithUi(&downloadSpaceAvailableLabel, 1);
+   downloadSpaceStatsUpdatedUs = 0;
+   downloadSpaceAvailableLow = 0;
    initLabel(&statusLabel, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, AUTO, 21, activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
    initLabel(&playlistErrorLabel, &uiFont, MARGIN_X, 0, home.screenW - 2 * MARGIN_X, AUTO, 18,
              activeTheme->textPrimary, TEXT_WRAP, "This playlist is private, restricted or unavailable.");
@@ -2007,8 +2086,13 @@ static void updateHome(void)
    unsigned int downloadRevision = getDownloadLibraryRevision();
    if (downloadRevision != downloadLibraryRevisionSeen) {
       downloadLibraryRevisionSeen = downloadRevision;
-      if (home.category == HOME_DOWNLOADS) { loadCategory(); return; }
+      if (home.category == HOME_DOWNLOADS) {
+         downloadSpaceStatsUpdatedUs = 0;
+         loadCategory();
+         return;
+      }
    }
+   if (home.category == HOME_DOWNLOADS) updateDownloadSpaceStats();
    updateSignIn();
    if (getAccountRevision() != accountRevisionSeen) applyAccountChange();
    if (getContentRegionRevision() != regionRevisionSeen) {
@@ -2068,7 +2152,8 @@ static void updateHome(void)
                playlistWatchLaterRevisionSeen = getPlaylistWatchLaterRevision();
                categoryCached[HOME_LOCAL_PLAYLISTS] = 0;
             } else if (home.playlistDeleteFromWatchLater == 2) {
-               deleteDownloadedVideo(home.playlistDeleteId);
+               if (deleteDownloadedVideo(home.playlistDeleteId) == 0)
+                  downloadSpaceStatsUpdatedUs = 0;
             } else {
                deleteLocalPlaylist(home.playlistDeleteId);
                localPlaylistRevisionSeen = getLocalPlaylistRevision();
@@ -2534,6 +2619,7 @@ static void drawHome(void)
    else if (home.category == HOME_LIVE) drawLiveTabs();
    else if (home.category == HOME_LOCAL_PLAYLISTS) drawLocalPlaylistTabs();
    if (homeSupportsSort() || homeSupportsPlaylistSort()) drawHomeSortPills();
+   if (home.category == HOME_DOWNLOADS) drawDownloadSpaceStatus();
    drawButtonHintsFitted(&hints, home.screenW, homeFooterBottomY, HINT_ROW_GAP, MAX_HINT_ROWS);
    drawDownloadOverlay(home.screenW);
    if (!home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen) drawSidebar();
@@ -2583,6 +2669,7 @@ static void suspendHome(void)
 static void resumeHome(void)
 {
    if (home.category == HOME_DOWNLOADS) {
+      downloadSpaceStatsUpdatedUs = 0;
       loadCategory();
       return;
    }
@@ -2631,6 +2718,8 @@ static void termHome(void)
    termButtonHints(&panelHints);
    termButtonHints(&downloadManagerHints);
    freeLabel(&titleLabel);
+   freeLabel(&downloadSpacePrefixLabel);
+   freeLabel(&downloadSpaceAvailableLabel);
    freeLabel(&statusLabel);
    freeLabel(&playlistErrorLabel);
    freeLabel(&playlistToastLabel);
