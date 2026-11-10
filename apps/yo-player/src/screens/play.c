@@ -388,6 +388,8 @@ static struct {
    sys_ppu_thread_t sbWorkerTid;
    uint64_t         toastShownUs;      // brief toast timer (0 = hidden)
    uint64_t         toastDurationUs;   // per-toast lifetime; defaults to TOAST_VISIBLE_US
+   uint64_t         liveReturnNoticeUs; // one-second "Back to LIVE" notice
+   int              liveReturnNoticePending; // show only after the replacement LIVE frame arrives
 
    // subtitles: Options selects a track; Triangle toggles it on/off. A worker fetches it in the background
    // (updatePlay respawns the fetch whenever the pick and the fetched track disagree), and once ready
@@ -411,6 +413,7 @@ static Font  uiFont;
 static Label statusLabel;
 static Label statLabels[STAT_LINES];
 static Label timeLeftLabel, timeRightLabel;   // seek bar: current time (left) / total (right)
+static Label liveBadgeLabel, backToLabel;
 static Label toastLabel;                      // brief centred toast ("Skipped ...", "Subtitles: ...")
 static Label askPromptPrefixLabel, askPromptSuffixLabel;
 static Label titleLabel;                      // video title, top-left while the HUD is visible
@@ -1367,6 +1370,8 @@ static void applyPlaybackUiLabelScale(float scale)
    }
    SCALE_PLAYBACK_LABEL(timeLeftLabel);
    SCALE_PLAYBACK_LABEL(timeRightLabel);
+   SCALE_PLAYBACK_LABEL(liveBadgeLabel);
+   SCALE_PLAYBACK_LABEL(backToLabel);
    SCALE_PLAYBACK_LABEL(toastLabel);
    SCALE_PLAYBACK_LABEL(askPromptPrefixLabel);
    SCALE_PLAYBACK_LABEL(askPromptSuffixLabel);
@@ -1426,6 +1431,8 @@ static void initPlay(void)
       initLabel(&statLabels[i], &uiFont, 0, 0, statsTextMaxWidth, AUTO, playbackSubtitleFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");
    initLabel(&timeLeftLabel,  &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabel(&timeRightLabel, &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabelRaw(&liveBadgeLabel, &uiFont, 0, 0, 120, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "LIVE");
+   initLabelRaw(&backToLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "Back to");
    initLabelRaw(&toastLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");   // raw: shows track names
    initLabelRaw(&askPromptPrefixLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "Press");
    initLabelRaw(&askPromptSuffixLabel, &uiFont, 0, 0, 260, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "to skip sponsor");
@@ -2161,8 +2168,12 @@ static void handlePlaybackInput(void)
       state.seeking = 0;
       if (isVideoPaused(state.player) || !isLiveBehindAtEdge(actualBehind) ||
           !isLiveBehindAtEdge(targetBehind)) {
-         if (reopenLiveAt(-1)) showToast("Back to LIVE");
-         else showToast("Could not return to LIVE");
+         if (reopenLiveAt(-1)) {
+            state.toastShownUs = 0;
+            state.toastDurationUs = 0;
+            state.liveReturnNoticeUs = 0;
+            state.liveReturnNoticePending = 1;
+         } else showToast("Could not return to LIVE");
          return;
       }
    }
@@ -3532,6 +3543,16 @@ static void drawSponsorSegments(int barLeft, int span, int barTopY, int barH, fl
    }
 }
 
+// Match the LIVE duration badge used on thumbnails: accent fill, compact 6x4 padding.
+static void drawLiveBadgeAt(int x, int y)
+{
+   const int padX = 6, padY = 4;
+   int width = liveBadgeLabel.tt.tex.w + 2 * padX;
+   int height = liveBadgeLabel.tt.tex.h + 2 * padY;
+   fillGfxRectangle(x, y, width, height, activeTheme->accent);
+   drawLabelAt(&liveBadgeLabel, x + padX, y + padY);
+}
+
 // a red YouTube-style progress bar low on the screen with current/total time on each side, drawn from
 // plain rectangles (no spritesheet), with sponsor segments marked over the fill.
 static void drawSeekBar(void)
@@ -3563,7 +3584,17 @@ static void drawSeekBar(void)
    formatTime(text, sizeof text, (int)position);            setLabelText(&timeLeftLabel, text);
    formatTime(text, sizeof text, (int)(duration + 0.5f));   setLabelText(&timeRightLabel, text);
    drawLabelAt(&timeLeftLabel,  barLeft - 20 - timeLeftLabel.tt.tex.w, barY - timeLeftLabel.tt.tex.h / 2);
-   drawLabelAt(&timeRightLabel, barRight + 20, barY - timeRightLabel.tt.tex.h / 2);
+   int rightTimeX = barRight + 20;
+   int rightTimeY = barY - timeRightLabel.tt.tex.h / 2;
+   drawLabelAt(&timeRightLabel, rightTimeX, rightTimeY);
+
+   if (state.isLive && !state.liveEnded && isLiveBehindAtEdge(duration - position)) {
+      int badgeX = rightTimeX + timeRightLabel.tt.tex.w + 10;
+      int badgeW = liveBadgeLabel.tt.tex.w + 12;
+      int maxX = state.screenW - 40 - badgeW;
+      if (badgeX > maxX) badgeX = maxX;
+      drawLiveBadgeAt(badgeX, barY - (liveBadgeLabel.tt.tex.h + 8) / 2);
+   }
 }
 
 // a top-of-screen HUD badge in the thumbnails' duration-tag style: label on a translucent black box,
@@ -3698,8 +3729,25 @@ static void drawAskSponsorPrompt(void)
 // a brief toast in the top-right notification spot, one badge row below the subtitle-language badge.
 static void drawToast(void)
 {
+   uint64_t now = sys_time_get_system_time();
+   if (state.liveReturnNoticeUs != 0 && now - state.liveReturnNoticeUs < 1000000ULL) {
+      const int padX = 6, padY = 4, gap = 6;
+      int backW = backToLabel.tt.tex.w + 2 * padX;
+      int liveW = liveBadgeLabel.tt.tex.w + 2 * padX;
+      int height = liveBadgeLabel.tt.tex.h + 2 * padY;
+      int y = fullPlaybackHudVisible() && playbackInfoLabel.tt.tex.h > 0
+            ? 32 + playbackInfoLabel.tt.tex.h + 20 : 80;
+      int maxY = state.screenH - height - 8;
+      if (y > maxY) y = maxY;
+      int x = state.screenW - 40 - backW - gap - liveW;
+      fillGfxRectangle(x, y, backW, height, activeTheme->badgeFill);
+      drawLabelAt(&backToLabel, x + padX, y + padY);
+      drawLiveBadgeAt(x + backW + gap, y);
+      return;
+   }
+
    uint64_t duration = state.toastDurationUs ? state.toastDurationUs : TOAST_VISIBLE_US;
-   if (state.toastShownUs == 0 || sys_time_get_system_time() - state.toastShownUs >= duration) return;
+   if (state.toastShownUs == 0 || now - state.toastShownUs >= duration) return;
    int y = fullPlaybackHudVisible() && playbackInfoLabel.tt.tex.h > 0
          ? 32 + playbackInfoLabel.tt.tex.h + 20 : 80;
    int maxY = state.screenH - toastLabel.tt.tex.h - 2 * BADGE_PAD_X - 8;
@@ -3836,6 +3884,10 @@ static void drawPlay(void)
             if (actualFirst >= 0) state.liveFirstSq = actualFirst;
             state.liveFirstPtsNs = getVideoPositionNs(state.player);
             state.liveAnchored = 1;
+            if (state.liveReturnNoticePending) {
+               state.liveReturnNoticePending = 0;
+               state.liveReturnNoticeUs = sys_time_get_system_time();
+            }
             logInfo("[yt] LIVE playback anchored at sq=%ld pts=%llu\n",
                     state.liveFirstSq, (unsigned long long)state.liveFirstPtsNs);
          }
@@ -3936,6 +3988,8 @@ static void termPlay(void)
    for (int i = 0; i < STAT_LINES; i++) freeLabel(&statLabels[i]);
    freeLabel(&timeLeftLabel);
    freeLabel(&timeRightLabel);
+   freeLabel(&liveBadgeLabel);
+   freeLabel(&backToLabel);
    freeLabel(&toastLabel);
    freeLabel(&askPromptPrefixLabel);
    freeLabel(&askPromptSuffixLabel);
