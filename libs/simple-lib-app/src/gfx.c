@@ -103,8 +103,8 @@ int getGfxOverscan(void)
 
 void setGfxOverscan(int percent)
 {
-   if (percent < -10) percent = -10;
-   if (percent > 10) percent = 10;
+   if (percent < -15) percent = -15;
+   if (percent > 15) percent = 15;
    gfxOverscanPercent = percent;
 }
 

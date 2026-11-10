@@ -42,7 +42,7 @@ float getGfxSdUiScale(void);
 float getGfxUiScaleFactor(void); // selected factor at every output resolution
 void  setGfxSdUiScale(float scale);
 // Uniform output zoom applied by the display viewport after all drawing and video crop calculations.
-// Range: -10..+10 percent; zero leaves the original output unchanged. Offscreen targets are unaffected.
+// Range: -15..+15 percent; zero leaves the original output unchanged. Offscreen targets are unaffected.
 int   getGfxOverscan(void);
 void  setGfxOverscan(int percent);
 

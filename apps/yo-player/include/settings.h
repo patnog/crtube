@@ -57,9 +57,13 @@ int setEnable1080p60(int enabled);
 const char *getSubtitleLanguage(void);
 int setSubtitleLanguage(const char *languageCode);
 
-// Uniform display overscan in percent (-10..+10). Changes are saved immediately to settings.txt.
+// Uniform display overscan in percent (-15..+15). Changes are saved immediately to settings.txt.
 int getOverscanPercent(void);
 int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails
+
+// Subtitle vertical offset in virtual screen pixels (-150..+150); positive moves up.
+int getSubtitleOffset(void);
+int setSubtitleOffset(int pixels);  // 0 on success, -1 if persistence fails
 
 // YouTube content region (gl): changes the country used by browse/search list requests.
 typedef struct { const char *code; const char *name; } ContentRegion;

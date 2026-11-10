@@ -44,7 +44,9 @@ static const char *DEFAULT_SETTINGS =
    "# Each category accepts skip, ask, or keep.\n"
    "\n"
    "overscan=0\n"
-   "# output zoom in percent (-10 to +10); 0 keeps the original framing\n"
+   "# output zoom in percent (-15 to +15); 0 keeps the original framing\n"
+   "subtitle-offset=0\n"
+   "# subtitle vertical offset in virtual screen pixels (-150 to +150); positive moves up, negative moves down\n"
    "\n"
    "theme=youtube\n"
    "# which colour theme to start in - one of the [Name] blocks in themes.txt (lower case,\n"
@@ -85,6 +87,7 @@ static int autoplayEnabled = 1;
 static int enable1080p60 = 0;
 static char subtitleLanguage[12] = "en";
 static int overscanPercent = 0;
+static int subtitleOffsetPixels = 0;
 static int subtitleStyle[5] = { 0, 0, 3, 0, 2 };
 static const char *SUBTITLE_STYLE_KEYS[5] = { "subtitle-text-color", "subtitle-background-color", "subtitle-background-opacity", "subtitle-highlight", "subtitle-font-size" };
 static const int SUBTITLE_STYLE_MAX[5] = { 5, 4, 4, 2, 5 };
@@ -172,6 +175,7 @@ void loadSettings(void)
 {
    char text[4096];
    overscanPercent = 0;
+   subtitleOffsetPixels = 0;
    regionIndex = defaultRegionIndex();
    regionRevision = 0;
    regionUnsaved = 0;
@@ -356,8 +360,8 @@ void loadSettings(void)
       char *end = NULL;
       long parsed = strtol(overscan, &end, 10);
       if (end != overscan && (*end == 0 || *end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) {
-         if (parsed < -10) parsed = -10;
-         if (parsed > 10) parsed = 10;
+         if (parsed < -15) parsed = -15;
+         if (parsed > 15) parsed = 15;
          overscanPercent = (int)parsed;
       } else {
          logWarn("[settings] invalid overscan value, using 0\n");
@@ -365,6 +369,23 @@ void loadSettings(void)
       }
    }
    setGfxOverscan(overscanPercent);
+
+   const char *subtitleOffsetValue = findSettingValue(text, "subtitle-offset");
+   if (!subtitleOffsetValue) {
+      if (rewriteSettingKey(SETTINGS_PATH, "subtitle-offset", "0") != 0)
+         logWarn("[settings] could not add default subtitle-offset key\n");
+   } else {
+      char *end = NULL;
+      long parsed = strtol(subtitleOffsetValue, &end, 10);
+      if (end != subtitleOffsetValue && (*end == 0 || *end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) {
+         if (parsed < -150) parsed = -150;
+         if (parsed > 150) parsed = 150;
+         subtitleOffsetPixels = (int)parsed;
+      } else {
+         logWarn("[settings] invalid subtitle-offset value, using 0\n");
+         subtitleOffsetPixels = 0;
+      }
+   }
 }
 
 int getSortPreference(SortPreference setting)
@@ -481,8 +502,8 @@ int getOverscanPercent(void) { return overscanPercent; }
 
 int setOverscanPercent(int percent)
 {
-   if (percent < -10) percent = -10;
-   if (percent > 10) percent = 10;
+   if (percent < -15) percent = -15;
+   if (percent > 15) percent = 15;
    if (percent == overscanPercent) return 0;
 
    char value[8];
@@ -496,6 +517,27 @@ int setOverscanPercent(int percent)
    overscanPercent = percent;
    setGfxOverscan(overscanPercent);
    logInfo("[settings] overscan set to %d%%\n", overscanPercent);
+   return 0;
+}
+
+int getSubtitleOffset(void) { return subtitleOffsetPixels; }
+
+int setSubtitleOffset(int pixels)
+{
+   if (pixels < -150) pixels = -150;
+   if (pixels > 150) pixels = 150;
+   if (pixels == subtitleOffsetPixels) return 0;
+
+   char value[8];
+   int length = snprintf(value, sizeof value, "%d", pixels);
+   if (length <= 0 || length >= (int)sizeof value ||
+       rewriteSettingKey(SETTINGS_PATH, "subtitle-offset", value) != 0) {
+      logWarn("[settings] could not persist subtitle-offset=%d\n", pixels);
+      return -1;
+   }
+
+   subtitleOffsetPixels = pixels;
+   logInfo("[settings] subtitle-offset=%d px\n", subtitleOffsetPixels);
    return 0;
 }
 

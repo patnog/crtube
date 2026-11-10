@@ -117,7 +117,7 @@ static Label optionsCurrentValueLabels[3]; // Quality, Audio, Subs language
 
 // Playback-owned settings panel. It deliberately shares the persisted settings APIs
 // with navigation, but owns its input state, labels, layout and SponsorBlock submenu.
-#define PLAYBACK_SETTINGS_COUNT 5
+#define PLAYBACK_SETTINGS_COUNT 6
 #define PLAYBACK_SETTINGS_ROW_H 54
 #define PLAYBACK_SETTINGS_PANEL_W 650
 #define PLAYBACK_SETTINGS_PANEL_H 430
@@ -1542,7 +1542,7 @@ static void initPlay(void)
    initLabelRaw(&playbackSettingsTitle, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 48, AUTO,
                 playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "Playback Settings");
    static const char *playbackSettingNames[PLAYBACK_SETTINGS_COUNT] = {
-      "Enable 1080p (experimental)", "UI Scaling", "Overscan", "Subtitle Style", "SponsorBlock"
+      "Enable 1080p (experimental)", "UI Scaling", "Overscan", "Subtitle Style", "Subtitle Offset", "SponsorBlock"
    };
    for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
       initLabelRaw(&playbackSettingsLabels[i], &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 230, AUTO,
@@ -2718,7 +2718,10 @@ static void updatePlaybackSettings(void)
       playbackSubtitleStyleOpen = 1;
       playbackSubtitleStyleSelected = 0;
       playbackSubtitleStyleRepeat.timer = playbackSubtitleStyleRepeat.repeats = 0;
-   } else if (playbackSettingsSelected == 4 && (cross || right)) {
+   } else if (playbackSettingsSelected == 4) {
+      int offset = getSubtitleOffset() + (left ? -1 : 1);
+      if (setSubtitleOffset(offset) != 0) showToast("Could not save subtitle offset");
+   } else if (playbackSettingsSelected == 5 && (cross || right)) {
       openPlaybackSponsorSettings();
    }
 }
@@ -2898,8 +2901,12 @@ static void drawPlaybackSettings(void)
    if (strcmp(playbackSettingsValues[1].text, scaleValue) != 0)
       setLabelText(&playbackSettingsValues[1], scaleValue);
    setLabelText(&playbackSettingsValues[2], overscanValue);
+   char subtitleOffsetValue[16];
+   int subtitleOffset = getSubtitleOffset();
+   snprintf(subtitleOffsetValue, sizeof subtitleOffsetValue, "%d", subtitleOffset);
    setLabelText(&playbackSettingsValues[3], "Configure");
-   setLabelText(&playbackSettingsValues[4], "Configure");
+   setLabelText(&playbackSettingsValues[4], subtitleOffsetValue);
+   setLabelText(&playbackSettingsValues[5], "Configure");
 
    int toggleW = 132;
    int toggleX = x + panelW - 40 - toggleW;
@@ -2939,7 +2946,7 @@ static void drawPlaybackSettings(void)
          setLabelColor(value, i == playbackSettingsSelected ? activeTheme->accent : activeTheme->textPrimary);
          moveLabel(value, valueX + (valueW - value->tt.tex.w) / 2, valueY);
          drawLabel(value);
-         if (i == 3 || i == 4) {
+         if (i == 3 || i == 5) {
             int tx = x + panelW - 24;
             int ty = rowY + PLAYBACK_SETTINGS_ROW_H / 2;
             drawGfxTriangle(tx - 7, ty - 4, activeTheme->textSecondary,
@@ -3856,6 +3863,10 @@ static void drawSubtitle(void)
    if (state.subtitlePick < 0 || subtitleLabel.tt.tex.w == 0) return;
    int x = state.screenW / 2 - subtitleLabel.tt.tex.w / 2;
    int y = (int)(state.screenH * 0.94f) - 40 - subtitleLabel.tt.tex.h;
+   y -= getSubtitleOffset();
+   if (y < 12) y = 12;
+   int maxY = state.screenH - subtitleLabel.tt.tex.h - 12;
+   if (y > maxY) y = maxY;
    static const uint32_t textColors[] = { 0xFFFFFFFF, 0xFFFFFF00, 0xFF00FFFF, 0xFF00FF00, 0xFF4488FF, 0xFFFF4444 };
    static const uint32_t bgColors[] = { 0xFF000000, 0xFF303030, 0xFF777777, 0xFF102040, 0x00000000 };
    uint32_t bg = bgColors[getSubtitleStyle(1)];
