@@ -82,6 +82,8 @@ typedef struct {
    char localPlaylistId[16]; // stable local playlist key (not a YouTube playlist id)
    int  isLocalDownload;
    uint64_t downloadedAt;
+   int  checkLiveStatus;     // local history item: resolve current LIVE state asynchronously
+   int  liveStatusChecked;   // worker completed the current LIVE-state lookup
 } SearchResult;
 
 #define MAX_CONTINUATION 4096   // youtube "load more" tokens are long base64 blobs
@@ -183,6 +185,8 @@ typedef struct Extractor {
    // Signed-in account playlists and the videos inside one playlist. Blocking; call on a worker thread.
    int (*getAccountPlaylists)(const char *continuation, SearchResults *out);
    int (*getAccountPlaylistVideos)(const char *playlistId, const char *continuation, SearchResults *out);
+   // Resolve membership restriction and current LIVE state in one player request.
+   int (*getVideoStatus)(const char *videoId, int *isLive);
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.

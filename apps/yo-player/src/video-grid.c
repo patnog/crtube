@@ -966,8 +966,21 @@ static void worker(uint64_t arg)
          int rc = -1;
          if (!grid->stopWorker) {
             const Extractor *extractor = findExtractor(videoId);
-            rc = extractor && extractor->isVideoMembersOnly
-                 ? extractor->isVideoMembersOnly(videoId) : -1;
+            SearchResult *item = &grid->results.items[i];
+            if (item->checkLiveStatus && extractor && extractor->getVideoStatus) {
+               int isLive = 0;
+               rc = extractor->getVideoStatus(videoId, &isLive);
+               item->isLive = rc >= 0 ? isLive : 0;
+               item->checkLiveStatus = 0;
+               item->liveStatusChecked = 1;
+            } else {
+               rc = extractor && extractor->isVideoMembersOnly
+                    ? extractor->isVideoMembersOnly(videoId) : -1;
+               if (item->checkLiveStatus) {
+                  item->checkLiveStatus = 0;
+                  item->liveStatusChecked = 1;
+               }
+            }
          }
          if (grid->stopWorker) {
             grid->membersOnly[i] = GRID_MEMBER_UNKNOWN;
@@ -1094,7 +1107,8 @@ static int hasVisibleMemberCheckInFlight(const VideoGrid *grid)
    int end = (grid->scrollRow + grid->visibleRows) * grid->columns;
    if (end > grid->results.count) end = grid->results.count;
    for (int i = start; i < end; i++) {
-      if (grid->results.items[i].isPlaylist || grid->membersOnly[i] != GRID_MEMBER_UNKNOWN) continue;
+      if (grid->results.items[i].isPlaylist ||
+          (grid->membersOnly[i] != GRID_MEMBER_UNKNOWN && !grid->results.items[i].checkLiveStatus)) continue;
       if (isMemberOnlyCheckInFlight(grid->results.items[i].videoId)) return 1;
    }
    return 0;
@@ -1107,9 +1121,12 @@ static int nextMemberCheck(VideoGrid *grid, int visibleOnly)
 
    if (visibleOnly && isTileVisible(grid, grid->selected)) {
       int i = grid->selected;
-      if (!grid->results.items[i].isPlaylist && grid->membersOnly[i] == GRID_MEMBER_UNKNOWN) {
+      if (!grid->results.items[i].isPlaylist &&
+          (grid->membersOnly[i] == GRID_MEMBER_UNKNOWN || grid->results.items[i].checkLiveStatus)) {
          const char *id = grid->results.items[i].videoId;
-         if (isMemberOnlyIdCached(id)) grid->membersOnly[i] = GRID_MEMBER_YES;
+         if (grid->results.items[i].checkLiveStatus) {
+            if (!isMemberOnlyCheckInFlight(id)) return i;
+         } else if (isMemberOnlyIdCached(id)) grid->membersOnly[i] = GRID_MEMBER_YES;
          else if (!isMemberOnlyCheckInFlight(id)) return i;
       }
    }
@@ -1117,9 +1134,11 @@ static int nextMemberCheck(VideoGrid *grid, int visibleOnly)
    for (int i = 0; i < grid->results.count; i++) {
       int visible = isTileVisible(grid, i);
       if (visibleOnly != visible || grid->results.items[i].isPlaylist ||
-          grid->membersOnly[i] != GRID_MEMBER_UNKNOWN) continue;
+          (grid->membersOnly[i] != GRID_MEMBER_UNKNOWN && !grid->results.items[i].checkLiveStatus)) continue;
       const char *id = grid->results.items[i].videoId;
-      if (isMemberOnlyIdCached(id)) {
+      if (grid->results.items[i].checkLiveStatus) {
+         if (isMemberOnlyCheckInFlight(id)) continue;
+      } else if (isMemberOnlyIdCached(id)) {
          grid->membersOnly[i] = GRID_MEMBER_YES;
          continue;
       }
@@ -1294,6 +1313,17 @@ static void mergeSortedPage(VideoGrid *grid, int firstNew)
    }
    grid->thumbRequestIndex = -1;
    grid->thumbRequestEnd = 0;
+}
+
+static void applyResolvedLiveStatus(VideoGrid *grid)
+{
+   for (int i = 0; i < grid->results.count; i++) {
+      SearchResult *item = &grid->results.items[i];
+      if (!item->liveStatusChecked) continue;
+      if (i >= grid->winStart && i < grid->winEnd)
+         setLabelText(&grid->durations[i], item->isLive ? "LIVE" : item->duration);
+      item->liveStatusChecked = 0;
+   }
 }
 
 static void dematerializeTile(VideoGrid *grid, int i)
@@ -1542,9 +1572,12 @@ void updateVideoGrid(VideoGrid *grid)
       if (grid->reloadPending) {
          grid->reloadPending = 0;
          applyDeferredSource(grid);
-      } else if (grid->sortPendingFrom >= 0) {
-         mergeSortedPage(grid, grid->sortPendingFrom);
-         grid->sortPendingFrom = -1;
+      } else {
+         if (grid->job == JOB_MEMBER_CHECK) applyResolvedLiveStatus(grid);
+         if (grid->sortPendingFrom >= 0) {
+            mergeSortedPage(grid, grid->sortPendingFrom);
+            grid->sortPendingFrom = -1;
+         }
       }
    }
    if (grid->stage != GRID_READY) return;

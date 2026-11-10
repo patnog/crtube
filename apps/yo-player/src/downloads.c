@@ -237,9 +237,10 @@ static void saveDownloadMetadata(const char *videoPath, const StreamInfo *info, 
    char path[MAX_PATH_LEN], data[3000];
    buildSidecarPath(path, sizeof path, videoPath, ".meta");
    const char *title = info->title[0] ? info->title : fallbackTitle;
-   int length = snprintf(data, sizeof data, "%s\n%s\n#CRTMETA1\n%s\n%s\n%s\n%s",
+   int length = snprintf(data, sizeof data, "%s\n%s\n#CRTMETA2\n%s\n%s\n%s\n%d\n%s",
                          title, info->author, publishedDate ? publishedDate : "",
-                         viewCount ? viewCount : "", likeCount ? likeCount : "Offline", info->description);
+                         viewCount ? viewCount : "", likeCount ? likeCount : "Offline",
+                         info->durationSeconds > 0 ? info->durationSeconds : 0, info->description);
    if (length > 0 && length < (int)sizeof data) {
       if (writeFile(path, data, (uint64_t)length) != 0)
          logWarn("[dl] metadata write failed for %s\n", videoPath);
@@ -289,7 +290,25 @@ int loadDownloadedMetadata(const char *videoPath, char *title, int titleCap,
    *second++ = 0;
    if (data[0] && title && titleCap > 0) strCopy(title, titleCap, data);
    if (first[0] && author && authorCap > 0) strCopy(author, authorCap, first);
-   if (strncmp(second, "#CRTMETA1\n", 10) == 0) {
+   if (strncmp(second, "#CRTMETA2\n", 10) == 0) {
+      char *line = second + 10;
+      char *publishedEnd = strchr(line, '\n');
+      if (!publishedEnd) return -1;
+      *publishedEnd++ = 0;
+      char *viewsEnd = strchr(publishedEnd, '\n');
+      if (!viewsEnd) return -1;
+      *viewsEnd++ = 0;
+      char *likesEnd = strchr(viewsEnd, '\n');
+      if (!likesEnd) return -1;
+      *likesEnd++ = 0;
+      char *durationEnd = strchr(likesEnd, '\n');
+      if (!durationEnd) return -1;
+      *durationEnd++ = 0;
+      if (publishedDate && publishedCap > 0 && line[0]) strCopy(publishedDate, publishedCap, line);
+      if (viewCount && viewsCap > 0 && publishedEnd[0]) strCopy(viewCount, viewsCap, publishedEnd);
+      if (likeCount && likesCap > 0 && viewsEnd[0]) strCopy(likeCount, likesCap, viewsEnd);
+      if (description && descriptionCap > 0) strCopy(description, descriptionCap, durationEnd);
+   } else if (strncmp(second, "#CRTMETA1\n", 10) == 0) {
       char *line = second + 10;
       char *publishedEnd = strchr(line, '\n');
       if (!publishedEnd) return -1;
@@ -308,6 +327,127 @@ int loadDownloadedMetadata(const char *videoPath, char *title, int titleCap,
       strCopy(description, descriptionCap, second);
    }
    return 0;
+}
+
+static uint32_t downloadReadBe32(const uint8_t *p)
+{
+   return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+          ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static uint64_t downloadReadBe64(const uint8_t *p)
+{
+   return ((uint64_t)downloadReadBe32(p) << 32) | downloadReadBe32(p + 4);
+}
+
+// Read only the MP4 movie header. This also supplies duration for files downloaded
+// before duration was added to the metadata sidecar.
+static int readDownloadedMp4Duration(const char *videoPath)
+{
+   VideoSource source;
+   if (openVideoSource(&source, videoPath) != 0) return 0;
+
+   uint64_t fileSize = getVideoSourceSize(&source);
+   uint64_t moovStart = 0, moovEnd = 0, pos = 0;
+   for (int guard = 0; guard < 256 && pos + 8 <= fileSize; guard++) {
+      uint8_t box[16];
+      if (readVideoSourceAt(&source, pos, box, 8) != 0) break;
+      uint64_t boxSize = downloadReadBe32(box);
+      uint32_t boxType = downloadReadBe32(box + 4);
+      uint64_t headerSize = 8;
+      if (boxSize == 1) {
+         if (readVideoSourceAt(&source, pos + 8, box + 8, 8) != 0) break;
+         boxSize = downloadReadBe64(box + 8);
+         headerSize = 16;
+      } else if (boxSize == 0) {
+         boxSize = fileSize - pos;
+      }
+      if (boxSize < headerSize || pos + boxSize > fileSize) break;
+      if (boxType == 0x6D6F6F76) {
+         moovStart = pos + headerSize;
+         moovEnd = pos + boxSize;
+         break;
+      }
+      pos += boxSize;
+   }
+
+   int durationSeconds = 0;
+   if (moovStart) {
+      pos = moovStart;
+      for (int guard = 0; guard < 64 && pos + 8 <= moovEnd; guard++) {
+         uint8_t box[16];
+         if (readVideoSourceAt(&source, pos, box, 8) != 0) break;
+         uint64_t boxSize = downloadReadBe32(box);
+         uint32_t boxType = downloadReadBe32(box + 4);
+         uint64_t headerSize = 8;
+         if (boxSize == 1) {
+            if (readVideoSourceAt(&source, pos + 8, box + 8, 8) != 0) break;
+            boxSize = downloadReadBe64(box + 8);
+            headerSize = 16;
+         } else if (boxSize == 0) {
+            boxSize = moovEnd - pos;
+         }
+         if (boxSize < headerSize || pos + boxSize > moovEnd) break;
+         if (boxType == 0x6D766864) {
+            uint8_t mvhd[32];
+            if (readVideoSourceAt(&source, pos + headerSize, mvhd, sizeof mvhd) == 0) {
+               uint32_t timescale = mvhd[0] == 1 ? downloadReadBe32(mvhd + 20)
+                                                  : downloadReadBe32(mvhd + 12);
+               uint64_t ticks = mvhd[0] == 1 ? downloadReadBe64(mvhd + 24)
+                                              : downloadReadBe32(mvhd + 16);
+               if (timescale) durationSeconds = (int)(ticks / timescale);
+            }
+            break;
+         }
+         pos += boxSize;
+      }
+   }
+
+   closeVideoSource(&source);
+   return durationSeconds > 0 ? durationSeconds : 0;
+}
+
+static int loadDownloadedDuration(const char *videoPath)
+{
+   char path[MAX_PATH_LEN], data[3000];
+   buildSidecarPath(path, sizeof path, videoPath, ".dur");
+   int length = readFile(path, data, sizeof data - 1);
+   if (length > 0) {
+      data[length] = 0;
+      int cached = atoi(data);
+      if (cached > 0) return cached;
+   }
+
+   buildSidecarPath(path, sizeof path, videoPath, ".meta");
+   length = readFile(path, data, sizeof data - 1);
+   if (length > 0) {
+      data[length] = 0;
+      char *first = strchr(data, '\n');
+      char *second = first ? strchr(first + 1, '\n') : NULL;
+      if (second && strncmp(second + 1, "#CRTMETA2\n", 10) == 0) {
+         char *line = second + 11;
+         for (int i = 0; i < 3; i++) {
+            line = strchr(line, '\n');
+            if (!line) break;
+            line++;
+         }
+         if (line && *line) {
+            char *end = strchr(line, '\n');
+            if (end) *end = 0;
+            int duration = atoi(line);
+            if (duration > 0) return duration;
+         }
+      }
+   }
+
+   int duration = readDownloadedMp4Duration(videoPath);
+   if (duration > 0) {
+      char value[16];
+      snprintf(value, sizeof value, "%d", duration);
+      buildSidecarPath(path, sizeof path, videoPath, ".dur");
+      writeFile(path, value, (uint64_t)strlen(value));
+   }
+   return duration;
 }
 
 unsigned int getDownloadLibraryRevision(void)
@@ -336,7 +476,16 @@ int getDownloadedVideos(SearchResults *out, int sortAZ)
       strCopy(item->videoId, sizeof item->videoId, name);
       strCopy(item->title, sizeof item->title, name);
       strCopy(item->author, sizeof item->author, "Downloaded");
-      strCopy(item->duration, sizeof item->duration, "LOCAL");
+      int duration = loadDownloadedDuration(path);
+      if (duration > 0) {
+         int hours = duration / 3600;
+         int minutes = (duration / 60) % 60;
+         int seconds = duration % 60;
+         if (hours > 0)
+            snprintf(item->duration, sizeof item->duration, "%d:%02d:%02d", hours, minutes, seconds);
+         else
+            snprintf(item->duration, sizeof item->duration, "%d:%02d", minutes, seconds);
+      }
       item->isLocalDownload = 1;
       item->downloadedAt = stat.mtime;
       char description[2048], published[24], views[32], likes[32];
@@ -508,6 +657,12 @@ static void runOneDownload(const QueueItem *item)
    if (!info || !extractor || extractResult != 0 || info->formatCount == 0) {
       logError("[dl] resolve failed for %s\n", item->videoId);
       if (info) { free(info->captions); free(info); }
+      return;
+   }
+   if (info->isLive) {
+      logInfo("[dl] %s is currently LIVE, not downloadable\n", item->videoId);
+      free(info->captions);
+      free(info);
       return;
    }
 

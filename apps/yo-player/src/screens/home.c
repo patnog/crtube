@@ -362,9 +362,11 @@ static int fetchSubscriptions(SearchResults *out)
 
 static int fetchLocalHistory(SearchResults *out)
 {
-   // Return the persisted video IDs unchanged. VideoGrid uses the same lazy
-   // thumbnail worker as every other tab (i.ytimg.com/vi/<videoId>/mqdefault.jpg).
-   return getLocalHistory(out) > 0 ? 0 : -1;
+   // History stores IDs locally, so current LIVE state must be refreshed from YouTube.
+   // VideoGrid resolves it asynchronously for visible items, without delaying the page load.
+   int count = getLocalHistory(out);
+   for (int i = 0; i < count; i++) out->items[i].checkLiveStatus = 1;
+   return count > 0 ? 0 : -1;
 }
 
 static void channelLookupWorker(uint64_t arg)

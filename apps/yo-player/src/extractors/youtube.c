@@ -982,10 +982,11 @@ static int youtubeGetVideoMetadata(const char *videoId,
 
 static int isMembersOnlyResponse(const char *text);
 
-// Check only the playability message, not the full response: a public video's
-// description could mention "members-only" without restricting the video.
-static int youtubeIsVideoMembersOnly(const char *videoId)
+// Resolve membership restriction and current LIVE state from one WEB player response.
+// Membership is read only from playability status, not arbitrary description text.
+static int youtubeGetVideoStatus(const char *videoId, int *isLive)
 {
+   if (isLive) *isLive = 0;
    if (!videoId || strlen(videoId) != 11) return -1;
    if (ensureVisitorData() != 0) return -1;
 
@@ -1003,6 +1004,9 @@ static int youtubeIsVideoMembersOnly(const char *videoId)
    }
 
    const char *end = resp + respLen;
+   if (isLive)
+      *isLive = strstr(resp, "\"isLive\":true") != NULL ||
+                strstr(resp, "\"isLiveNow\":true") != NULL;
    const char *playEnd = NULL;
    const char *play = jsonObjectForKey(resp, end, "playabilityStatus", &playEnd);
    int membersOnly = 0;
@@ -1037,9 +1041,14 @@ static int youtubeIsVideoMembersOnly(const char *videoId)
    }
 
    free(resp);
-   logInfo("[yt] members-only check video=%s result=%s\n",
-           videoId, membersOnly ? "yes" : "no");
+   logInfo("[yt] video status video=%s membersOnly=%s live=%d\n",
+           videoId, membersOnly ? "yes" : "no", isLive ? *isLive : -1);
    return membersOnly;
+}
+
+static int youtubeIsVideoMembersOnly(const char *videoId)
+{
+   return youtubeGetVideoStatus(videoId, NULL);
 }
 
 int getNextVideoId(const char *videoId, char *nextVideoId, int nextVideoIdCap, char *nextTitle, int nextTitleCap, const char watchedIds[][12], int watchedCount)
@@ -2195,5 +2204,6 @@ static int fetchLive(LiveCategory category, const char *continuation, SearchResu
 const Extractor youtubeExtractor = {
    "youtube", matches, extract, search, fetchTrending, getChannel, fetchAccountFeed,
    youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly, fetchLive,
-   getChannelLive, fetchAccountPlaylists, fetchAccountPlaylistVideos
+   getChannelLive, fetchAccountPlaylists, fetchAccountPlaylistVideos,
+   youtubeGetVideoStatus
 };

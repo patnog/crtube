@@ -329,6 +329,9 @@ static struct {
    volatile int     resolutionSwitchDone;
    int              resolutionSwitchThreadActive, resolutionSwitchWasPaused, resolutionSwitchWasFirstFrameSeen;
    int              resolutionSwitchTeeRecovery, teeRecoveryAttempted;
+   int              resolutionSwitchFpsFallback;
+   long             resolutionSwitchLiveEdgeSq, resolutionSwitchLiveFirstSq, resolutionSwitchLivePlaySq;
+   float            resolutionSwitchLiveLatencySec;
    int              decoderStopWarningShown;
    int              resolutionSwitchTarget, resolutionSwitchOldIndex, resolutionSwitchRestored;
    volatile int     resolutionSwitchAborting;
@@ -368,6 +371,8 @@ static struct {
    const uint8_t   *lastFrame;        // fps measure: a changed pointer means a newly presented frame
    int              framesThisSecond, measuredFps;
    uint64_t         fpsTickUs;
+   uint64_t         fpsWindowStartUs, fpsWindowFrames;
+   int              fpsFallbackChecked, fpsFallbackRequested, fpsFallbackAttempted;
 
    // seek: the UI owns the scrub target so the bar moves instantly; the engine seek is deferred until
    // the input goes quiet (each apply costs a decoder flush + fragment reload)
@@ -1690,6 +1695,9 @@ static void audioSwitchWorker(uint64_t arg)
    exitThread();
 }
 
+static double liveEdgeNow(void);
+static double livePositionSq(void);
+
 static VideoPlayer *openReadyResolutionPlayer(const char *videoUrl, const char *audioUrl, float position)
 {
    VideoPlayer *replacement = createVideoPlayerSplit(videoUrl, audioUrl && audioUrl[0] ? audioUrl : NULL,
@@ -1775,7 +1783,7 @@ static int startResolutionSwitch(int target, int automaticFallback)
 {
    if (target < 0 || target >= state.videoCount || !state.videoAvailable[target] ||
        !state.player || state.resolutionSwitchThreadActive || state.audioSwitchThreadActive ||
-       state.seeking || (state.isLive && automaticFallback != 2)) return 0;
+       state.seeking || (state.isLive && automaticFallback != 2 && automaticFallback != 3)) return 0;
    if (strcmp(state.videoUrls[target], state.videoUrls[state.resolutionIndex]) == 0) return 0;
 
    state.resolutionSwitchTarget = target;
@@ -1783,16 +1791,35 @@ static int startResolutionSwitch(int target, int automaticFallback)
    state.resolutionSwitchRestored = 0;
    state.resolutionSwitchAborting = 0;
    state.resolutionSwitchTeeRecovery = (automaticFallback == 2);
+   state.resolutionSwitchFpsFallback = (automaticFallback == 3);
    state.resolutionSwitchWasPaused = isVideoPaused(state.player);
    state.resolutionSwitchWasFirstFrameSeen = state.firstFrameSeen;
    state.resolutionSwitchPosition = state.isLive ? 0.0f : getVideoPositionSeconds(state.player);
-   if (state.isLive) {
-      state.liveAnchored = 0;
-      state.liveFirstPtsNs = 0;
-   }
    strCopy(state.resolutionSwitchVideoUrl, sizeof state.resolutionSwitchVideoUrl, state.videoUrls[target]);
    strCopy(state.resolutionSwitchOldVideoUrl, sizeof state.resolutionSwitchOldVideoUrl,
            state.videoUrls[state.resolutionIndex]);
+   if (state.isLive) {
+      long edge = (long)liveEdgeNow();
+      long playSq = state.liveDvr ? (long)livePositionSq() : -1;
+      char descriptor[MAX_STREAM_URL];
+      state.resolutionSwitchLiveEdgeSq = edge;
+      state.resolutionSwitchLivePlaySq = playSq;
+      state.resolutionSwitchLiveFirstSq = playSq < 0 ? edge - LIVE_START_BEHIND : playSq;
+      if (state.resolutionSwitchLiveFirstSq < state.liveFloorSq)
+         state.resolutionSwitchLiveFirstSq = state.liveFloorSq;
+      state.resolutionSwitchLiveLatencySec = playSq < 0 && !state.liveEnded
+         ? (float)((LIVE_START_BEHIND + 1) * state.liveSegmentSec) : 0.0f;
+      strCopy(descriptor, sizeof descriptor, state.resolutionSwitchVideoUrl);
+      writeLiveDescriptor(state.resolutionSwitchVideoUrl, sizeof state.resolutionSwitchVideoUrl,
+                          descriptor, edge, playSq);
+      if (!state.resolutionSwitchVideoUrl[0])
+         strCopy(state.resolutionSwitchVideoUrl, sizeof state.resolutionSwitchVideoUrl, descriptor);
+      strCopy(descriptor, sizeof descriptor, state.resolutionSwitchOldVideoUrl);
+      writeLiveDescriptor(state.resolutionSwitchOldVideoUrl, sizeof state.resolutionSwitchOldVideoUrl,
+                          descriptor, edge, playSq);
+      if (!state.resolutionSwitchOldVideoUrl[0])
+         strCopy(state.resolutionSwitchOldVideoUrl, sizeof state.resolutionSwitchOldVideoUrl, descriptor);
+   }
    state.resolutionSwitchAudioUrl[0] = 0;
    state.resolutionSwitchOldAudioUrl[0] = 0;
    if (state.audioPick >= 0 && state.audioPick < state.audioCount)
@@ -1803,6 +1830,25 @@ static int startResolutionSwitch(int target, int automaticFallback)
       strCopy(state.resolutionSwitchOldAudioUrl, sizeof state.resolutionSwitchOldAudioUrl, state.audioUrls[state.audioPick]);
    else if (state.fallbackAudioUrl[0] && isVideoPlayerUsingSeparateAudio(state.player))
       strCopy(state.resolutionSwitchOldAudioUrl, sizeof state.resolutionSwitchOldAudioUrl, state.fallbackAudioUrl);
+   if (state.isLive) {
+      char descriptor[MAX_STREAM_URL];
+      if (state.resolutionSwitchAudioUrl[0]) {
+         strCopy(descriptor, sizeof descriptor, state.resolutionSwitchAudioUrl);
+         writeLiveDescriptor(state.resolutionSwitchAudioUrl, sizeof state.resolutionSwitchAudioUrl,
+                             descriptor, state.resolutionSwitchLiveEdgeSq,
+                             state.resolutionSwitchLivePlaySq);
+         if (!state.resolutionSwitchAudioUrl[0])
+            strCopy(state.resolutionSwitchAudioUrl, sizeof state.resolutionSwitchAudioUrl, descriptor);
+      }
+      if (state.resolutionSwitchOldAudioUrl[0]) {
+         strCopy(descriptor, sizeof descriptor, state.resolutionSwitchOldAudioUrl);
+         writeLiveDescriptor(state.resolutionSwitchOldAudioUrl, sizeof state.resolutionSwitchOldAudioUrl,
+                             descriptor, state.resolutionSwitchLiveEdgeSq,
+                             state.resolutionSwitchLivePlaySq);
+         if (!state.resolutionSwitchOldAudioUrl[0])
+            strCopy(state.resolutionSwitchOldAudioUrl, sizeof state.resolutionSwitchOldAudioUrl, descriptor);
+      }
+   }
 
    setVideoPaused(state.player, 1);
    if (state.firstFrameSeen && (!state.isLive || state.liveEnded)) {
@@ -1824,10 +1870,19 @@ static int startResolutionSwitch(int target, int automaticFallback)
       state.retiringResolutionPlayer = NULL;
       if (!state.resolutionSwitchWasPaused && state.player) setVideoPaused(state.player, 0);
       state.firstFrameSeen = state.resolutionSwitchWasFirstFrameSeen;
+      state.resolutionSwitchFpsFallback = 0;
       if (automaticFallback != 2) showToast("Resolution switch could not start");
       return 0;
    }
-   if (automaticFallback != 2) {
+   if (state.isLive) {
+      state.liveEdgeSq = state.resolutionSwitchLiveEdgeSq;
+      state.liveEdgeUs = sys_time_get_system_time();
+      state.liveFirstSq = state.resolutionSwitchLiveFirstSq;
+      state.liveLatencySec = state.resolutionSwitchLiveLatencySec;
+      state.liveAnchored = 0;
+      state.liveFirstPtsNs = 0;
+   }
+   if (automaticFallback != 2 && automaticFallback != 3) {
       char notice[96];
       if (state.videoFps[target] > 0) {
          if (automaticFallback)
@@ -1855,6 +1910,26 @@ static int findLowerResolutionProfile(void)
       return profile;
    }
    return -1;
+}
+
+// Prefer 30 FPS at the current resolution; otherwise use the highest 30 FPS
+// rendition that does not increase the current resolution.
+static int findThirtyFpsProfile(void)
+{
+   int currentHeight, sameHeight = -1, lower = -1;
+   if (state.resolutionIndex < 0 || state.resolutionIndex >= state.videoCount) return -1;
+   currentHeight = state.videoHeights[state.resolutionIndex];
+   for (int i = 0; i < state.videoCount; i++) {
+      if (i == state.resolutionIndex || !state.videoAvailable[i] || state.videoFps[i] != 30 ||
+          strcmp(state.videoUrls[i], state.videoUrls[state.resolutionIndex]) == 0 ||
+          state.videoHeights[i] > currentHeight) continue;
+      if (state.videoHeights[i] == currentHeight) {
+         if (sameHeight < 0 || state.videoHasAudio[i] < state.videoHasAudio[sameHeight]) sameHeight = i;
+      } else if (lower < 0 || state.videoHeights[i] > state.videoHeights[lower]) {
+         lower = i;
+      }
+   }
+   return sameHeight >= 0 ? sameHeight : lower;
 }
 
 static void startAudioTrackSwitch(int target)
@@ -3200,6 +3275,25 @@ static void updatePlay(void)
       state.decoderStopWarningShown = 1;
    }
 
+   // If a 50/60 FPS rendition stays below roughly 83% of target over its first
+   // five seconds, switch only this playback to a 30 FPS rendition. No settings are written.
+   if (state.fpsFallbackRequested && state.stage == STAGE_PLAYING && state.player &&
+       !state.resolutionSwitchThreadActive && !state.audioSwitchThreadActive &&
+       !state.seeking && !isVideoPaused(state.player)) {
+      int profile = findThirtyFpsProfile();
+      state.fpsFallbackRequested = 0;
+      state.fpsFallbackAttempted = 1;
+      if (profile >= 0) {
+         logWarn("[yt-fps-fallback] switching itag=%d %dp@30 (from itag=%d %dp@%d)\n",
+                 state.videoItags[profile], state.videoHeights[profile], state.vidItag,
+                 state.vidH, state.vidFps);
+         if (!startResolutionSwitch(profile, 3))
+            logWarn("[yt-fps-fallback] could not start 30 FPS stream switch\n");
+      } else {
+         logWarn("[yt-fps-fallback] no 30 FPS alternative available for this video\n");
+      }
+   }
+
    // A fatal TEE decode error triggers an invisible handoff to a lower rendition.
    // Keep the status label on "Loading..." and never retry the failed TEE URL.
    if (state.stage == STAGE_PLAYING && state.player &&
@@ -3225,6 +3319,7 @@ static void updatePlay(void)
       state.resolutionSwitchThreadActive = 0;
       if (state.pendingResolutionPlayer) {
          int teeRecovery = state.resolutionSwitchTeeRecovery;
+         int fpsFallback = state.resolutionSwitchFpsFallback;
          state.player = state.pendingResolutionPlayer;
          state.pendingResolutionPlayer = NULL;
          if (state.resolutionSwitchRestored) {
@@ -3251,9 +3346,16 @@ static void updatePlay(void)
          state.firstFrameSeen = 0;
          state.lastFrame = NULL;
          state.framesThisSecond = state.measuredFps = 0;
+         state.fpsWindowStartUs = state.fpsWindowFrames = 0;
+         state.fpsFallbackChecked = 0;
+         state.fpsFallbackRequested = 0;
          state.message[0] = 0;
          if (!teeRecovery) {
-            if (state.resolutionSwitchRestored) {
+            if (fpsFallback) {
+               showToast(state.resolutionSwitchRestored
+                         ? "30 FPS fallback failed; original restored"
+                         : "Low framerate; switched to 30 FPS");
+            } else if (state.resolutionSwitchRestored) {
                showToast("Resolution unavailable; previous stream restored");
             } else {
                char notice[64];
@@ -3265,10 +3367,14 @@ static void updatePlay(void)
             }
          }
          state.resolutionSwitchTeeRecovery = 0;
+         state.resolutionSwitchFpsFallback = 0;
       } else {
-         if (!state.resolutionSwitchTeeRecovery)
+         if (state.resolutionSwitchFpsFallback)
+            showToast("30 FPS fallback unavailable");
+         else if (!state.resolutionSwitchTeeRecovery)
             showToast("Resolution switch and recovery failed");
          state.resolutionSwitchTeeRecovery = 0;
+         state.resolutionSwitchFpsFallback = 0;
       }
    }
 
@@ -3452,9 +3558,43 @@ static void updatePlay(void)
 // measure the real presented frame rate: a changed frame pointer is a new frame; tally them per second.
 static void measureFps(const uint8_t *frame)
 {
-   if (frame && frame != state.lastFrame) { state.framesThisSecond++; state.lastFrame = frame; }
    uint64_t now = sys_time_get_system_time();
-   if (now - state.fpsTickUs >= 1000000) { state.measuredFps = state.framesThisSecond; state.framesThisSecond = 0; state.fpsTickUs = now; }
+   int newFrame = frame && frame != state.lastFrame;
+   if (newFrame) {
+      state.framesThisSecond++;
+      state.lastFrame = frame;
+   }
+   if (now - state.fpsTickUs >= 1000000) {
+      state.measuredFps = state.framesThisSecond;
+      state.framesThisSecond = 0;
+      state.fpsTickUs = now;
+   }
+
+   if (state.vidFps < 50 || state.fpsFallbackChecked || state.fpsFallbackAttempted ||
+       state.stage != STAGE_PLAYING || !state.player || isVideoPaused(state.player) || state.seeking) {
+      if (state.vidFps < 50 || state.fpsFallbackChecked || state.fpsFallbackAttempted) return;
+      state.fpsWindowStartUs = 0;
+      state.fpsWindowFrames = 0;
+      return;
+   }
+   if (newFrame) {
+      if (!state.fpsWindowStartUs) state.fpsWindowStartUs = now;
+      state.fpsWindowFrames++;
+   }
+   if (state.fpsWindowStartUs && now - state.fpsWindowStartUs >= 5000000ull) {
+      uint64_t elapsed = now - state.fpsWindowStartUs;
+      int averageFps = elapsed ? (int)((state.fpsWindowFrames * 1000000ull + elapsed / 2) / elapsed) : 0;
+      state.fpsFallbackChecked = 1;
+      int minimumFps = (state.vidFps * 5 + 5) / 6;
+      if (averageFps < minimumFps) {
+         logWarn("[yt-fps-fallback] first 5s average=%d FPS target=%d minimum=%d\n",
+                 averageFps, state.vidFps, minimumFps);
+         state.fpsFallbackRequested = 1;
+      } else {
+         logInfo("[yt-fps-fallback] first 5s average=%d FPS target=%d minimum=%d; keeping stream\n",
+                 averageFps, state.vidFps, minimumFps);
+      }
+   }
 }
 
 // rebuild the overlay lines. setLabelText skips unchanged text, so calling this per frame only
