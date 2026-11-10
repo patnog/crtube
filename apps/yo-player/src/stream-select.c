@@ -107,3 +107,94 @@ const StreamFormat *pickBestAudio(const StreamInfo *info)
    }
    return best;
 }
+
+
+static int languageCodeMatches(const char *trackId, const char *languageCode)
+{
+   if (!trackId || !trackId[0] || !languageCode || !languageCode[0]) return 0;
+   char code[16];
+   int n = 0;
+   while (trackId[n] && trackId[n] != '.' && trackId[n] != '_' && n < (int)sizeof code - 1) {
+      code[n] = trackId[n]; n++;
+   }
+   code[n] = 0;
+   if (!n) return 0;
+   for (int i = 0; i < n; i++) if (code[i] >= 'A' && code[i] <= 'Z') code[i] = (char)(code[i] - 'A' + 'a');
+   char wanted[16];
+   int w = 0;
+   while (languageCode[w] && languageCode[w] != '-' && w < (int)sizeof wanted - 1) {
+      char c = languageCode[w++];
+      wanted[w - 1] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+   }
+   wanted[w] = 0;
+   int trackBase = (int)strcspn(code, "-");
+   return (int)strlen(wanted) == trackBase && strncmp(code, wanted, (size_t)trackBase) == 0;
+}
+
+const StreamFormat *pickDownloadVideo(const StreamInfo *info, int maxHeight, int preferSeparateAudio)
+{
+   if (!info) return NULL;
+   const StreamFormat *best = NULL;
+   const StreamFormat *bestSeparate = NULL;
+   for (int i = 0; i < info->formatCount; i++) {
+      const StreamFormat *format = &info->formats[i];
+      if (!format->hasVideo || format->needsCipher || !format->url[0] ||
+          strcmp(format->container, "mp4") != 0 || !decodableVideo(format, getEnable1080p60())) continue;
+      if (maxHeight > 0 && format->height > maxHeight) continue;
+      if (!best || format->height > best->height ||
+          (format->height == best->height && format->fps > best->fps)) best = format;
+      if (!format->hasAudio && (!bestSeparate || format->height > bestSeparate->height ||
+          (format->height == bestSeparate->height && format->fps > bestSeparate->fps)))
+         bestSeparate = format;
+   }
+   return preferSeparateAudio && bestSeparate ? bestSeparate : best;
+}
+
+const StreamFormat *pickDownloadMuxedVideo(const StreamInfo *info, int maxHeight)
+{
+   if (!info) return NULL;
+   const StreamFormat *best = NULL;
+   for (int i = 0; i < info->formatCount; i++) {
+      const StreamFormat *format = &info->formats[i];
+      if (!format->hasVideo || !format->hasAudio || format->needsCipher || !format->url[0] ||
+          strcmp(format->container, "mp4") != 0 || !decodableVideo(format, getEnable1080p60())) continue;
+      if (maxHeight > 0 && format->height > maxHeight) continue;
+      if (!best || format->height > best->height ||
+          (format->height == best->height && format->fps > best->fps)) best = format;
+   }
+   return best;
+}
+
+const StreamFormat *pickDownloadAudio(const StreamInfo *info, const char *languageCode,
+                                      int allowAutoDubbed)
+{
+   if (!info) return NULL;
+   int original = !languageCode || !languageCode[0] || strcmp(languageCode, "original") == 0;
+   const StreamFormat *best = NULL;
+   const StreamFormat *originalFallback = NULL;
+   const StreamFormat *defaultTrack = NULL;
+   for (int i = 0; i < info->formatCount; i++) {
+      const StreamFormat *format = &info->formats[i];
+      if (!format->hasAudio || format->hasVideo || format->needsCipher || !format->url[0] ||
+          strcmp(format->container, "mp4") != 0) continue;
+      if (format->audioIsAutoDubbed && !allowAutoDubbed) continue;
+      if (!format->audioIsAutoDubbed &&
+          (!originalFallback || format->itag == 140)) originalFallback = format;
+      if (original) {
+         if (format->audioIsAutoDubbed) continue;
+         if (format->audioIsDefault) return format;
+         if (info->defaultAudioTrackId[0] &&
+             strcmp(format->audioTrackId, info->defaultAudioTrackId) == 0) defaultTrack = format;
+         continue;
+      }
+      if (!languageCodeMatches(format->audioTrackId, languageCode)) continue;
+      if (!best || (best->audioIsAutoDubbed && !format->audioIsAutoDubbed) ||
+          (best->audioIsAutoDubbed == format->audioIsAutoDubbed && format->itag == 140))
+         best = format;
+   }
+   if (best) return best;
+   if (original) return defaultTrack ? defaultTrack : originalFallback;
+   // A missing requested dub is deliberately not replaced with a different language here;
+   // the caller performs the explicit original-upload fallback.
+   return NULL;
+}

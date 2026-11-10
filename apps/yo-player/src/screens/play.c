@@ -139,6 +139,8 @@ static Label playbackSponsorActionLabels[3];
 // the video to play, set by playVideo() before the screen is pushed. defaults to
 // a short public clip so pushing the screen directly still does something.
 static char requestedInput[256] = "jNQXAC9IVRw";   // "Me at the zoo"
+static char requestedLocalPath[MAX_PATH_LEN];
+static int requestedIsLocal;
 
 // Playback navigation: the current video plus the two most recent predecessors.
 // The cursor allows L1 to move backward; a new video after going back discards the forward branch.
@@ -890,7 +892,48 @@ static int findPreferredSubtitleTrack(const char *languageCode)
 static void worker(uint64_t arg)
 {
    (void)arg;
-   StreamInfo *info = calloc(1, sizeof *info);   // large format/URL table; keep it off the stack
+   StreamInfo *info = NULL;
+   if (requestedIsLocal) {
+      char fallback[256] = "Downloaded video";
+      const char *base = strrchr(requestedLocalPath, '/');
+      if (base) {
+         strCopy(fallback, sizeof fallback, base + 1);
+         char *extension = strrchr(fallback, '.');
+         if (extension) *extension = 0;
+      }
+      strCopy(state.title, sizeof state.title, fallback);
+      strCopy(state.author, sizeof state.author, "Downloaded");
+      loadDownloadedMetadata(requestedLocalPath, state.title, sizeof state.title,
+                             state.author, sizeof state.author,
+                             state.description, sizeof state.description);
+      CaptionTrack localTracks[2];
+      int localTrackCount = getDownloadedSubtitleTracks(requestedLocalPath, localTracks, 2);
+      if (localTrackCount > 0) {
+         state.captionTracks = (CaptionTrack *)malloc((size_t)localTrackCount * sizeof *state.captionTracks);
+         if (state.captionTracks) {
+            memcpy(state.captionTracks, localTracks, (size_t)localTrackCount * sizeof *state.captionTracks);
+            state.captionCount = localTrackCount;
+            state.subtitlePick = 0;
+            lastSubtitlePick = 0;
+         }
+      }
+      parseChapters(state.description, &state.chapters);
+      strCopy(state.likeCount, sizeof state.likeCount, "Offline");
+      state.isLive = 0;
+      state.videoCount = 0;
+      state.resolutionIndex = -1;
+      state.autoResolutionIndex = -1;
+      state.pendingPlayer = createVideoPlayerSplitCancelable(requestedLocalPath, NULL,
+                               allocGfxVideoBuffer, freeGfxVideoBuffer, &state.cancelRequested);
+      if (!state.pendingPlayer || !waitForInitialPlayerReady(state.pendingPlayer, 10000)) {
+         if (state.pendingPlayer) { destroyVideoPlayer(state.pendingPlayer); state.pendingPlayer = NULL; }
+         if (!playbackCancelRequested()) fail("could not play downloaded file");
+         goto done;
+      }
+      state.vidItag = state.audItag = state.vidW = state.vidH = state.vidFps = 0;
+      goto done;
+   }
+   info = calloc(1, sizeof *info);   // large format/URL table; keep it off the stack
    const Extractor *extractor = findExtractor(requestedInput);
    if (playbackCancelRequested()) goto done;
    if (!info || !extractor) { fail("unrecognised link or id"); goto done; }
@@ -1213,6 +1256,8 @@ static void autoplayWorker(uint64_t arg)
 
 static void launchVideo(const char *input, int addToNavigation)
 {
+   requestedIsLocal = 0;
+   requestedLocalPath[0] = 0;
    strCopy(requestedInput, sizeof requestedInput, input);
    if (addToNavigation) appendPlaybackNavigation(input);
    pushScreen(&playScreen);
@@ -1221,6 +1266,15 @@ static void launchVideo(const char *input, int addToNavigation)
 void playVideo(const char *input)
 {
    launchVideo(input, 1);
+}
+
+void playLocalVideo(const char *path)
+{
+   if (!path || !path[0]) return;
+   requestedIsLocal = 1;
+   strCopy(requestedLocalPath, sizeof requestedLocalPath, path);
+   requestedInput[0] = 0;
+   pushScreen(&playScreen);
 }
 
 // Playback uses the scale selected in the main menu for text rasterisation only.
@@ -1525,8 +1579,10 @@ static void applyPreferredSubtitleTrack(void)
 static void subtitleWorker(uint64_t arg)
 {
    (void)arg;
-   state.subtitleFetchResult = fetchSubtitles(state.captionTracks[state.subtitleFetched].url,
-                                               state.subtitleTrack);   // a failure leaves count 0
+   CaptionTrack *track = &state.captionTracks[state.subtitleFetched];
+   state.subtitleFetchResult = track->isLocalFile ?
+      loadSubtitlesSrt(track->url, state.subtitleTrack) :
+      fetchSubtitles(track->url, state.subtitleTrack);   // a failure leaves count 0
    __sync_synchronize();
    state.subWorkerDone = 1;
    exitThread();
@@ -1863,6 +1919,7 @@ static void handlePlaybackInput(void)
    if (isPadButtonPressed(PAD_BTN_TRIANGLE)) toggleSubtitles();
 
    if (isPadButtonPressed(PAD_BTN_L1)) {
+      if (requestedIsLocal) { showToast("Unavailable for downloaded videos"); return; }
       char previousId[12];
       if (previousPlaybackId(previousId)) {
          popScreen();
@@ -1882,6 +1939,8 @@ static void handlePlaybackInput(void)
          return;
       } else if (state.isLive) {
          showToast("Unavailable for live streams");
+      } else if (requestedIsLocal) {
+         showToast("Unavailable for downloaded videos");
       } else {
          state.nextAttempted = 1;
          state.nextWorkerDone = 0;
@@ -2029,12 +2088,16 @@ static void openDescription(void)
 {
    if (!state.metadataFetchTried) {
       state.metadataFetchTried = 1;
+      if (requestedIsLocal) {
+         strCopy(state.likeCount, sizeof state.likeCount, "Offline");
+      } else {
       state.likeCount[0] = 0;
       state.metadataWorkerDone = 0;
       state.metadataThreadActive = (spawnJoinableThread(&state.metadataWorkerTid, metadataWorker, 0,
                                      THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-metadata") == 0);
       if (!state.metadataThreadActive)
          strCopy(state.likeCount, sizeof state.likeCount, "Unavailable");
+      }
    }
    if (!state.descriptionRendered) renderDescription();
    state.descriptionScroll = 0;

@@ -73,3 +73,25 @@ unsigned getContentRegionRevision(void);
 // Independent subtitle appearance preferences: text colour, background colour, opacity and highlight.
 int getSubtitleStyle(int setting);
 int setSubtitleStyle(int setting, int value);
+
+typedef struct { const char *code; const char *name; } DownloadLanguage;
+
+enum {
+   DOWNLOAD_RESOLUTION_AUTO,
+   DOWNLOAD_RESOLUTION_480P,
+   DOWNLOAD_RESOLUTION_720P,
+   DOWNLOAD_RESOLUTION_1080P
+};
+
+int getDownloadResolution(void);
+int setDownloadResolution(int resolution);
+const char *getDownloadAudioLanguage(void); // "original" or a language code
+int setDownloadAudioLanguage(const char *languageCode);
+int getDownloadAutoDubEnabled(void);
+int setDownloadAutoDubEnabled(int enabled);
+int getDownloadPrimarySubtitlesEnabled(void);
+int setDownloadPrimarySubtitlesEnabled(int enabled);
+const char *getDownloadSecondarySubtitleLanguage(void); // "off" or a language code
+int setDownloadSecondarySubtitleLanguage(const char *languageCode);
+int getDownloadLanguageCount(void);
+const DownloadLanguage *getDownloadLanguageAt(int index);

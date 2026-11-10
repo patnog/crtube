@@ -6,12 +6,19 @@
 // progress shows top-right on the browse screens. Everything runs off the UI thread; the queue is
 // cancelled and cleared on app exit.
 
-#include "extractor.h"   // SearchResult
+#include "extractor.h"   // SearchResult / CaptionTrack
 
 void initDownloads(void);       // set up the worker state + overlay; call after initFont
 void shutdownDownloads(void);   // cancel + clear the queue, join the worker, free the overlay; call at exit
 
-void enqueueDownload(const SearchResult *item);   // add a video to the download queue (spawns the worker if idle)
+void enqueueDownload(const SearchResult *item);   // queue a video for download
+int getDownloadedVideos(SearchResults *out, int sortAZ);
+unsigned int getDownloadLibraryRevision(void);
+int deleteDownloadedVideo(const char *videoId);
+int getDownloadedSubtitleTracks(const char *videoPath, CaptionTrack *out, int capacity);
+int getDownloadedVideoPath(const char *videoId, char *path, int cap);
+int loadDownloadedMetadata(const char *videoPath, char *title, int titleCap,
+                           char *author, int authorCap, char *description, int descriptionCap);
 
 void updateDownloadOverlay(void);         // refresh the "Downloading ..." label; call each frame in a screen update
 void drawDownloadOverlay(int screenWidth); // draw it top-right if a download is active; call in a screen draw

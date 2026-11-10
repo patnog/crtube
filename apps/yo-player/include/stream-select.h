@@ -21,3 +21,11 @@ const StreamFormat *pickVideoForProfile(const StreamInfo *info, int profile);
 
 // the AAC/mp4 audio-only stream to pair with a video-only pick, preferring itag 140. NULL if none.
 const StreamFormat *pickBestAudio(const StreamInfo *info);
+
+// Download-specific selectors. maxHeight=0 means the highest PS3-decodable profile.
+const StreamFormat *pickDownloadVideo(const StreamInfo *info, int maxHeight, int preferSeparateAudio);
+const StreamFormat *pickDownloadMuxedVideo(const StreamInfo *info, int maxHeight);
+// Select a requested audio language; "original" selects the creator's default track.
+// Auto-dubbed tracks are considered only when allowAutoDubbed is true.
+const StreamFormat *pickDownloadAudio(const StreamInfo *info, const char *languageCode,
+                                      int allowAutoDubbed);

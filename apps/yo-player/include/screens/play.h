@@ -10,3 +10,4 @@ extern Screen playScreen;
 // resolves and plays `input` (a youtube link or 11-char video id): stores it and
 // pushes the play screen on top of the current one.
 void playVideo(const char *input);
+void playLocalVideo(const char *path);

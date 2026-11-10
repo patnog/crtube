@@ -31,7 +31,7 @@
 #define SIDEBAR_TITLE_Y            34
 #define SIDEBAR_ROWS_TOP          104
 #define SIDEBAR_ROWS_BOTTOM        18
-#define SIDEBAR_MAIN_ROWS          17
+#define SIDEBAR_MAIN_ROWS          18
 #define SIDEBAR_MAX_ROWS           SIDEBAR_MAIN_ROWS
 #define ROW_SECTION                 1
 
@@ -56,6 +56,7 @@ static const SidebarRow mainRows[SIDEBAR_MAIN_ROWS] = {
    { "History",        ICON_HISTORY,   SIDEBAR_PS3_HISTORY,            0 },
    { "Watch Later",    ICON_CLOCK,     SIDEBAR_PS3_WATCH_LATER,        0 },
    { "Playlists",      ICON_DOCS,      SIDEBAR_PS3_PLAYLISTS,          0 },
+   { "Downloads",      ICON_DOWNLOAD,  SIDEBAR_DOWNLOADS,              0 },
    { "APP",            0,              -1,                             ROW_SECTION },
    { "Account",        ICON_GOOGLE,    SIDEBAR_ACCOUNT,                0 },
    { "Settings",       ICON_COG,       SIDEBAR_SETTINGS,               0 },

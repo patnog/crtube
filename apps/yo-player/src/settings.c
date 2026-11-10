@@ -65,7 +65,12 @@ static const char *DEFAULT_SETTINGS =
    "sort-live-news=0\n"
    "sort-account-playlists=0\n"
    "sort-local-playlists-watch-later=0\n"
-   "sort-local-playlists-ps3=0\n";
+   "sort-local-playlists-ps3=0\n"
+   "download-resolution=0\n"
+   "download-audio-language=original\n"
+   "download-audio-auto-dub=on\n"
+   "download-primary-subtitles=on\n"
+   "download-secondary-subtitle=off\n";
 
 static SponsorblockMode sponsorblockMode = SPONSORBLOCK_ADS;
 static int sponsorActions[SPONSOR_CATEGORY_COUNT] = {
@@ -95,6 +100,26 @@ static const int SORT_SETTING_MAX[SORT_PREF_COUNT] = {
    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1
 };
 static int sortPreferences[SORT_PREF_COUNT];
+static int downloadResolution;
+static char downloadAudioLanguage[12] = "original";
+static int downloadAutoDub = 1;
+static int downloadPrimarySubtitles = 1;
+static char downloadSecondarySubtitle[12] = "off";
+
+// Languages represented by the countries in Content Region. Countries with multiple
+// common languages contribute each language once to this shared download-language list.
+static const DownloadLanguage DOWNLOAD_LANGUAGES[] = {
+   { "bg", "Bulgarian" }, { "hr", "Croatian" }, { "cs", "Czech" },
+   { "da", "Danish" }, { "nl", "Dutch" }, { "en", "English" },
+   { "fi", "Finnish" }, { "fr", "French" }, { "de", "German" },
+   { "el", "Greek" }, { "hu", "Hungarian" }, { "ga", "Irish" },
+   { "it", "Italian" }, { "ja", "Japanese" }, { "ko", "Korean" },
+   { "no", "Norwegian" }, { "pl", "Polish" }, { "pt", "Portuguese" },
+   { "ro", "Romanian" }, { "ru", "Russian" }, { "sr", "Serbian" },
+   { "es", "Spanish" }, { "sv", "Swedish" }, { "tr", "Turkish" },
+   { "uk", "Ukrainian" }
+};
+#define DOWNLOAD_LANGUAGE_COUNT ((int)(sizeof DOWNLOAD_LANGUAGES / sizeof DOWNLOAD_LANGUAGES[0]))
 
 static const ContentRegion REGIONS[] = {
    { "DE", "Germany" }, { "AT", "Austria" }, { "CH", "Switzerland" },
@@ -145,7 +170,7 @@ static int parseRegion(const char *value)
 
 void loadSettings(void)
 {
-   char text[2048];
+   char text[4096];
    overscanPercent = 0;
    regionIndex = defaultRegionIndex();
    regionRevision = 0;
@@ -237,6 +262,58 @@ void loadSettings(void)
       if (region) logWarn("[settings] unknown content region, using US\n");
       if (!region && rewriteSettingKey(SETTINGS_PATH, "region", "US") != 0)
          logWarn("[settings] could not add default content region\n");
+   }
+
+   const char *downloadValue = findSettingValue(text, "download-resolution");
+   downloadResolution = downloadValue ? atoi(downloadValue) : DOWNLOAD_RESOLUTION_AUTO;
+   if (downloadResolution < DOWNLOAD_RESOLUTION_AUTO || downloadResolution > DOWNLOAD_RESOLUTION_1080P)
+      downloadResolution = DOWNLOAD_RESOLUTION_AUTO;
+   if (!downloadValue && rewriteSettingKey(SETTINGS_PATH, "download-resolution", "0") != 0)
+      logWarn("[settings] could not add download-resolution default\n");
+
+   downloadValue = findSettingValue(text, "download-audio-language");
+   if (downloadValue && (settingValueEquals(downloadValue, "original") ||
+                         settingValueEquals(downloadValue, "off"))) {
+      snprintf(downloadAudioLanguage, sizeof downloadAudioLanguage, "original");
+   } else if (downloadValue) {
+      int found = 0;
+      for (int i = 0; i < DOWNLOAD_LANGUAGE_COUNT; i++)
+         if (settingValueEquals(downloadValue, DOWNLOAD_LANGUAGES[i].code)) {
+            snprintf(downloadAudioLanguage, sizeof downloadAudioLanguage, "%s", DOWNLOAD_LANGUAGES[i].code);
+            found = 1; break;
+         }
+      if (!found) snprintf(downloadAudioLanguage, sizeof downloadAudioLanguage, "original");
+   } else {
+      snprintf(downloadAudioLanguage, sizeof downloadAudioLanguage, "original");
+      if (rewriteSettingKey(SETTINGS_PATH, "download-audio-language", "original") != 0)
+         logWarn("[settings] could not add download-audio-language default\n");
+   }
+
+   downloadValue = findSettingValue(text, "download-audio-auto-dub");
+   downloadAutoDub = downloadValue ? settingValueEquals(downloadValue, "on") : 1;
+   if (!downloadValue && rewriteSettingKey(SETTINGS_PATH, "download-audio-auto-dub", "on") != 0)
+      logWarn("[settings] could not add download-audio-auto-dub default\n");
+
+   downloadValue = findSettingValue(text, "download-primary-subtitles");
+   downloadPrimarySubtitles = downloadValue ? settingValueEquals(downloadValue, "on") : 1;
+   if (!downloadValue && rewriteSettingKey(SETTINGS_PATH, "download-primary-subtitles", "on") != 0)
+      logWarn("[settings] could not add download-primary-subtitles default\n");
+
+   downloadValue = findSettingValue(text, "download-secondary-subtitle");
+   if (downloadValue && settingValueEquals(downloadValue, "off")) {
+      snprintf(downloadSecondarySubtitle, sizeof downloadSecondarySubtitle, "off");
+   } else if (downloadValue) {
+      int found = 0;
+      for (int i = 0; i < DOWNLOAD_LANGUAGE_COUNT; i++)
+         if (settingValueEquals(downloadValue, DOWNLOAD_LANGUAGES[i].code)) {
+            snprintf(downloadSecondarySubtitle, sizeof downloadSecondarySubtitle, "%s", DOWNLOAD_LANGUAGES[i].code);
+            found = 1; break;
+         }
+      if (!found) snprintf(downloadSecondarySubtitle, sizeof downloadSecondarySubtitle, "off");
+   } else {
+      snprintf(downloadSecondarySubtitle, sizeof downloadSecondarySubtitle, "off");
+      if (rewriteSettingKey(SETTINGS_PATH, "download-secondary-subtitle", "off") != 0)
+         logWarn("[settings] could not add download-secondary-subtitle default\n");
    }
 
    const char *mode = findSettingValue(text, "sponsorblock-mode");
@@ -451,4 +528,79 @@ int setSubtitleStyle(int setting, int value)
    if (rewriteSettingKey(SETTINGS_PATH, SUBTITLE_STYLE_KEYS[setting], text) != 0) return -1;
    subtitleStyle[setting] = value;
    return 0;
+}
+
+
+static int isDownloadLanguageCode(const char *code)
+{
+   if (!code) return 0;
+   for (int i = 0; i < DOWNLOAD_LANGUAGE_COUNT; i++)
+      if (strcmp(code, DOWNLOAD_LANGUAGES[i].code) == 0) return 1;
+   return 0;
+}
+
+static int persistDownloadSetting(const char *key, const char *value)
+{
+   if (rewriteSettingKey(SETTINGS_PATH, key, value) != 0) {
+      logWarn("[settings] could not persist %s=%s\n", key, value);
+      return -1;
+   }
+   return 0;
+}
+
+int getDownloadResolution(void) { return downloadResolution; }
+int setDownloadResolution(int resolution)
+{
+   if (resolution < DOWNLOAD_RESOLUTION_AUTO || resolution > DOWNLOAD_RESOLUTION_1080P) return -1;
+   if (resolution == downloadResolution) return 0;
+   char value[8]; snprintf(value, sizeof value, "%d", resolution);
+   if (persistDownloadSetting("download-resolution", value) != 0) return -1;
+   downloadResolution = resolution;
+   return 0;
+}
+
+const char *getDownloadAudioLanguage(void) { return downloadAudioLanguage; }
+int setDownloadAudioLanguage(const char *languageCode)
+{
+   if (!languageCode || (strcmp(languageCode, "original") != 0 && !isDownloadLanguageCode(languageCode))) return -1;
+   if (strcmp(downloadAudioLanguage, languageCode) == 0) return 0;
+   if (persistDownloadSetting("download-audio-language", languageCode) != 0) return -1;
+   snprintf(downloadAudioLanguage, sizeof downloadAudioLanguage, "%s", languageCode);
+   return 0;
+}
+
+int getDownloadAutoDubEnabled(void) { return downloadAutoDub; }
+int setDownloadAutoDubEnabled(int enabled)
+{
+   enabled = enabled ? 1 : 0;
+   if (enabled == downloadAutoDub) return 0;
+   if (persistDownloadSetting("download-audio-auto-dub", enabled ? "on" : "off") != 0) return -1;
+   downloadAutoDub = enabled;
+   return 0;
+}
+
+int getDownloadPrimarySubtitlesEnabled(void) { return downloadPrimarySubtitles; }
+int setDownloadPrimarySubtitlesEnabled(int enabled)
+{
+   enabled = enabled ? 1 : 0;
+   if (enabled == downloadPrimarySubtitles) return 0;
+   if (persistDownloadSetting("download-primary-subtitles", enabled ? "on" : "off") != 0) return -1;
+   downloadPrimarySubtitles = enabled;
+   return 0;
+}
+
+const char *getDownloadSecondarySubtitleLanguage(void) { return downloadSecondarySubtitle; }
+int setDownloadSecondarySubtitleLanguage(const char *languageCode)
+{
+   if (!languageCode || (strcmp(languageCode, "off") != 0 && !isDownloadLanguageCode(languageCode))) return -1;
+   if (strcmp(downloadSecondarySubtitle, languageCode) == 0) return 0;
+   if (persistDownloadSetting("download-secondary-subtitle", languageCode) != 0) return -1;
+   snprintf(downloadSecondarySubtitle, sizeof downloadSecondarySubtitle, "%s", languageCode);
+   return 0;
+}
+
+int getDownloadLanguageCount(void) { return DOWNLOAD_LANGUAGE_COUNT; }
+const DownloadLanguage *getDownloadLanguageAt(int index)
+{
+   return index >= 0 && index < DOWNLOAD_LANGUAGE_COUNT ? &DOWNLOAD_LANGUAGES[index] : NULL;
 }

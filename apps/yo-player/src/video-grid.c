@@ -6,6 +6,7 @@
 // stays flat no matter how many results are loaded. The worker is stopped before playback so no per-call
 // http fetch overlaps the streaming http client.
 
+#include "app-config.h"
 #include "video-grid.h"
 
 #include "gfx.h"
@@ -627,6 +628,25 @@ static void thumbFetchThread(uint64_t arg)
             continue;
          }
          int length = 0;
+         if (item->isLocalDownload) {
+            char localThumbPath[MAX_PATH_LEN];
+            snprintf(localThumbPath, sizeof localThumbPath, CRTUBE_DATA_DIR "/downloads/%s.jpg", item->videoId);
+            int localLength = readFile(localThumbPath, (char *)buffer, THUMB_CAP);
+            if (grid->stopWorker) { grid->thumbs[i].state = THUMB_NONE; break; }
+            if (localLength <= 0 && !thumbCacheRead(item->videoId, buffer, &localLength)) {
+               grid->thumbs[i].state = THUMB_FAILED;
+               continue;
+            }
+            length = localLength;
+            uint8_t *copy = (uint8_t *)malloc(length);
+            if (copy) {
+               memcpy(copy, buffer, length);
+               grid->thumbs[i].jpeg = copy; grid->thumbs[i].jpegLen = length;
+               __sync_synchronize();
+               grid->thumbs[i].state = THUMB_FETCHED;
+            } else grid->thumbs[i].state = THUMB_FAILED;
+            continue;
+         }
          int fromCache = thumbCacheRead(thumbnailVideoId, buffer, &length);
          if (grid->stopWorker) {
             grid->thumbs[i].state = THUMB_NONE;
@@ -759,7 +779,8 @@ static int comparePlaylistTitles(const char *a, const char *b)
 static int gridResultBefore(const SearchResult *a, const SearchResult *b,
                             int sortMode, int playlistSortMode)
 {
-   if (a->isPlaylist && b->isPlaylist && playlistSortMode == PLAYLIST_SORT_AZ)
+   if (((a->isPlaylist && b->isPlaylist) || (a->isLocalDownload && b->isLocalDownload)) &&
+       playlistSortMode == PLAYLIST_SORT_AZ)
       return comparePlaylistTitles(a->title, b->title) < 0;
    if (sortMode == SORT_VIEWS) {
       double av = gridViewCount(a->views), bv = gridViewCount(b->views);

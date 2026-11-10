@@ -10,6 +10,7 @@
 #include "text-sanitize.h"      // decodeXmlEntities / stripMarkupTags / removeInvisibleMarks / flattenWhitespace
 #include "string-utilities.h"   // strCopy, truncateUtf8
 #include "dbg.h"
+#include "vfs.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -120,4 +121,108 @@ const char *getSubtitleCueText(const SubtitleTrack *track, float seconds, int *s
       if (seconds < track->cues[i].end) text = track->cues[i].text;
    }
    return text;
+}
+
+
+#define SUBTITLE_SRT_CAP (1024 * 1024)
+
+static void formatSrtTime(char *out, int cap, float seconds)
+{
+   long ms = (long)(seconds * 1000.0f + 0.5f);
+   if (ms < 0) ms = 0;
+   long hours = ms / 3600000L; ms %= 3600000L;
+   long minutes = ms / 60000L; ms %= 60000L;
+   long secs = ms / 1000L; ms %= 1000L;
+   snprintf(out, cap, "%02ld:%02ld:%02ld,%03ld", hours, minutes, secs, ms);
+}
+
+int saveSubtitlesSrt(const char *url, const char *path)
+{
+   if (!url || !path) return -1;
+   SubtitleTrack *track = (SubtitleTrack *)malloc(sizeof *track);
+   if (!track) return -1;
+   int rc = fetchSubtitles(url, track);
+   if (rc != 0 || track->count <= 0) { free(track); return rc != 0 ? rc : -1; }
+
+   size_t capacity = (size_t)track->count * (SUBTITLE_TEXT_MAX + 64) + 1;
+   char *output = (char *)malloc(capacity);
+   if (!output) { free(track); return -1; }
+   size_t used = 0;
+   for (int i = 0; i < track->count; i++) {
+      char start[24], end[24];
+      formatSrtTime(start, sizeof start, track->cues[i].start);
+      formatSrtTime(end, sizeof end, track->cues[i].end);
+      int written = snprintf(output + used, capacity - used, "%d\n%s --> %s\n%s\n\n",
+                             i + 1, start, end, track->cues[i].text);
+      if (written < 0 || (size_t)written >= capacity - used) { used = 0; break; }
+      used += (size_t)written;
+   }
+   rc = used ? writeFile(path, output, (uint64_t)used) : -1;
+   free(output);
+   free(track);
+   return rc;
+}
+
+static int parseSrtTimestamp(const char *line, int *startMs, int *endMs)
+{
+   int sh, sm, ss, sms, eh, em, es, ems;
+   if (sscanf(line, "%d:%d:%d,%d --> %d:%d:%d,%d",
+              &sh, &sm, &ss, &sms, &eh, &em, &es, &ems) != 8) return 0;
+   *startMs = ((sh * 60 + sm) * 60 + ss) * 1000 + sms;
+   *endMs = ((eh * 60 + em) * 60 + es) * 1000 + ems;
+   return *endMs > *startMs;
+}
+
+static char *nextSrtLine(char **cursor)
+{
+   if (!cursor || !*cursor || !**cursor) return NULL;
+   char *line = *cursor;
+   char *end = strpbrk(line, "\r\n");
+   if (end) {
+      char eol = *end;
+      *end = 0;
+      char *next = end + 1;
+      if (eol == '\r' && *next == '\n') next++;
+      *cursor = next;
+   } else {
+      *cursor = line + strlen(line);
+   }
+   return line;
+}
+
+int loadSubtitlesSrt(const char *path, SubtitleTrack *out)
+{
+   if (!path || !out) return -1;
+   memset(out, 0, sizeof *out);
+   char *text = (char *)malloc(SUBTITLE_SRT_CAP + 1);
+   if (!text) return -1;
+   int length = readFile(path, text, SUBTITLE_SRT_CAP);
+   if (length <= 0) { free(text); return -1; }
+   if (length > SUBTITLE_SRT_CAP) length = SUBTITLE_SRT_CAP;
+   text[length] = 0;
+
+   char *cursor = text;
+   char *line;
+   while (out->count < MAX_SUBTITLE_CUES && (line = nextSrtLine(&cursor)) != NULL) {
+      if (!line[0]) continue;
+      char *timestamp = nextSrtLine(&cursor);
+      int startMs = 0, endMs = 0;
+      if (!timestamp || !parseSrtTimestamp(timestamp, &startMs, &endMs)) continue;
+
+      SubtitleCue *cue = &out->cues[out->count];
+      cue->start = startMs / 1000.0f;
+      cue->end = endMs / 1000.0f;
+      size_t used = 0;
+      while ((line = nextSrtLine(&cursor)) != NULL && line[0]) {
+         size_t add = strlen(line);
+         if (used && used < sizeof cue->text - 1) cue->text[used++] = ' ';
+         if (add > sizeof cue->text - 1 - used) add = sizeof cue->text - 1 - used;
+         memcpy(cue->text + used, line, add);
+         used += add;
+         cue->text[used] = 0;
+      }
+      if (cue->text[0]) out->count++;
+   }
+   free(text);
+   return out->count > 0 ? 0 : -1;
 }

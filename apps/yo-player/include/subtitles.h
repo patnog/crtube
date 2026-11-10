@@ -21,6 +21,10 @@ typedef struct {
 
 // blocking GET + parse of a caption track url. 0 ok (count may still be 0), negative on error.
 int fetchSubtitles(const char *url, SubtitleTrack *out);
+// Download one timed-text track and persist the parsed cues as a compact SRT sidecar.
+int saveSubtitlesSrt(const char *url, const char *path);
+// Load an SRT sidecar into the same cue structure used by online playback.
+int loadSubtitlesSrt(const char *path, SubtitleTrack *out);
 
 // the cue text covering `seconds`, or "" if none. *scanFrom caches the search position across
 // calls (cues are time-ordered); reset it to 0 after a seek or track switch.
