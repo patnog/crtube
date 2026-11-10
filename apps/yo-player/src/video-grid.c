@@ -1665,7 +1665,7 @@ static void drawTile(VideoGrid *grid, int i)
       drawLabelAt(&grid->membersOnlyBadge, badgeX + padX, badgeY + padY);
    }
 
-   if (!item->isPlaylist && grid->isWatchLater && grid->isWatchLater(item->videoId)) {
+   if (!grid->suppressWatchLaterBadge && !item->isPlaylist && grid->isWatchLater && grid->isWatchLater(item->videoId)) {
       int badgeW = grid->watchLaterBadge.tt.tex.w + 2 * padX;
       int badgeH = grid->watchLaterBadge.tt.tex.h + 2 * padY;
       int badgeX = tx + grid->tileW - badgeW - edgeGap, badgeY = ty + 6;

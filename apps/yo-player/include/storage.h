@@ -71,3 +71,8 @@ int  getLocalPlaylistVideos(const char *playlistId, SearchResults *out);
 int  createLocalPlaylist(const char *name, const SearchResult *firstVideo,
                          char *playlistIdOut, int playlistIdCapacity);
 int  addVideoToLocalPlaylist(const char *playlistId, const SearchResult *item);
+int  removeVideoFromLocalPlaylist(const char *playlistId, const char *videoId);
+int  deleteLocalPlaylist(const char *playlistId);
+int  renameLocalPlaylist(const char *playlistId, const char *name);
+int  removePlaylistFromWatchLater(const char *playlistId);
+int  createEmptyLocalPlaylist(const char *name, char *playlistIdOut, int playlistIdCapacity);

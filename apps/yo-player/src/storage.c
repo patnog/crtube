@@ -542,7 +542,7 @@ static int readLocalPlaylist(const char *id, SearchResult *items, int maxItems)
 
 static int writeLocalPlaylist(const char *id, const SearchResult *items, int count)
 {
-   if (!validLocalPlaylistId(id) || !items || count < 0 || count > LOCAL_PLAYLIST_VIDEO_CAP) return -1;
+   if (!validLocalPlaylistId(id) || (count > 0 && !items) || count < 0 || count > LOCAL_PLAYLIST_VIDEO_CAP) return -1;
    char path[160];
    localPlaylistPath(id, path, sizeof path);
    char *buffer = malloc(LOCAL_PLAYLIST_BUFFER_BYTES);
@@ -698,7 +698,7 @@ int addVideoToLocalPlaylist(const char *playlistId, const SearchResult *item)
 int createLocalPlaylist(const char *name, const SearchResult *firstVideo,
                         char *playlistIdOut, int playlistIdCapacity)
 {
-   if (!name || !name[0] || !firstVideo || !firstVideo->videoId[0] || firstVideo->isPlaylist) return -1;
+   if (!name || !name[0] || (firstVideo && (!firstVideo->videoId[0] || firstVideo->isPlaylist))) return -1;
    loadLocalPlaylistIndex();
    if (localPlaylistCount >= LOCAL_PLAYLIST_CAP) return -1;
    char cleanName[LOCAL_PLAYLIST_NAME_LEN];
@@ -709,16 +709,80 @@ int createLocalPlaylist(const char *name, const SearchResult *firstVideo,
       snprintf(id, sizeof id, "pl%04d", localPlaylistNextId++);
       localPlaylistPath(id, path, sizeof path);
    } while (fileExists(path));
-   if (writeLocalPlaylist(id, firstVideo, 1) != 0) return -1;
+   if (writeLocalPlaylist(id, firstVideo, firstVideo ? 1 : 0) != 0) return -1;
    strCopy(localPlaylists[localPlaylistCount].id, LOCAL_PLAYLIST_ID_LEN, id);
    strCopy(localPlaylists[localPlaylistCount].name, LOCAL_PLAYLIST_NAME_LEN, cleanName);
-   localPlaylists[localPlaylistCount].count = 1;
-   strCopy(localPlaylists[localPlaylistCount].newestVideoId, sizeof localPlaylists[localPlaylistCount].newestVideoId, firstVideo->videoId);
+   localPlaylists[localPlaylistCount].count = firstVideo ? 1 : 0;
+   if (firstVideo) strCopy(localPlaylists[localPlaylistCount].newestVideoId, sizeof localPlaylists[localPlaylistCount].newestVideoId, firstVideo->videoId);
    localPlaylistCount++;
    saveLocalPlaylistIndex();
    localPlaylistRevision++;
    if (playlistIdOut && playlistIdCapacity > 0) strCopy(playlistIdOut, (size_t)playlistIdCapacity, id);
    return 0;
+}
+
+int createEmptyLocalPlaylist(const char *name, char *playlistIdOut, int playlistIdCapacity)
+{
+   return createLocalPlaylist(name, NULL, playlistIdOut, playlistIdCapacity);
+}
+
+int removeVideoFromLocalPlaylist(const char *playlistId, const char *videoId)
+{
+   if (!validLocalPlaylistId(playlistId) || !videoId || !videoId[0]) return -1;
+   SearchResult *items = (SearchResult *)malloc(sizeof(SearchResult) * LOCAL_PLAYLIST_VIDEO_CAP);
+   if (!items) return -1;
+   int count = readLocalPlaylist(playlistId, items, LOCAL_PLAYLIST_VIDEO_CAP);
+   if (count < 0) { free(items); return -1; }
+   int found = -1;
+   for (int i = 0; i < count; i++) if (!strcmp(items[i].videoId, videoId)) { found = i; break; }
+   if (found < 0) { free(items); return 0; }
+   if (found + 1 < count) memmove(items + found, items + found + 1, (size_t)(count - found - 1) * sizeof items[0]);
+   count--;
+   char newestVideoId[16] = "";
+   if (count > 0) strCopy(newestVideoId, sizeof newestVideoId, items[0].videoId);
+   int rc = writeLocalPlaylist(playlistId, items, count);
+   free(items);
+   if (rc == 0) {
+      loadLocalPlaylistIndex();
+      for (int i = 0; i < localPlaylistCount; i++) if (!strcmp(localPlaylists[i].id, playlistId)) {
+         localPlaylists[i].count = count;
+         strCopy(localPlaylists[i].newestVideoId, sizeof localPlaylists[i].newestVideoId, newestVideoId);
+         break;
+      }
+      saveLocalPlaylistIndex(); localPlaylistRevision++;
+   }
+   return rc;
+}
+
+int deleteLocalPlaylist(const char *playlistId)
+{
+   if (!validLocalPlaylistId(playlistId)) return -1;
+   loadLocalPlaylistIndex();
+   int index = -1;
+   for (int i = 0; i < localPlaylistCount; i++) if (!strcmp(localPlaylists[i].id, playlistId)) { index = i; break; }
+   if (index < 0) return 0;
+   char path[160]; localPlaylistPath(playlistId, path, sizeof path); deleteFile(path);
+   if (index + 1 < localPlaylistCount) memmove(&localPlaylists[index], &localPlaylists[index + 1], (size_t)(localPlaylistCount - index - 1) * sizeof localPlaylists[0]);
+   localPlaylistCount--; saveLocalPlaylistIndex(); localPlaylistRevision++;
+   return 0;
+}
+
+int renameLocalPlaylist(const char *playlistId, const char *name)
+{
+   if (!validLocalPlaylistId(playlistId) || !name || !name[0]) return -1;
+   loadLocalPlaylistIndex();
+   char cleanName[LOCAL_PLAYLIST_NAME_LEN];
+   copyHistoryText(cleanName, sizeof cleanName, name);
+   if (!cleanName[0]) return -1;
+   for (int i = 0; i < localPlaylistCount; i++) {
+      if (!strcmp(localPlaylists[i].id, playlistId)) {
+         strCopy(localPlaylists[i].name, sizeof localPlaylists[i].name, cleanName);
+         saveLocalPlaylistIndex();
+         localPlaylistRevision++;
+         return 0;
+      }
+   }
+   return -1;
 }
 
 static void loadPlaylistWatchLater(void)
@@ -796,6 +860,17 @@ int addPlaylistToWatchLater(const SearchResult *playlist)
    playlistWatchLaterCount++;
    savePlaylistWatchLater();
    playlistWatchLaterRevision++;
+   return 0;
+}
+
+int removePlaylistFromWatchLater(const char *playlistId)
+{
+   if (!playlistId || !playlistId[0]) return -1;
+   loadPlaylistWatchLater();
+   for (int i = 0; i < playlistWatchLaterCount; i++) if (!strcmp(playlistWatchLater[i].playlistId, playlistId)) {
+      if (i + 1 < playlistWatchLaterCount) memmove(&playlistWatchLater[i], &playlistWatchLater[i + 1], (size_t)(playlistWatchLaterCount - i - 1) * sizeof playlistWatchLater[0]);
+      playlistWatchLaterCount--; savePlaylistWatchLater(); playlistWatchLaterRevision++; return 0;
+   }
    return 0;
 }
 

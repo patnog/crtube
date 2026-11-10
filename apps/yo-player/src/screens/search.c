@@ -125,6 +125,7 @@ static void updateSearchHints(void)
    if (search.landing) {
       if (squareHint >= 0) setButtonHintShown(&hints, squareHint, 0);
       if (triangleHint >= 0) setButtonHintShown(&hints, triangleHint, 0);
+      if (downloadHint >= 0) setButtonHintShown(&hints, downloadHint, 0);
    }
 }
 
@@ -530,7 +531,7 @@ static void updateSearch(void)
       if (downloadHint >= 0) setButtonHintShown(&hints, downloadHint, 0);
    } else {
       setButtonHintCaption(&hints, crossHint, "Play");
-      if (squareHint >= 0) { setButtonHintCaption(&hints, squareHint, "Watch Later (hold)"); setButtonHintShown(&hints, squareHint, 1); }
+      if (squareHint >= 0) { setButtonHintCaption(&hints, squareHint, "Watch Later / Playlist (hold)"); setButtonHintShown(&hints, squareHint, 1); }
       if (triangleHint >= 0) setButtonHintShown(&hints, triangleHint, 1);
       if (downloadHint >= 0) setButtonHintShown(&hints, downloadHint, 1);
    }
@@ -639,13 +640,13 @@ static void drawSearchBar(void)
       drawLabel(&queryPromptPrefix);
       int crossH = (int)(PROMPT_TEXT_SIZE * search.uiScale * 0.92f + 0.5f);
       int crossW = searchCrossGlyph.h > 0 ? searchCrossGlyph.w * crossH / searchCrossGlyph.h : crossH;
-      int crossX = promptX + queryPromptPrefix.tt.tex.w + (int)(5 * search.uiScale + 0.5f);
+      int crossX = promptX + queryPromptPrefix.tt.tex.w + (int)(10 * search.uiScale + 0.5f);
       int crossY = fieldY + (fieldH - crossH) / 2;
       if (searchCrossGlyph.offset)
          drawGfxTextureFixedPosition(crossX, crossY, crossW, crossH, searchCrossGlyph,
                                      0.0f, 0.0f, 1.0f, 1.0f,
                                      activeTheme->textSecondary, GFX_FILTER_LINEAR);
-      int suffixX = crossX + crossW + (int)(5 * search.uiScale + 0.5f);
+      int suffixX = crossX + crossW + (int)(10 * search.uiScale + 0.5f);
       moveLabel(&queryPromptSuffix, suffixX, promptY);
       drawLabel(&queryPromptSuffix);
    }

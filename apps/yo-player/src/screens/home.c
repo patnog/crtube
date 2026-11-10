@@ -43,6 +43,8 @@
 #define SD_HINT_ROW_GAP   8
 #define GRID_BOTTOM_GAP  24
 #define SD_GRID_BOTTOM_GAP 20
+#define MAX_HINT_ROWS 3
+#define HINT_ROW_GAP 8
 #define SD_MAX_SCALE    1.5f
 #define SD_HEADER_Y      54
 #define SD_GRID_TOP     132
@@ -114,6 +116,14 @@ static struct {
    int       settingsSelected;
    int       exitConfirmOpen;
    int       exitConfirmSelected; // 0 = Yes, 1 = No (safe default)
+   int       playlistDeleteConfirmOpen;
+   int       playlistDeleteConfirmSelected;
+   int       playlistDeleteFromWatchLater;
+   char      playlistDeleteId[64]; // YouTube playlist IDs are longer than local playlist IDs.
+   int       createPlaylistOskDone;
+   int       playlistNameAction; // 1 = create, 2 = rename
+   char      playlistNameTargetId[LOCAL_PLAYLIST_ID_LEN];
+   char      createPlaylistName[LOCAL_PLAYLIST_NAME_LEN];
    int       regionOpen;
    int       regionSelected;
    int       sponsorblockOpen;
@@ -143,9 +153,13 @@ static struct {
 } home;
 
 static Font        uiFont;
-static Label       titleLabel, statusLabel, playlistErrorLabel;
-static ButtonHints hints, hintsSecondRow;
+static Label       titleLabel, statusLabel, playlistErrorLabel, playlistToastLabel;
+static uint64_t    playlistToastShownAt;
+static ButtonHints hints;
 static int         sdHintsTwoRows;
+static int         homeFooterBottomY;
+static int         homeFooterRows;
+static int         homeFooterTopY;
 
 // UI Scaling is available at every output resolution. Keep the legacy SD names
 // and preference path so existing installations retain their saved selection.
@@ -238,15 +252,15 @@ static unsigned regionRevisionSeen;
 // Trending's feeds remain separate pages, presented as one page with three
 // persistent category chips in the header (matching TEE Vanced's layout).
 #define TREND_CHIP_ICON_SIZE 18
-#define TREND_CHIP_FONT_SIZE 14
-#define TREND_CHIP_HEIGHT 40
+#define TREND_CHIP_FONT_SIZE 20
+#define TREND_CHIP_HEIGHT 48
 #define TREND_CHIP_PAD_X 8
 #define TREND_CHIP_ICON_GAP 6
 #define TREND_CHIP_GAP 6
 #define HOME_SORT_TEXT_SIZE 20
 #define HOME_SORT_PAD_X 7
 #define HOME_SORT_GAP 4
-#define HOME_SORT_HEIGHT 40
+#define HOME_SORT_HEIGHT 48
 static Label trendingChipLabels[TREND_COUNT];
 static Icon trendingChipIcons[TREND_COUNT];
 static Label liveChipLabels[LIVE_COUNT];
@@ -255,6 +269,8 @@ static Label playlistSortLabels[PLAYLIST_SORT_COUNT];
 static Label localPlaylistTabLabels[2];
 static int homeSortHint = -1;
 static int homeSquareHint = -1;
+static int homeDownloadHint = -1;
+static int homeNewPlaylistHint = -1;
 static SearchResult squarePendingItem;
 static uint64_t squarePressedAt;
 #define SQUARE_HOLD_US 550000ULL
@@ -430,8 +446,7 @@ static SortPreference currentPlaylistSortPreference(void)
 static void updateHomeSortHint(void)
 {
    if (homeSortHint < 0) return;
-   setButtonHintShown(sdHintsTwoRows ? &hintsSecondRow : &hints,
-                      homeSortHint, homeSupportsSort() || homeSupportsPlaylistSort());
+   setButtonHintShown(&hints, homeSortHint, homeSupportsSort() || homeSupportsPlaylistSort());
 }
 
 static int homeSortGroupLeft(void)
@@ -463,6 +478,8 @@ static void refreshCurrentCategory(void)
 
 static void loadCategory(void)
 {
+   home.grid.suppressWatchLaterBadge = (home.category == HOME_WATCHLATER ||
+      home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER);
    if (homeSupportsSort()) home.sort = (SortOrder)getSortPreference(currentFeedSortPreference());
    if (homeSupportsPlaylistSort()) home.playlistSort = (PlaylistSortOrder)getSortPreference(currentPlaylistSortPreference());
    setGridSortMode(&home.grid, homeSupportsSort() ? home.sort : SORT_RELEVANCE);
@@ -1083,6 +1100,13 @@ static void drawExitConfirmation(void)
    drawButtonHints(&exitConfirmHints, home.screenW);
 }
 
+static void onHomePlaylistNameEntered(const char *name)
+{
+   home.createPlaylistName[0] = 0;
+   if (name && name[0]) strCopy(home.createPlaylistName, sizeof home.createPlaylistName, name);
+   home.createPlaylistOskDone = 1;
+}
+
 void openHomeSettingsPanel(void)
 {
    home.settingsOpen = 1;
@@ -1222,10 +1246,14 @@ static void drawHomeSortPills(void)
       fillGfxRoundedRectangleFixed(x, y, width, HOME_SORT_HEIGHT, HOME_SORT_HEIGHT / 2, edge);
       fillGfxRoundedRectangleFixed(x + 1, y + 1, width - 2, HOME_SORT_HEIGHT - 2,
                                    HOME_SORT_HEIGHT / 2 - 1, fill);
+      setLabelColor(label, 0xFF202020);
+      int textX = x + (width - label->tt.tex.w) / 2;
+      int textY = y + (HOME_SORT_HEIGHT - label->tt.tex.h) / 2;
+      drawLabelAt(label, textX - 2, textY); drawLabelAt(label, textX + 2, textY);
+      drawLabelAt(label, textX - 1, textY - 1); drawLabelAt(label, textX + 1, textY - 1);
+      drawLabelAt(label, textX - 1, textY + 1); drawLabelAt(label, textX + 1, textY + 1);
       setLabelColor(label, selected ? activeTheme->textPrimary : activeTheme->textSecondary);
-      moveLabel(label, x + (width - label->tt.tex.w) / 2,
-                y + (HOME_SORT_HEIGHT - label->tt.tex.h) / 2);
-      drawLabel(label);
+      drawLabelAt(label, textX, textY);
       x += width + HOME_SORT_GAP;
    }
 }
@@ -1244,9 +1272,11 @@ static void drawLocalPlaylistTabs(void)
       Label *label = &localPlaylistTabLabels[i];
       int width = label->tt.tex.w + 2 * pad;
       int active = i == home.localPlaylistTab;
-      fillGfxRoundedRectangleFixed(x, y, width, TREND_CHIP_HEIGHT, TREND_CHIP_HEIGHT / 2,
-                                   active ? activeTheme->rowHighlight : activeTheme->surface);
-      setLabelColor(label, active ? activeTheme->accent : activeTheme->textPrimary);
+      uint32_t edge = active ? activeTheme->accent : activeTheme->rowHighlight;
+      uint32_t fill = active ? activeTheme->rowHighlight : activeTheme->surface;
+      fillGfxRoundedRectangleFixed(x, y, width, TREND_CHIP_HEIGHT, TREND_CHIP_HEIGHT / 2, edge);
+      fillGfxRoundedRectangleFixed(x + 1, y + 1, width - 2, TREND_CHIP_HEIGHT - 2, TREND_CHIP_HEIGHT / 2 - 1, fill);
+      setLabelColor(label, active ? activeTheme->textPrimary : activeTheme->textSecondary);
       moveLabel(label, x + pad, getCenteredLabelY(label, y, TREND_CHIP_HEIGHT));
       drawLabel(label);
       x += width + gap;
@@ -1432,6 +1462,12 @@ static void initHome(void)
    home.pendingAccountCategory = -1;
    home.pendingPlaylistOpen = 0;
    home.playlistError = 0;
+   home.createPlaylistOskDone = 0;
+   home.playlistNameAction = 0;
+   home.playlistNameTargetId[0] = 0;
+   home.playlistDeleteConfirmOpen = 0;
+   home.playlistDeleteFromWatchLater = 0;
+   home.playlistDeleteId[0] = 0;
    home.playlistReturnToSearch = 0;
    home.playlistReturnLocal = 0;
    home.playlistReturnCategory = -1;
@@ -1466,49 +1502,36 @@ static void initHome(void)
    initLabel(&statusLabel, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, AUTO, 21, activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
    initLabel(&playlistErrorLabel, &uiFont, MARGIN_X, 0, home.screenW - 2 * MARGIN_X, AUTO, 18,
              activeTheme->textPrimary, TEXT_WRAP, "This playlist is private, restricted or unavailable.");
+   initLabel(&playlistToastLabel, &uiFont, 0, 0, home.screenW - 80, AUTO, 23,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Playlist added to Watch Later");
    setLabelScaleWithUi(&playlistErrorLabel, 1);
+   setLabelScaleWithUi(&playlistToastLabel, 1);
+   playlistToastShownAt = 0;
    // Home heading/status grow by rerasterising their font, while retaining their
    // original anchors instead of being pushed off the 4:3 safe area.
    setLabelScaleWithUi(&titleLabel, 1);
    setLabelScaleWithUi(&statusLabel, 1);
 
-   if (sdHintsTwoRows) {
-      // Reserve the maximum row height for both UI scaling choices so the
-      // footer and grid keep fixed positions when the setting changes.
-      int maxGlyphHeight = (int)(HINT_GLYPH_H * SD_MAX_SCALE + 0.5f);
-      initButtonHints(&hints, &uiFont,
-                      home.screenH - SD_HINTS_BOTTOM - maxGlyphHeight - SD_HINT_ROW_GAP,
-                      HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_CROSS),    "Play");
-      homeSquareHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE),   "Watch Later");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_TRIANGLE), "Channel");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_R3),       "Download");
-      setButtonHintsStableLayout(&hints, 1);
-
-      initButtonHints(&hintsSecondRow, &uiFont, home.screenH - SD_HINTS_BOTTOM,
-                      HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
-      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_SELECT), "Search");
-      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_START), "Settings");
-      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_L1), "");
-      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R1), "Category");
-      addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_R2), "Refresh");
-      homeSortHint = addButtonHint(&hintsSecondRow, getConsoleGlyph(GLYPH_L2), "Sort");
-      setButtonHintsStableLayout(&hintsSecondRow, 1);
-      setButtonHintGap(&hintsSecondRow, 8);
-   } else {
-      initButtonHints(&hints, &uiFont, home.screenH - HINTS_BOTTOM, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_CROSS),    "Play");
-      homeSquareHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE),   "Watch Later");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_TRIANGLE), "Channel");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_R3),       "Download");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT),  "Search");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_START),   "Settings");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_L1),       "");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_R1),       "Category");
-      addButtonHint(&hints, getConsoleGlyph(GLYPH_R2),       "Refresh");
-      homeSortHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L2), "Sort");
-      setButtonHintGap(&hints, 14);
-   }
+   initButtonHints(&hints, &uiFont, 0, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_CROSS), "Play");
+   homeSquareHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE), "Watch Later / Playlist (hold)");
+   homeDownloadHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R3), "Download");
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_TRIANGLE), "Channel");
+   homeNewPlaylistHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L3), "New playlist");
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT), "Search");
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_START), "Settings");
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_L1), "");
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_R1), "Category");
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_R2), "Refresh");
+   homeSortHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L2), "Sort");
+   setButtonHintsStableLayout(&hints, 1);
+   setButtonHintGap(&hints, 14);
+   homeFooterBottomY = home.screenH - (sdHintsTwoRows ? SD_HINTS_BOTTOM : HINTS_BOTTOM);
+   homeFooterRows = getButtonHintsFitRows(&hints, home.screenW, MAX_HINT_ROWS);
+   if (homeFooterRows < 1) homeFooterRows = 1;
+   float hintGlyphFinal = HINT_GLYPH_H * (sdHintsTwoRows ? SD_MAX_SCALE : 1.0f);
+   int footerRowStep = (int)(hintGlyphFinal + HINT_ROW_GAP + 0.5f);
+   homeFooterTopY = homeFooterBottomY - (homeFooterRows - 1) * footerRowStep;
 
    int panelY = (home.screenH - getAccountPanelHeight()) / 2;
    int accountTextW = getAccountPanelWidth() - 40;
@@ -1637,17 +1660,14 @@ static void initHome(void)
    panelConfirmHint = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CROSS),  "Try again");
    panelBackHint    = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CIRCLE), "Close");
 
-   int gridHeight;
-   if (sdHintsTwoRows) {
-      int maxGlyphHeight = (int)(HINT_GLYPH_H * SD_MAX_SCALE + 0.5f);
-      gridHeight = home.screenH - gridTop - SD_HINTS_BOTTOM - maxGlyphHeight - SD_HINT_ROW_GAP - SD_GRID_BOTTOM_GAP;
-   } else {
-      gridHeight = home.screenH - gridTop - HINTS_BOTTOM - HINT_GLYPH_H - GRID_BOTTOM_GAP;
-   }
+   int gridHeight = homeFooterTopY - gridTop - (sdHintsTwoRows ? SD_GRID_BOTTOM_GAP : GRID_BOTTOM_GAP);
+   if (gridHeight < 120) gridHeight = 120;
    initVideoGrid(&home.grid, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, gridHeight);
    setGridWatchedPredicate(&home.grid, isWatched);
    setGridWatchedPosition(&home.grid, getWatchedPosition);
    setGridWatchLaterPredicate(&home.grid, isWatchLater);
+   home.grid.suppressWatchLaterBadge = (home.category == HOME_WATCHLATER ||
+      home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER);
 
    subsRevisionSeen = getSubscriptionsRevision();
    watchLaterRevisionSeen = getWatchLaterRevision();
@@ -1684,6 +1704,8 @@ static int handleHomeSquareAction(const SearchResult *selected)
    if (selected->isPlaylist) {
       if (!selected->isLocalPlaylist && addPlaylistToWatchLater(selected) == 0) {
          playlistWatchLaterRevisionSeen = getPlaylistWatchLaterRevision();
+         playlistToastShownAt = getTimeUs();
+         setLabelText(&playlistToastLabel, "Playlist added to Watch Later");
          if (home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 0) loadCategory();
       }
       return 1;
@@ -1742,6 +1764,47 @@ static void updateHome(void)
    if (home.accountOpen) { updateAccountPanel(); return; }
    if (home.settingsOpen) { updateSettingsPanel(); return; }
    if (home.exitConfirmOpen) { updateExitConfirmation(); return; }
+   if (home.playlistDeleteConfirmOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.playlistDeleteConfirmOpen = 0; return; }
+      if (isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_LEFT)) || isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_RIGHT)) ||
+          isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_UP)) || isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
+         home.playlistDeleteConfirmSelected = 1 - home.playlistDeleteConfirmSelected;
+      if (isPadButtonPressed(PAD_BTN_CROSS)) {
+         if (home.playlistDeleteConfirmSelected == 0) {
+            if (home.playlistDeleteFromWatchLater) {
+               removePlaylistFromWatchLater(home.playlistDeleteId);
+               playlistWatchLaterRevisionSeen = getPlaylistWatchLaterRevision();
+            } else {
+               deleteLocalPlaylist(home.playlistDeleteId);
+               localPlaylistRevisionSeen = getLocalPlaylistRevision();
+            }
+            categoryCached[HOME_LOCAL_PLAYLISTS] = 0;
+            loadCategory();
+         }
+         home.playlistDeleteConfirmOpen = 0;
+      }
+      return;
+   }
+   if (home.createPlaylistOskDone) {
+      home.createPlaylistOskDone = 0;
+      if (home.createPlaylistName[0]) {
+         int result = -1;
+         if (home.playlistNameAction == 2) {
+            result = renameLocalPlaylist(home.playlistNameTargetId, home.createPlaylistName);
+         } else if (home.playlistNameAction == 1) {
+            char id[LOCAL_PLAYLIST_ID_LEN];
+            result = createEmptyLocalPlaylist(home.createPlaylistName, id, sizeof id);
+         }
+         if (result == 0) {
+            localPlaylistRevisionSeen = getLocalPlaylistRevision();
+            categoryCached[HOME_LOCAL_PLAYLISTS] = 0;
+            loadCategory();
+         }
+      }
+      home.playlistNameAction = 0;
+      home.playlistNameTargetId[0] = 0;
+      return;
+   }
    if (oskInputActive()) return;
 
    // Circle remains a global shortcut for the menu. LEFT only opens it when
@@ -1811,6 +1874,25 @@ static void updateHome(void)
    else if (isPadButtonPressed(PAD_BTN_L1)) { switchCategory(-1); return; }
 
    updateVideoGrid(&home.grid);
+   int playlistPage = home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS ||
+                      home.category == HOME_LOCAL_PLAYLISTS || home.category == HOME_LOCAL_PLAYLIST_CONTENTS;
+   if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, !playlistPage);
+   if (homeSquareHint >= 0) {
+      if (home.category == HOME_WATCHLATER)
+         setButtonHintCaption(&hints, homeSquareHint, "Remove / Playlist (hold)");
+      else if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS)
+         setButtonHintCaption(&hints, homeSquareHint, "Remove");
+      else if (home.category == HOME_LOCAL_PLAYLISTS)
+         setButtonHintCaption(&hints, homeSquareHint,
+                              home.localPlaylistTab == 0 ? "Remove (hold)" : "Rename / Delete (hold)");
+      else if (home.category == HOME_PLAYLISTS)
+         setButtonHintCaption(&hints, homeSquareHint, "Save playlist");
+      else
+         setButtonHintCaption(&hints, homeSquareHint, "Watch Later / Playlist (hold)");
+   }
+   if (homeNewPlaylistHint >= 0)
+      setButtonHintShown(&hints, homeNewPlaylistHint,
+                         home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 1);
    if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY &&
        gridStage(&home.grid) == GRID_READY && !home.grid.threadActive) {
       int feed = home.category - HOME_ACCOUNT;
@@ -1822,12 +1904,21 @@ static void updateHome(void)
       }
    }
    if (gridStage(&home.grid) != GRID_READY) return;
-
+   if (homeNewPlaylistHint >= 0) setButtonHintShown(&hints, homeNewPlaylistHint, home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 1);
+   if (home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 1 && isPadButtonPressed(PAD_BTN_L3)) {
+      char defaultName[LOCAL_PLAYLIST_NAME_LEN]; snprintf(defaultName, sizeof defaultName, "Playlist %d", getLocalPlaylistCount() + 1);
+      home.playlistNameAction = 1;
+      home.playlistNameTargetId[0] = 0;
+      oskInputBegin("New playlist", defaultName, onHomePlaylistNameEntered); return;
+   }
    const SearchResult *selected = gridSelected(&home.grid);
    if (!selected) return;
-   if (squarePressedAt && handleHomeSquareAction(selected)) return;
-
+   if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS && isPadButtonPressed(PAD_BTN_SQUARE) && selected->videoId[0]) {
+      removeVideoFromLocalPlaylist(home.localPlaylistId, selected->videoId);
+      localPlaylistRevisionSeen = getLocalPlaylistRevision(); categoryCached[HOME_LOCAL_PLAYLISTS] = 0; loadCategory(); return;
+   }
    if (home.category == HOME_PLAYLISTS) {
+      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 0);
       if (homeSquareHint >= 0) {
          setButtonHintCaption(&hints, homeSquareHint, "Save playlist");
          setButtonHintShown(&hints, homeSquareHint, 1);
@@ -1841,7 +1932,38 @@ static void updateHome(void)
       return;
    }
    if (home.category == HOME_LOCAL_PLAYLISTS) {
-      if (homeSquareHint >= 0) setButtonHintShown(&hints, homeSquareHint, 0);
+      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 0);
+      if (homeSquareHint >= 0) {
+         setButtonHintCaption(&hints, homeSquareHint,
+                              home.localPlaylistTab == 0 ? "Remove (hold)" : "Rename / Delete (hold)");
+         setButtonHintShown(&hints, homeSquareHint, 1);
+      }
+      if ((home.localPlaylistTab == 0 && selected->isPlaylist && selected->playlistId[0]) ||
+          (home.localPlaylistTab == 1 && selected->isLocalPlaylist && selected->localPlaylistId[0])) {
+         if (squarePressedAt) {
+            if (isPadButtonDown(PAD_BTN_SQUARE) && getTimeUs() - squarePressedAt >= SQUARE_HOLD_US) {
+               squarePressedAt = 0;
+               home.playlistDeleteFromWatchLater = (home.localPlaylistTab == 0);
+               if (home.playlistDeleteFromWatchLater)
+                  strCopy(home.playlistDeleteId, sizeof home.playlistDeleteId, selected->playlistId);
+               else
+                  strCopy(home.playlistDeleteId, sizeof home.playlistDeleteId, selected->localPlaylistId);
+               home.playlistDeleteConfirmOpen = 1; home.playlistDeleteConfirmSelected = 1;
+               exitConfirmNavigateRepeat.timer = exitConfirmNavigateRepeat.repeats = 0; return;
+            }
+            if (isPadButtonReleased(PAD_BTN_SQUARE)) {
+               squarePressedAt = 0;
+               if (home.localPlaylistTab == 1 && selected->isLocalPlaylist && selected->localPlaylistId[0]) {
+                  home.playlistNameAction = 2;
+                  strCopy(home.playlistNameTargetId, sizeof home.playlistNameTargetId, selected->localPlaylistId);
+                  oskInputBegin("Rename playlist", selected->title, onHomePlaylistNameEntered);
+               }
+               return;
+            }
+            return;
+         }
+         if (isPadButtonPressed(PAD_BTN_SQUARE)) { squarePressedAt = getTimeUs(); return; }
+      }
       if (isPadButtonPressed(PAD_BTN_CROSS) && selected->isPlaylist) {
          if (home.localPlaylistTab == 0 && selected->playlistId[0]) {
             home.playlistReturnToSearch = 0;
@@ -1862,12 +1984,24 @@ static void updateHome(void)
       }
       return;
    }
-   if (homeSquareHint >= 0) {
-      setButtonHintCaption(&hints, homeSquareHint, "Watch Later (hold)");
+   if (home.category == HOME_WATCHLATER || home.category == HOME_LOCAL_PLAYLIST_CONTENTS) {
+      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 0);
+      if (homeSquareHint >= 0) {
+         setButtonHintCaption(&hints, homeSquareHint,
+                              home.category == HOME_WATCHLATER ? "Remove / Playlist (hold)" : "Remove");
+         setButtonHintShown(&hints, homeSquareHint, 1);
+      }
+   } else if (home.category == HOME_PLAYLIST_CONTENTS) {
+      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 0);
+      if (homeSquareHint >= 0) setButtonHintShown(&hints, homeSquareHint, 0);
+   } else if (homeSquareHint >= 0) {
+      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 1);
+      setButtonHintCaption(&hints, homeSquareHint, "Watch Later / Playlist (hold)");
       setButtonHintShown(&hints, homeSquareHint, 1);
    }
    if (handleHomeSquareAction(selected)) return;
-   if (isPadButtonPressed(PAD_BTN_R3)) { if (!selected->isLive) enqueueDownload(selected); return; }   // live can't be downloaded
+   if (home.category != HOME_PLAYLIST_CONTENTS && home.category != HOME_LOCAL_PLAYLIST_CONTENTS &&
+       isPadButtonPressed(PAD_BTN_R3)) { if (!selected->isLive) enqueueDownload(selected); return; }
    // Recommended tiles don't say which channel they are from
    if (isPadButtonPressed(PAD_BTN_TRIANGLE)) {
       logInfo("[diag-triangle] home page=%d selected=%d videoId=%s channelIdLen=%d authorLen=%d\n",
@@ -1927,8 +2061,7 @@ static void drawHome(void)
    else if (home.category == HOME_LIVE) drawLiveTabs();
    else if (home.category == HOME_LOCAL_PLAYLISTS) drawLocalPlaylistTabs();
    if (homeSupportsSort() || homeSupportsPlaylistSort()) drawHomeSortPills();
-   drawButtonHints(&hints, home.screenW);
-   if (sdHintsTwoRows) drawButtonHints(&hintsSecondRow, home.screenW);
+   drawButtonHintsFitted(&hints, home.screenW, homeFooterBottomY, HINT_ROW_GAP, MAX_HINT_ROWS);
    drawDownloadOverlay(home.screenW);
    if (!home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen) drawSidebar();
    if (home.accountOpen) drawAccountPanel();
@@ -1938,6 +2071,25 @@ static void drawHome(void)
       else if (home.sponsorblockOpen) drawSponsorBlockPanel();
    }
    if (home.exitConfirmOpen) drawExitConfirmation();
+   if (playlistToastShownAt && getTimeUs() - playlistToastShownAt < 1000000ULL &&
+       !home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen && !home.playlistDeleteConfirmOpen) {
+      refreshLabelScale(&playlistToastLabel);
+      int toastX = (home.screenW - playlistToastLabel.tt.tex.w) / 2;
+      int toastY = (home.screenH - playlistToastLabel.tt.tex.h) / 2;
+      fillGfxRoundedRectangleFixed(toastX - 20, toastY - 12,
+                                   playlistToastLabel.tt.tex.w + 40, playlistToastLabel.tt.tex.h + 24,
+                                   10, activeTheme->badgeFill);
+      drawLabelAt(&playlistToastLabel, toastX, toastY);
+   }
+   if (home.playlistDeleteConfirmOpen) {
+      setLabelText(&exitConfirmTitle, home.playlistDeleteFromWatchLater ? "Remove playlist" : "Delete playlist");
+      setLabelText(&exitConfirmMessage, home.playlistDeleteFromWatchLater ? "Remove this playlist from Watch Later?" : "Delete this playlist and its videos?");
+      setLabelText(&exitConfirmChoices[0], "Yes"); setLabelText(&exitConfirmChoices[1], "No");
+      int saved = home.exitConfirmSelected; home.exitConfirmSelected = home.playlistDeleteConfirmSelected;
+      drawExitConfirmation(); home.playlistDeleteConfirmSelected = home.exitConfirmSelected; home.exitConfirmSelected = saved;
+      setLabelText(&exitConfirmTitle, "Exit CRTube");
+      setLabelText(&exitConfirmMessage, "Are you sure you want to close the app?");
+   }
 }
 
 static void suspendHome(void)
@@ -1992,11 +2144,11 @@ static void termHome(void)
    termVideoGrid(&home.grid);
    termSidebar();
    termButtonHints(&hints);
-   termButtonHints(&hintsSecondRow);
    termButtonHints(&panelHints);
    freeLabel(&titleLabel);
    freeLabel(&statusLabel);
    freeLabel(&playlistErrorLabel);
+   freeLabel(&playlistToastLabel);
    freeLabel(&panelTitle);
    freeLabel(&panelLine1);
    freeLabel(&panelLine2);

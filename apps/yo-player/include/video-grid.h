@@ -63,6 +63,7 @@ typedef struct {
    int              memberCheckIndex;
    int              memberCheckAccountRevision;
    int              memberIdleFrames;
+   int              suppressWatchLaterBadge;
    int              sortMode;                           // local result ordering: relevance, views, or newest
    int              playlistSortMode;                   // playlist ordering: newest or A-Z
    int              sortPendingFrom;                      // first item from a page awaiting UI-thread merge
