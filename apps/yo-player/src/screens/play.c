@@ -3181,7 +3181,7 @@ static void drawPlaybackOptions(void)
    }
 
    // Slightly stronger panel fill: less of the video shows through the Options window.
-   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 14, 0xC0101724);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 14, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
 
    for (int i = 0; i < OPTIONS_COUNT; i++) {
@@ -3191,7 +3191,7 @@ static void drawPlaybackOptions(void)
 
       if (i == optionsSelected)
          fillGfxRoundedRectangleFixed(x + 18, nameY - 7, panelW - 36,
-                                      name->tt.tex.h + 14, 7, 0x805A7898);
+                                      name->tt.tex.h + 14, 7, activeTheme->rowHighlight);
       drawLabelAt(name, x + 38, nameY);
 
       if (i == 0 || i == 1 || i == 3) {
@@ -3789,13 +3789,14 @@ static void drawSponsorSegments(int barLeft, int span, int barTopY, int barH, fl
    }
 }
 
-// Match the LIVE duration badge used on thumbnails: accent fill, compact 6x4 padding.
+// Keep the LIVE badge brand-red in every theme, with compact 6x4 padding.
 static void drawLiveBadgeAt(int x, int y)
 {
    const int padX = 6, padY = 4;
    int width = liveBadgeLabel.tt.tex.w + 2 * padX;
    int height = liveBadgeLabel.tt.tex.h + 2 * padY;
-   fillGfxRectangle(x, y, width, height, activeTheme->accent);
+   fillGfxRectangle(x, y, width, height, 0xFFFF0000);
+   setLabelColor(&liveBadgeLabel, 0xFFFFFFFF);
    drawLabelAt(&liveBadgeLabel, x + padX, y + padY);
 }
 

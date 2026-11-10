@@ -96,6 +96,7 @@ typedef struct {
 
 void initVideoGrid(VideoGrid *grid, Font *font, int x, int y, int width, int height);
 void termVideoGrid(VideoGrid *grid);
+void refreshVideoGridThemeColors(VideoGrid *grid);
 
 void setGridWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *videoId));
 void setGridWatchedPosition(VideoGrid *grid, int (*watchedPosition)(const char *videoId));

@@ -195,6 +195,12 @@ void initSidebar(Font *font, int screenW, int screenH)
    updateSelectedColors();
 }
 
+void refreshSidebarThemeColors(void)
+{
+   setLabelColor(&side.title, activeTheme->textPrimary);
+   updateSelectedColors();
+}
+
 void termSidebar(void)
 {
    freeLabel(&side.title);

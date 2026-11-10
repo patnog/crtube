@@ -1503,6 +1503,17 @@ void initVideoGrid(VideoGrid *grid, Font *font, int x, int y, int width, int hei
    grid->labelScale = getGfxUiScaleFactor();
 }
 
+void refreshVideoGridThemeColors(VideoGrid *grid)
+{
+   if (!grid) return;
+   for (int i = 0; i < MAX_SEARCH_RESULTS; i++) {
+      setLabelColor(&grid->rows[i], activeTheme->textPrimary);
+      setLabelColor(&grid->metas[i], activeTheme->textSecondary);
+      setLabelColor(&grid->durations[i], activeTheme->textPrimary);
+   }
+   setLabelColor(&grid->watchLaterBadge, activeTheme->textPrimary);
+}
+
 void termVideoGrid(VideoGrid *grid)
 {
    stopVideoGrid(grid);
@@ -1734,7 +1745,8 @@ static void drawTile(VideoGrid *grid, int i)
       int badgeW = grid->durations[i].tt.tex.w + 2 * padX;
       int badgeH = grid->durations[i].tt.tex.h + 2 * padY;
       int badgeX = tx + grid->tileW - badgeW - edgeGap, badgeY = ty + grid->thumbH - badgeH - edgeGap;
-      fillGfxRectangleFixed(badgeX, badgeY, badgeW, badgeH, item->isLive ? activeTheme->accent : activeTheme->badgeFill);
+      fillGfxRectangleFixed(badgeX, badgeY, badgeW, badgeH, item->isLive ? 0xFFFF0000 : activeTheme->badgeFill);
+      setLabelColor(&grid->durations[i], item->isLive ? 0xFFFFFFFF : activeTheme->textPrimary);
       drawLabelAt(&grid->durations[i], badgeX + padX, badgeY + padY);
    }
 

@@ -117,6 +117,17 @@ static struct {
    int       accountOpen;   // the sign-in / account panel is showing
    int       settingsOpen;  // the settings window is showing
    int       settingsSelected;
+   int       themeOpen;
+   int       themeSelected;
+   int       themeCustomOpen;
+   int       themeCustomSelected;
+   int       themeCustomDark;
+   int       themeCustomDarkCursor;
+   int       themeCustomAccentIndex;
+   int       themeCustomAccentCursor;
+   int       themeConfirmOpen;
+   int       themeConfirmSelected;
+   int       themePendingPreset;
    int       downloadSettingsOpen;
    int       downloadSettingsSelected;
    int       exitConfirmOpen;
@@ -233,9 +244,20 @@ static int         panelConfirmHint, panelBackHint;
 #define SETTINGS_ROW_HEIGHT 38
 #define SETTINGS_ROW_TOP 56
 #define SETTINGS_ROW_STEP 43
-#define SETTINGS_ROW_COUNT 7
+#define SETTINGS_ROW_COUNT 8
 static Label settingsTitle, settingsLabels[SETTINGS_ROW_COUNT], settingsValues[SETTINGS_ROW_COUNT];
 static ButtonHints settingsHints;
+#define THEME_PANEL_W 860
+#define THEME_PANEL_H 620
+#define THEME_EDIT_CUSTOM_ROW THEME_PRESET_COUNT
+#define THEME_ROW_COUNT (THEME_PRESET_COUNT + 1)
+#define THEME_ROW_TOP 126
+#define THEME_ROW_STEP 56
+static Label themeTitle, themeRowLabels[THEME_ROW_COUNT], themeLegendLabels[2];
+static Label themeSelectionLeft, themeSelectionRight;
+static Label themeCustomTitle, themeCustomLabels[3], themeCustomOptions[2];
+static Label themeConfirmTitle, themeConfirmMessage, themeConfirmChoices[2];
+static ButtonHints themeHints;
 static Label settingsAutoplayOptions[2];
 #define DOWNLOAD_SETTINGS_PANEL_W 720
 #define DOWNLOAD_SETTINGS_PANEL_H 500
@@ -312,6 +334,91 @@ static int getSettingsPanelHeight(void)
    int height = home.screenH - 48;
    return height < SETTINGS_PANEL_H ? height : SETTINGS_PANEL_H;
 }
+
+static void setHintsThemeColor(ButtonHints *bar, uint32_t color)
+{
+   if (!bar) return;
+   bar->captionColor = color;
+   for (int i = 0; i < bar->count; i++)
+      setLabelColor(&bar->hints[i].caption, color);
+}
+
+static void refreshHomeThemeColors(void)
+{
+   setLabelColor(&titleLabel, activeTheme->textPrimary);
+   setLabelColor(&statusLabel, activeTheme->textSecondary);
+   setLabelColor(&playlistErrorLabel, activeTheme->textPrimary);
+   setLabelColor(&playlistToastLabel, activeTheme->textPrimary);
+   setLabelColor(&downloadSpacePrefixLabel, activeTheme->textSecondary);
+   setLabelColor(&downloadSpaceAvailableLabel,
+                 downloadSpaceAvailableLow ? 0xFFFF4444 : activeTheme->textSecondary);
+   setLabelColor(&downloadManagerTitle, activeTheme->textPrimary);
+   for (int i = 0; i < 7; i++) {
+      setLabelColor(&downloadManagerRows[i], activeTheme->textPrimary);
+      setLabelColor(&downloadManagerStatuses[i], activeTheme->textSecondary);
+   }
+   setLabelColor(&downloadManagerFooter, activeTheme->textSecondary);
+   setLabelColor(&panelTitle, activeTheme->textPrimary);
+   setLabelColor(&panelLine1, activeTheme->textSecondary);
+   setLabelColor(&panelLine2, activeTheme->textPrimary);
+   setLabelColor(&panelCode, activeTheme->textPrimary);
+   setLabelColor(&panelFooter, activeTheme->textSecondary);
+   setLabelColor(&settingsTitle, activeTheme->textPrimary);
+   for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
+      setLabelColor(&settingsLabels[i], activeTheme->textPrimary);
+      setLabelColor(&settingsValues[i], activeTheme->textPrimary);
+   }
+   for (int i = 0; i < 2; i++) setLabelColor(&settingsAutoplayOptions[i], activeTheme->textPrimary);
+   setLabelColor(&downloadSettingsTitle, activeTheme->textPrimary);
+   for (int i = 0; i < DOWNLOAD_SETTINGS_ROW_COUNT; i++) {
+      setLabelColor(&downloadSettingsLabels[i], activeTheme->textPrimary);
+      setLabelColor(&downloadSettingsValues[i], activeTheme->textPrimary);
+   }
+   setLabelColor(&downloadSettingsNotice, activeTheme->textSecondary);
+   setLabelColor(&sponsorTitle, activeTheme->textPrimary);
+   setLabelColor(&sponsorDescription, activeTheme->textSecondary);
+   for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++) setLabelColor(&sponsorCategoryLabels[i], activeTheme->textPrimary);
+   for (int i = 0; i < 3; i++) setLabelColor(&sponsorActionLabels[i], activeTheme->textPrimary);
+   setLabelColor(&exitConfirmTitle, activeTheme->textPrimary);
+   setLabelColor(&exitConfirmMessage, activeTheme->textSecondary);
+   for (int i = 0; i < 2; i++) setLabelColor(&exitConfirmChoices[i], activeTheme->textPrimary);
+   setLabelColor(&regionTitle, activeTheme->textPrimary);
+   setLabelColor(&regionDescription, activeTheme->textSecondary);
+   setLabelColor(&regionPosition, activeTheme->textSecondary);
+   for (int i = 0; i < REGION_MAX_ROWS; i++) {
+      setLabelColor(&regionNames[i], activeTheme->textPrimary);
+      setLabelColor(&regionCodes[i], activeTheme->textSecondary);
+   }
+   for (int i = 0; i < TREND_COUNT; i++) setLabelColor(&trendingChipLabels[i], activeTheme->textPrimary);
+   for (int i = 0; i < LIVE_COUNT; i++) setLabelColor(&liveChipLabels[i], activeTheme->textPrimary);
+   for (int i = 0; i < SORT_COUNT; i++) setLabelColor(&homeSortLabels[i], activeTheme->textSecondary);
+   for (int i = 0; i < PLAYLIST_SORT_COUNT; i++) setLabelColor(&playlistSortLabels[i], activeTheme->textSecondary);
+   for (int i = 0; i < 2; i++) setLabelColor(&localPlaylistTabLabels[i], activeTheme->textPrimary);
+   setLabelColor(&themeTitle, activeTheme->textPrimary);
+   for (int i = 0; i < THEME_ROW_COUNT; i++) setLabelColor(&themeRowLabels[i], activeTheme->textPrimary);
+   for (int i = 0; i < 2; i++) setLabelColor(&themeLegendLabels[i], activeTheme->textSecondary);
+   setLabelColor(&themeSelectionLeft, activeTheme->accent);
+   setLabelColor(&themeSelectionRight, activeTheme->accent);
+   setLabelColor(&themeCustomTitle, activeTheme->textPrimary);
+   for (int i = 0; i < 3; i++) setLabelColor(&themeCustomLabels[i], activeTheme->textPrimary);
+   for (int i = 0; i < 2; i++) setLabelColor(&themeCustomOptions[i], activeTheme->textPrimary);
+   setLabelColor(&themeConfirmTitle, activeTheme->textPrimary);
+   setLabelColor(&themeConfirmMessage, activeTheme->textSecondary);
+   for (int i = 0; i < 2; i++) setLabelColor(&themeConfirmChoices[i], activeTheme->textPrimary);
+
+   setHintsThemeColor(&hints, activeTheme->textSecondary);
+   setHintsThemeColor(&panelHints, activeTheme->textSecondary);
+   setHintsThemeColor(&settingsHints, activeTheme->textSecondary);
+   setHintsThemeColor(&downloadSettingsHints, activeTheme->textSecondary);
+   setHintsThemeColor(&themeHints, activeTheme->textSecondary);
+   setHintsThemeColor(&exitConfirmHints, activeTheme->textSecondary);
+   setHintsThemeColor(&regionHints, activeTheme->textSecondary);
+   setHintsThemeColor(&sponsorHints, activeTheme->textSecondary);
+   setHintsThemeColor(&downloadManagerHints, activeTheme->textSecondary);
+   refreshSidebarThemeColors();
+   refreshVideoGridThemeColors(&home.grid);
+}
+
 
 // approximate seconds-ago from a "N unit ago" string. approximate is fine here (unlike a precise date sort):
 // it only needs to group recent above old across channels. unknown/live sorts last.
@@ -1234,8 +1341,340 @@ static void updateDownloadSettingsPanel(void)
    if (direction) cycleDownloadSetting(home.downloadSettingsSelected, direction);
 }
 
+static void loadSavedCustomThemeValues(void)
+{
+   home.themeCustomDark = getCustomThemeBackgroundDark();
+   home.themeCustomDarkCursor = home.themeCustomDark;
+   uint32_t current = getCustomThemeAccent();
+   home.themeCustomAccentIndex = 0;
+   int count = getThemeAccentPaletteCount();
+   for (int i = 0; i < count; i++) {
+      if (getThemeAccentPaletteColor(i) == current) {
+         home.themeCustomAccentIndex = i;
+         break;
+      }
+   }
+   home.themeCustomAccentCursor = home.themeCustomAccentIndex;
+}
+
+static void openCustomThemeEditor(void)
+{
+   home.themeCustomOpen = 1;
+   home.themeCustomSelected = 0;
+   loadSavedCustomThemeValues();
+   settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
+}
+
+static void updateThemePanel(void)
+{
+   if (home.themeConfirmOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+         home.themeConfirmOpen = 0;
+         return;
+      }
+      if (isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_LEFT)) ||
+          isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_RIGHT)) ||
+          isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_UP)) ||
+          isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
+         home.themeConfirmSelected = 1 - home.themeConfirmSelected;
+      if (isPadButtonPressed(PAD_BTN_CROSS)) {
+         if (home.themeConfirmSelected == 0) {
+            if (home.themePendingPreset == THEME_PRESET_CUSTOM) {
+               applyCustomTheme(home.themeCustomDark,
+                                getThemeAccentPaletteColor(home.themeCustomAccentIndex));
+            } else {
+               applyThemePreset(home.themePendingPreset);
+            }
+            refreshHomeThemeColors();
+            home.themeOpen = 0;
+            home.themeCustomOpen = 0;
+         }
+         home.themeConfirmOpen = 0;
+      }
+      return;
+   }
+
+   if (home.themeCustomOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+         home.themeCustomOpen = 0;
+         return;
+      }
+      int paletteUp = isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP));
+      int paletteDown = isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN));
+      int paletteLeft = isPadButtonPressed(PAD_BTN_LEFT);
+      int paletteRight = isPadButtonPressed(PAD_BTN_RIGHT);
+      if (home.themeCustomSelected == 1) {
+         const int columns = 9;
+         int row = home.themeCustomAccentCursor / columns;
+         int col = home.themeCustomAccentCursor % columns;
+         int count = getThemeAccentPaletteCount();
+         if (paletteUp) {
+            if (row > 0) home.themeCustomAccentCursor -= columns;
+            else home.themeCustomSelected = 0;
+         } else if (paletteDown) {
+            if (row < (count - 1) / columns)
+               home.themeCustomAccentCursor =
+                  home.themeCustomAccentCursor + columns < count ?
+                  home.themeCustomAccentCursor + columns : count - 1;
+            else
+               home.themeCustomSelected = 2;
+         } else if (paletteLeft && col > 0) {
+            home.themeCustomAccentCursor--;
+         } else if (paletteRight && col < columns - 1 &&
+                    home.themeCustomAccentCursor + 1 < count) {
+            home.themeCustomAccentCursor++;
+         }
+         if (isPadButtonPressed(PAD_BTN_CROSS)) {
+            home.themeCustomAccentIndex = home.themeCustomAccentCursor;
+            saveCustomThemeSettings(home.themeCustomDark,
+                                    getThemeAccentPaletteColor(home.themeCustomAccentIndex));
+         }
+      } else {
+         if (home.themeCustomSelected == 0 && paletteDown)
+            home.themeCustomSelected = 1;
+         else if (home.themeCustomSelected == 2 && paletteUp)
+            home.themeCustomSelected = 1;
+
+         if (home.themeCustomSelected == 0) {
+            if (paletteLeft || paletteRight)
+               home.themeCustomDarkCursor = !home.themeCustomDarkCursor;
+            if (isPadButtonPressed(PAD_BTN_CROSS)) {
+               home.themeCustomDark = home.themeCustomDarkCursor;
+               saveCustomThemeSettings(home.themeCustomDark,
+                                       getThemeAccentPaletteColor(home.themeCustomAccentIndex));
+            }
+         }
+      }
+      if (home.themeCustomSelected == 2 && isPadButtonPressed(PAD_BTN_CROSS)) {
+         home.themePendingPreset = THEME_PRESET_CUSTOM;
+         home.themeConfirmOpen = 1;
+         home.themeConfirmSelected = 1;
+         exitConfirmNavigateRepeat.timer = exitConfirmNavigateRepeat.repeats = 0;
+      }
+      return;
+   }
+
+   if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
+      home.themeOpen = 0;
+      return;
+   }
+   if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
+      home.themeSelected = (home.themeSelected + 1) % THEME_ROW_COUNT;
+   else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
+      home.themeSelected = (home.themeSelected + THEME_ROW_COUNT - 1) % THEME_ROW_COUNT;
+
+   if (isPadButtonPressed(PAD_BTN_CROSS)) {
+      if (home.themeSelected == THEME_EDIT_CUSTOM_ROW) {
+         openCustomThemeEditor();
+      } else {
+         if (home.themeSelected == THEME_PRESET_CUSTOM)
+            loadSavedCustomThemeValues();
+         home.themePendingPreset = home.themeSelected;
+         home.themeConfirmOpen = 1;
+         home.themeConfirmSelected = 1;
+         exitConfirmNavigateRepeat.timer = exitConfirmNavigateRepeat.repeats = 0;
+      }
+   }
+}
+
+static void drawThemeListPanel(void)
+{
+   int panelW = THEME_PANEL_W;
+   int panelH = THEME_PANEL_H;
+   if (panelW > home.screenW - 32) panelW = home.screenW - 32;
+   if (panelH > home.screenH - 32) panelH = home.screenH - 32;
+   int x = (home.screenW - panelW) / 2;
+   int y = (home.screenH - panelH) / 2;
+
+   fillGfxRectangleFixed(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+   refreshLabelScale(&themeTitle);
+   drawLabelCentered(&themeTitle, home.screenW / 2, y + 28);
+
+   int bgX = x + panelW - 206;
+   int accentX = x + panelW - 112;
+   refreshLabelScale(&themeLegendLabels[0]);
+   refreshLabelScale(&themeLegendLabels[1]);
+   drawLabelCentered(&themeLegendLabels[0], bgX + 27, y + 88);
+   drawLabelCentered(&themeLegendLabels[1], accentX + 27, y + 88);
+
+   int activeThemeRow = getActiveThemePreset();
+   for (int i = 0; i < THEME_ROW_COUNT; i++) {
+      int rowY = y + THEME_ROW_TOP + i * THEME_ROW_STEP;
+      if (rowY + THEME_ROW_STEP > y + panelH - 48) break;
+      int selected = i == home.themeSelected;
+      int activeRow = i == activeThemeRow;
+      if (selected)
+         fillGfxRoundedRectangleFixed(x + 20, rowY, panelW - 40, 54, 8, activeTheme->rowHighlight);
+
+      Label *name = &themeRowLabels[i];
+      refreshLabelScale(name);
+      setLabelColor(name, selected ? activeTheme->accent : activeTheme->textPrimary);
+
+      if (i != THEME_EDIT_CUSTOM_ROW) {
+         uint32_t bgColor, accentColor;
+         getThemePresetPreview(i, &bgColor, &accentColor);
+         int swatchY = rowY + 12;
+         fillGfxRoundedRectangleFixed(bgX, swatchY, 54, 30, 5, activeTheme->focusBorder);
+         fillGfxRoundedRectangleFixed(bgX + 2, swatchY + 2, 50, 26, 4, bgColor);
+         fillGfxRoundedRectangleFixed(accentX, swatchY, 54, 30, 5, activeTheme->focusBorder);
+         fillGfxRoundedRectangleFixed(accentX + 2, swatchY + 2, 50, 26, 4, accentColor);
+      }
+      if (activeRow && i != THEME_EDIT_CUSTOM_ROW) {
+         refreshLabelScale(&themeSelectionLeft);
+         int indicatorGap = 12;
+         int leftIndicatorX = x + 22;
+         moveLabel(&themeSelectionLeft, leftIndicatorX,
+                   getCenteredLabelY(&themeSelectionLeft, rowY, 54));
+         moveLabel(name, leftIndicatorX + themeSelectionLeft.tt.tex.w + indicatorGap,
+                   getCenteredLabelY(name, rowY, 54));
+         drawLabel(&themeSelectionLeft);
+
+         refreshLabelScale(&themeSelectionRight);
+         int rightIndicatorX = accentX + 54 + indicatorGap;
+         int rightMaxX = x + panelW - 22 - themeSelectionRight.tt.tex.w;
+         if (rightIndicatorX > rightMaxX) rightIndicatorX = rightMaxX;
+         moveLabel(&themeSelectionRight, rightIndicatorX,
+                   getCenteredLabelY(&themeSelectionRight, rowY, 54));
+         drawLabel(&themeSelectionRight);
+      } else {
+         moveLabel(name, x + 42, getCenteredLabelY(name, rowY, 54));
+      }
+      drawLabel(name);
+   }
+
+   themeHints.y = y + panelH - 36;
+   drawButtonHints(&themeHints, home.screenW);
+}
+
+static void drawThemeCustomPanel(void)
+{
+   int panelW = THEME_PANEL_W;
+   int panelH = THEME_PANEL_H;
+   if (panelW > home.screenW - 32) panelW = home.screenW - 32;
+   if (panelH > home.screenH - 32) panelH = home.screenH - 32;
+   int x = (home.screenW - panelW) / 2;
+   int y = (home.screenH - panelH) / 2;
+
+   fillGfxRectangleFixed(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+   refreshLabelScale(&themeCustomTitle);
+   drawLabelCentered(&themeCustomTitle, home.screenW / 2, y + 28);
+
+   int rowY = y + 132;
+   refreshLabelScale(&themeCustomLabels[0]);
+   setLabelColor(&themeCustomLabels[0], home.themeCustomSelected == 0 ? activeTheme->accent : activeTheme->textPrimary);
+   moveLabel(&themeCustomLabels[0], x + 44, getCenteredLabelY(&themeCustomLabels[0], rowY, 52));
+   drawLabel(&themeCustomLabels[0]);
+
+   for (int i = 0; i < 2; i++) {
+      int bx = x + panelW - 310 + i * 126;
+      int chosen = home.themeCustomDark == (i == 0);
+      int cursor = home.themeCustomDarkCursor == (i == 0);
+      int focused = home.themeCustomSelected == 0;
+      fillGfxRoundedRectangleFixed(bx, rowY + 4, 108, 44, 8, activeTheme->surface);
+      if (chosen)
+         fillGfxRoundedRectangleFixed(bx - 3, rowY + 1, 114, 50, 10, activeTheme->accent);
+      if (cursor && focused)
+         fillGfxRoundedRectangleFixed(bx - 6, rowY - 2, 120, 56, 12, activeTheme->focusBorder);
+      fillGfxRoundedRectangleFixed(bx + 3, rowY + 7, 102, 38, 7,
+                                   chosen ? activeTheme->accent : activeTheme->surface);
+      refreshLabelScale(&themeCustomOptions[i]);
+      setLabelColor(&themeCustomOptions[i], chosen ? activeTheme->appBg : activeTheme->textPrimary);
+      moveLabel(&themeCustomOptions[i], bx + (108 - themeCustomOptions[i].tt.tex.w) / 2,
+                getCenteredLabelY(&themeCustomOptions[i], rowY + 4, 44));
+      drawLabel(&themeCustomOptions[i]);
+   }
+
+   rowY = y + 236;
+   refreshLabelScale(&themeCustomLabels[1]);
+   setLabelColor(&themeCustomLabels[1], home.themeCustomSelected == 1 ? activeTheme->accent : activeTheme->textPrimary);
+   moveLabel(&themeCustomLabels[1], x + 44, rowY);
+   drawLabel(&themeCustomLabels[1]);
+
+   int paletteCount = getThemeAccentPaletteCount();
+   int square = 40, gap = 10, columns = 9;
+   int paletteW = columns * square + (columns - 1) * gap;
+   int paletteX = x + (panelW - paletteW) / 2;
+   int paletteY = y + 286;
+   for (int i = 0; i < paletteCount; i++) {
+      int col = i % columns, row = i / columns;
+      int bx = paletteX + col * (square + gap);
+      int by = paletteY + row * (square + gap);
+      int chosen = i == home.themeCustomAccentIndex;
+      int cursor = i == home.themeCustomAccentCursor;
+      int focused = home.themeCustomSelected == 1;
+      fillGfxRoundedRectangleFixed(bx - 3, by - 3, square + 6, square + 6, 8, activeTheme->focusBorder);
+      if (chosen)
+         fillGfxRoundedRectangleFixed(bx - 5, by - 5, square + 10, square + 10, 9, activeTheme->accent);
+      if (cursor && focused)
+         fillGfxRoundedRectangleFixed(bx - 7, by - 7, square + 14, square + 14, 10, activeTheme->focusBorder);
+      fillGfxRoundedRectangleFixed(bx, by, square, square, 6, getThemeAccentPaletteColor(i));
+   }
+
+   int applyY = y + 440;
+   int applyW = 300, applyH = 48;
+   int applyX = x + (panelW - applyW) / 2;
+   int applySelected = home.themeCustomSelected == 2;
+   fillGfxRoundedRectangleFixed(applyX, applyY, applyW, applyH, 9,
+                           applySelected ? activeTheme->accent : activeTheme->surface);
+   refreshLabelScale(&themeCustomLabels[2]);
+   setLabelColor(&themeCustomLabels[2], applySelected ? activeTheme->appBg : activeTheme->textPrimary);
+   moveLabel(&themeCustomLabels[2], applyX + (applyW - themeCustomLabels[2].tt.tex.w) / 2,
+             getCenteredLabelY(&themeCustomLabels[2], applyY, applyH));
+   drawLabel(&themeCustomLabels[2]);
+
+   themeHints.y = y + panelH - 36;
+   drawButtonHints(&themeHints, home.screenW);
+}
+
+static void drawThemeConfirmPanel(void)
+{
+   fillGfxRectangleFixed(0, 0, home.screenW, home.screenH, 0x88000000);
+   int panelW = 560, panelH = 238;
+   if (panelW > home.screenW - 48) panelW = home.screenW - 48;
+   int x = (home.screenW - panelW) / 2;
+   int y = (home.screenH - panelH) / 2;
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+   refreshLabelScale(&themeConfirmTitle);
+   drawLabelCentered(&themeConfirmTitle, home.screenW / 2, y + 28);
+
+   char message[96];
+   snprintf(message, sizeof message, "Apply %s theme?",
+            home.themePendingPreset == THEME_PRESET_CUSTOM ? "custom" :
+            getThemePresetName(home.themePendingPreset));
+   setLabelIfChanged(&themeConfirmMessage, message);
+   refreshLabelScale(&themeConfirmMessage);
+   drawLabelCentered(&themeConfirmMessage, home.screenW / 2, y + 94);
+
+   for (int i = 0; i < 2; i++) {
+      int bx = x + 112 + i * 176;
+      int by = y + 150;
+      int selected = i == home.themeConfirmSelected;
+      fillGfxRoundedRectangleFixed(bx, by, 136, 48, 9,
+                              selected ? activeTheme->accent : activeTheme->surface);
+      Label *choice = &themeConfirmChoices[i];
+      refreshLabelScale(choice);
+      setLabelColor(choice, selected ? activeTheme->appBg : activeTheme->textPrimary);
+      moveLabel(choice, bx + (136 - choice->tt.tex.w) / 2,
+                getCenteredLabelY(choice, by, 48));
+      drawLabel(choice);
+   }
+}
+
+static void drawThemePanel(void)
+{
+   if (home.themeCustomOpen) drawThemeCustomPanel();
+   else drawThemeListPanel();
+   if (home.themeConfirmOpen) drawThemeConfirmPanel();
+}
+
 static void updateSettingsPanel(void)
 {
+   if (home.themeOpen) { updateThemePanel(); return; }
    if (home.downloadSettingsOpen) { updateDownloadSettingsPanel(); return; }
    if (home.regionOpen) { updateRegionPicker(); return; }
    if (home.sponsorblockOpen) { updateSponsorBlockPanel(); return; }
@@ -1265,6 +1704,13 @@ static void updateSettingsPanel(void)
       } else if (home.settingsSelected == 6 && isPadButtonPressed(PAD_BTN_CROSS)) {
          home.downloadSettingsOpen = 1;
          home.downloadSettingsSelected = 0;
+         settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
+      } else if (home.settingsSelected == 7 && isPadButtonPressed(PAD_BTN_CROSS)) {
+         home.themeOpen = 1;
+         home.themeSelected = getActiveThemePreset();
+         if (home.themeSelected < 0 || home.themeSelected >= THEME_ROW_COUNT) home.themeSelected = 0;
+         home.themeCustomOpen = 0;
+         home.themeConfirmOpen = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
       }
    }
@@ -1335,6 +1781,7 @@ static void drawSettingsPanel(void)
    setLabelIfChanged(&settingsValues[4], region ? region->name : getContentRegionCode());
    setLabelIfChanged(&settingsValues[5], "Configure");
    setLabelIfChanged(&settingsValues[6], "Configure");
+   setLabelIfChanged(&settingsValues[7], "Configure");
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
    int x = (home.screenW - panelW) / 2;
@@ -1494,7 +1941,7 @@ static void drawHomeSortPills(void)
       drawLabelAt(label, textX - 2, textY); drawLabelAt(label, textX + 2, textY);
       drawLabelAt(label, textX - 1, textY - 1); drawLabelAt(label, textX + 1, textY - 1);
       drawLabelAt(label, textX - 1, textY + 1); drawLabelAt(label, textX + 1, textY + 1);
-      setLabelColor(label, selected ? activeTheme->textPrimary : activeTheme->textSecondary);
+      setLabelColor(label, selected ? 0xFFFFFFFF : 0xFFAAAAAA);
       drawLabelAt(label, textX, textY);
       x += width + HOME_SORT_GAP;
    }
@@ -1732,6 +2179,17 @@ static void initHome(void)
    home.liveCategory = LIVE_POPULAR;
    home.settingsOpen = 0;
    home.settingsSelected = 0;
+   home.themeOpen = 0;
+   home.themeSelected = 0;
+   home.themeCustomOpen = 0;
+   home.themeCustomSelected = 0;
+   home.themeCustomDark = 1;
+   home.themeCustomDarkCursor = 1;
+   home.themeCustomAccentIndex = 0;
+   home.themeCustomAccentCursor = 0;
+   home.themeConfirmOpen = 0;
+   home.themeConfirmSelected = 1;
+   home.themePendingPreset = THEME_PRESET_CRTUBE;
    home.downloadSettingsOpen = 0;
    home.downloadSettingsSelected = 0;
    home.exitConfirmOpen = 0;
@@ -1828,9 +2286,64 @@ static void initHome(void)
    initLabel(&panelCode,   &uiFont, 0, 0, accountTextW, AUTO, 56, activeTheme->textPrimary,   TEXT_NOWRAP, "");
    initLabel(&panelFooter, &uiFont, 0, 0, accountTextW, AUTO, 20, activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabel(&settingsTitle, &uiFont, 0, 0, settingsTextW - 48, AUTO, 24, activeTheme->textPrimary, TEXT_NOWRAP, "Settings");
+   initLabel(&themeTitle, &uiFont, 0, 0, THEME_PANEL_W - 48, AUTO, 28,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Themes");
+   for (int i = 0; i < THEME_ROW_COUNT; i++) {
+      const char *rowName = i == THEME_EDIT_CUSTOM_ROW ? "Edit Custom" : getThemePresetName(i);
+      initLabel(&themeRowLabels[i], &uiFont, 0, 0, 420, AUTO, 21,
+                activeTheme->textPrimary, TEXT_NOWRAP, rowName);
+      setLabelScaleWithUi(&themeRowLabels[i], 1);
+   }
+   initLabel(&themeLegendLabels[0], &uiFont, 0, 0, 64, AUTO, 14,
+             activeTheme->textSecondary, TEXT_NOWRAP, "BACK");
+   initLabel(&themeLegendLabels[1], &uiFont, 0, 0, 54, AUTO, 14,
+             activeTheme->textSecondary, TEXT_NOWRAP, "ACC");
+   initLabel(&themeSelectionLeft, &uiFont, 0, 0, 64, AUTO, 24,
+             activeTheme->accent, TEXT_NOWRAP, ">");
+   initLabel(&themeSelectionRight, &uiFont, 0, 0, 64, AUTO, 24,
+             activeTheme->accent, TEXT_NOWRAP, "<");
+   initLabel(&themeCustomTitle, &uiFont, 0, 0, THEME_PANEL_W - 48, AUTO, 28,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Custom theme");
+   initLabel(&themeCustomLabels[0], &uiFont, 0, 0, 240, AUTO, 22,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Background");
+   initLabel(&themeCustomLabels[1], &uiFont, 0, 0, 240, AUTO, 22,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Accent colour");
+   initLabel(&themeCustomLabels[2], &uiFont, 0, 0, 300, AUTO, 22,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Apply");
+   initLabel(&themeCustomOptions[0], &uiFont, 0, 0, 100, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Dark");
+   initLabel(&themeCustomOptions[1], &uiFont, 0, 0, 100, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Light");
+   initLabel(&themeConfirmTitle, &uiFont, 0, 0, 480, AUTO, 26,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Confirm theme change");
+   initLabel(&themeConfirmMessage, &uiFont, 0, 0, 480, AUTO, 18,
+             activeTheme->textSecondary, TEXT_NOWRAP, "Apply this theme?");
+   initLabel(&themeConfirmChoices[0], &uiFont, 0, 0, 100, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Yes");
+   initLabel(&themeConfirmChoices[1], &uiFont, 0, 0, 100, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, "No");
+   setLabelScaleWithUi(&themeTitle, 1);
+   setLabelScaleWithUi(&themeCustomTitle, 1);
+   setLabelScaleWithUi(&themeConfirmTitle, 1);
+   setLabelScaleWithUi(&themeConfirmMessage, 1);
+   for (int i = 0; i < 2; i++) {
+      setLabelScaleWithUi(&themeLegendLabels[i], 1);
+      setLabelScaleWithUi(&themeCustomOptions[i], 1);
+      setLabelScaleWithUi(&themeConfirmChoices[i], 1);
+   }
+   setLabelScaleWithUi(&themeSelectionLeft, 1);
+   setLabelScaleWithUi(&themeSelectionRight, 1);
+   for (int i = 0; i < 3; i++) setLabelScaleWithUi(&themeCustomLabels[i], 1);
+   initButtonHints(&themeHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
+   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_DPAD_UP), NULL);
+   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Move");
+   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_DPAD_LEFT), NULL);
+   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Change");
+   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_CROSS), "Select");
+   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
    static const char *settingNames[SETTINGS_ROW_COUNT] = {
       "Autoplay", "Enable 1080p60 (experimental)", "UI Scaling",
-      "Overscan", "Content Region", "SponsorBlock", "Download settings"
+      "Overscan", "Content Region", "SponsorBlock", "Download settings", "Themes"
    };
    for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
       initLabel(&settingsLabels[i], &uiFont, 0, 0, settingsTextW - 220, AUTO, 20,
@@ -2625,7 +3138,8 @@ static void drawHome(void)
    if (!home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen) drawSidebar();
    if (home.accountOpen) drawAccountPanel();
    if (home.settingsOpen) {
-      if (home.downloadSettingsOpen) drawDownloadSettingsPanel();
+      if (home.themeOpen) drawThemePanel();
+      else if (home.downloadSettingsOpen) drawDownloadSettingsPanel();
       else {
          drawSettingsPanel();
          if (home.regionOpen) drawRegionPicker();
@@ -2735,6 +3249,18 @@ static void termHome(void)
    freeLabel(&panelCode);
    freeLabel(&panelFooter);
    freeLabel(&settingsTitle);
+   freeLabel(&themeTitle);
+   for (int i = 0; i < THEME_ROW_COUNT; i++) freeLabel(&themeRowLabels[i]);
+   for (int i = 0; i < 2; i++) freeLabel(&themeLegendLabels[i]);
+   freeLabel(&themeSelectionLeft);
+   freeLabel(&themeSelectionRight);
+   freeLabel(&themeCustomTitle);
+   for (int i = 0; i < 3; i++) freeLabel(&themeCustomLabels[i]);
+   for (int i = 0; i < 2; i++) freeLabel(&themeCustomOptions[i]);
+   freeLabel(&themeConfirmTitle);
+   freeLabel(&themeConfirmMessage);
+   for (int i = 0; i < 2; i++) freeLabel(&themeConfirmChoices[i]);
+   termButtonHints(&themeHints);
    for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
       freeLabel(&settingsLabels[i]);
       freeLabel(&settingsValues[i]);

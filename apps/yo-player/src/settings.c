@@ -15,7 +15,7 @@
 
 // the file written on first launch: each setting at its default, with a comment explaining the values.
 static const char *DEFAULT_SETTINGS =
-   "# yo-player settings - Autoplay, overscan and content region apply immediately; theme applies on next launch\n"
+   "# yo-player settings - Autoplay, overscan, content region and theme apply immediately\n"
    "\n"
    "autoplay=on\n"
    "# on = play the next recommendation when a video ends; off = return to the library\n"
@@ -48,9 +48,8 @@ static const char *DEFAULT_SETTINGS =
    "subtitle-offset=0\n"
    "# subtitle vertical offset in virtual screen pixels (-150 to +150); positive moves up, negative moves down\n"
    "\n"
-   "theme=youtube\n"
-   "# which colour theme to start in - one of the [Name] blocks in themes.txt (lower case,\n"
-   "# spaces become hyphens). the shipped one is youtube.\n"
+   "theme=crtube\n"
+   "# colour theme: crtube, blue, green, light, monochrome or custom\n"
    "\n"
    "sort-search=0\n"
    "sort-recommended=0\n"

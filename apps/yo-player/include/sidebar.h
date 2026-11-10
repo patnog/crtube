@@ -25,6 +25,7 @@ typedef enum {
 
 void initSidebar(Font *font, int screenW, int screenH);
 void termSidebar(void);
+void refreshSidebarThemeColors(void);
 void openSidebar(void);
 void setSidebarCurrent(SidebarItem item);
 int  isSidebarActive(void);
