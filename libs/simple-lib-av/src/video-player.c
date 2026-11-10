@@ -91,6 +91,7 @@ struct VideoPlayer {
    // seek: the UI posts a target; the decode thread performs it (parking the audio thread while both
    // pipelines flush), then decode restarts from the nearest earlier cued keyframe
    volatile int64_t seekRequestNs;      // pending target in ns, -1 = none
+   volatile int     seekInProgress;     // remains set through decode pre-roll until a post-seek frame is presented
    int              seekLandAfter;      // 1 = land on the next keyframe at/after the target (sponsor skip), not before
    volatile int     audioFlushRequest;  // decode thread -> audio thread: flush and park
    volatile int     audioFlushDone;     // audio thread -> decode thread: flushed, parked
@@ -377,6 +378,7 @@ retry_decoder:
 // stays up until the new position's frames arrive.
 static void performSeek(VideoPlayer *player)
 {
+   player->seekInProgress = 1;
    uint64_t targetNs = (uint64_t)player->seekRequestNs;
 
    // park the audio thread: it flushes its decoder + the mixer feed, then waits for our release
@@ -905,6 +907,9 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
       if (player->slots[i].state == SLOT_READY && player->slots[i].pts <= clock && (best < 0 || player->slots[i].pts >= bestPts)) { best = i; bestPts = player->slots[i].pts; }
 
    if (best >= 0) {
+      // The decoder has completed the seek and a frame from the new position is now being
+      // presented. Until this point callers must not enqueue another chapter seek.
+      player->seekInProgress = 0;
       for (int i = 0; i < FRAME_SLOTS; i++) {
          if (player->slots[i].state == SLOT_RETIRING) player->slots[i].state = SLOT_EMPTY;                // GPU is done with it by now
          else if (player->slots[i].state == SLOT_DISPLAYING) player->slots[i].state = SLOT_RETIRING;      // hold one present for the frame in flight
@@ -1071,8 +1076,14 @@ static void postSeek(VideoPlayer *player, float seconds, int landAfter)
    player->currentPts = (uint64_t)targetNs;   // position reads as the target until the seek lands
    unlock(&player->lock);
    player->seekLandAfter = landAfter;
+   player->seekInProgress = 1;
    __sync_synchronize();                       // publish the land direction before the decode thread sees the request
    player->seekRequestNs = targetNs;
+}
+
+int isVideoSeekPending(const VideoPlayer *player)
+{
+   return player && (player->seekRequestNs >= 0 || player->seekInProgress);
 }
 
 void seekVideoPlayer(VideoPlayer *player, float seconds)     { postSeek(player, seconds, 0); }

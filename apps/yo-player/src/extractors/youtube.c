@@ -871,7 +871,7 @@ static int fetchPlayer(const char *bodyFmt, const char *userAgent, const char *c
                videoId, clientName, clientVersion, rc, bodyLen);
       return rc;
    }
-   logInfo("[yt] player HTTP videoId=%s headerClientName=%s clientVersion=%s status=%d respLen=%d bodyLen=%d visitorData=%s\n",
+   logInfo("[yt] player HTTP videoId=%s headerClientName=%s clientVersion=%s status=%d respLen=%d bodyLen=%d cachedVisitorData=%s\n",
            videoId, clientName, clientVersion, status, *respLen, bodyLen,
            visitorData[0] ? "present" : "absent");
    if (status != 200) return -status;
@@ -1797,31 +1797,76 @@ static int classifyPlaylistError(const char *resp, int status)
    return PLAYLIST_FETCH_UNAVAILABLE;
 }
 
+static const char *findNextWebPlaylistBlock(const char *scan, const char *end, int *isLockup)
+{
+   static const char RENDERER[] = "\"playlistVideoRenderer\":{";
+   static const char LOCKUP[] = "\"lockupViewModel\":{";
+   while (scan < end) {
+      const char *quote = memchr(scan, '\"', (size_t)(end - scan));
+      if (!quote) return NULL;
+      size_t remain = (size_t)(end - quote);
+      if (remain >= sizeof RENDERER - 1 &&
+          memcmp(quote, RENDERER, sizeof RENDERER - 1) == 0) {
+         *isLockup = 0;
+         return quote;
+      }
+      if (remain >= sizeof LOCKUP - 1 &&
+          memcmp(quote, LOCKUP, sizeof LOCKUP - 1) == 0) {
+         *isLockup = 1;
+         return quote;
+      }
+      scan = quote + 1;
+   }
+   return NULL;
+}
+
 static void parseWebPlaylistVideos(const char *resp, int respLen, SearchResults *out)
 {
    memset(out, 0, sizeof *out);
    if (!resp || respLen <= 0) return;
+
    const char *end = resp + respLen;
    const char *scan = resp;
-   static const char ITEM[] = "\"playlistVideoRenderer\":{";
    while (out->count < MAX_SEARCH_RESULTS) {
-      const char *block = strstr(scan, ITEM);
-      if (!block || block >= end) break;
-      const char *open = block + sizeof ITEM - 2;
-      const char *blockEnd = jsonObjectEnd(open, end);
-      SearchResult *item = &out->items[out->count];
-      memset(item, 0, sizeof *item);
-      if (parseRendererItem(open, blockEnd, item)) {
-         readField(open, blockEnd, "\"shortBylineText\"", "text", item->author, sizeof item->author);
-         if (!isDuplicate(out, item->videoId)) out->count++;
+      int isLockup = 0;
+      const char *block = findNextWebPlaylistBlock(scan, end, &isLockup);
+      if (!block) break;
+
+      const char *open = strchr(block, '{');
+      const char *blockEnd = open ? jsonObjectEnd(open, end) : NULL;
+      if (!open || !blockEnd || blockEnd <= open || blockEnd > end) break;
+
+      SearchResult parsed;
+      memset(&parsed, 0, sizeof parsed);
+      int ok = isLockup ? parseLockupItem(open, blockEnd, &parsed)
+                        : parseRendererItem(open, blockEnd, &parsed);
+      if (ok) {
+         if (isLockup) {
+            strCopy(parsed.thumbnailVideoId, sizeof parsed.thumbnailVideoId,
+                    parsed.videoId);
+         } else {
+            readField(open, blockEnd, "\"shortBylineText\"", "text",
+                      parsed.author, sizeof parsed.author);
+         }
+         if (!isDuplicate(out, parsed.videoId))
+            out->items[out->count++] = parsed;
       }
       scan = blockEnd;
    }
+
    const char *more = strstr(resp, "\"continuationItemRenderer\":{");
-   if (more && more < end) jsonString(more, end, "token", out->continuation, sizeof out->continuation);
+   if (more && more < end)
+      jsonString(more, end, "token", out->continuation, sizeof out->continuation);
+
    if (!out->continuation[0]) {
       const char *next = strstr(resp, "\"nextContinuationData\":{");
-      if (next && next < end) jsonString(next, end, "continuation", out->continuation, sizeof out->continuation);
+      if (next && next < end)
+         jsonString(next, end, "continuation", out->continuation, sizeof out->continuation);
+   }
+   if (!out->continuation[0]) {
+      const char *command = strstr(resp, "\"continuationCommand\":{");
+      if (command && command < end)
+         jsonString(command, end, "token", out->continuation, sizeof out->continuation);
    }
 }
 
@@ -1843,32 +1888,62 @@ static int fetchWebPlaylistVideos(const char *playlistId, const char *continuati
    if (!playlistId || !playlistId[0] || !out) return PLAYLIST_FETCH_UNAVAILABLE;
    memset(out, 0, sizeof *out);
    const char *gl = getContentRegionCode();
-   char body[MAX_CONTINUATION + 512];
+   int anonymous = !isSignedIn();
+   if (anonymous && ensureVisitorData() != 0) {
+      logWarn("[yt] anonymous playlist: visitorData unavailable\n");
+      return PLAYLIST_FETCH_UNAVAILABLE;
+   }
+
+   char body[MAX_CONTINUATION + 768];
    int bodyLen;
    if (continuation) {
-      bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, gl, continuation);
+      if (anonymous) {
+         bodyLen = snprintf(body, sizeof body,
+            "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\",\"visitorData\":\"%s\"}},\"continuation\":\"%s\"}",
+            WEB_VERSION, gl, visitorData, continuation);
+      } else {
+         bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, gl, continuation);
+      }
    } else {
       char browseId[72];
       int idLength = snprintf(browseId, sizeof browseId, "VL%s", playlistId);
       if (idLength < 0 || idLength >= (int)sizeof browseId) return PLAYLIST_FETCH_UNAVAILABLE;
-      bodyLen = snprintf(body, sizeof body, WEB_CONTEXT_FMT ",\"browseId\":\"%s\"}", gl, browseId);
+      if (anonymous) {
+         bodyLen = snprintf(body, sizeof body,
+            "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\",\"visitorData\":\"%s\"}},\"browseId\":\"%s\"}",
+            WEB_VERSION, gl, visitorData, browseId);
+      } else {
+         bodyLen = snprintf(body, sizeof body, WEB_CONTEXT_FMT ",\"browseId\":\"%s\"}", gl, browseId);
+      }
    }
    if (bodyLen < 0 || bodyLen >= (int)sizeof body) return PLAYLIST_FETCH_UNAVAILABLE;
 
    char *resp = malloc(RESP_CAP);
    if (!resp) return -1;
-   HttpHeader headers[] = {
+   HttpHeader headers[7] = {
       { "Content-Type", "application/json" },
       { "User-Agent", WEB_UA },
       { "X-YouTube-Client-Name", "1" },
       { "X-YouTube-Client-Version", WEB_VERSION },
       { "Origin", "https://www.youtube.com" },
       { "Accept-Encoding", "identity" },
+      { NULL, NULL },
    };
+   int headerCount = 6;
+   if (anonymous) {
+      headers[6].name = "X-Goog-Visitor-Id";
+      headers[6].value = visitorData;
+      headerCount = 7;
+   }
    int respLen = 0, status = 0;
-   int rc = fetchHttp("POST", BROWSE_URL, headers, sizeof headers / sizeof headers[0],
+   if (!anonymous)
+      logInfo("[yt] playlist web request id=%s page=%s\n",
+              playlistId, continuation ? "continuation" : "first");
+   int rc = fetchHttp("POST", BROWSE_URL, headers, headerCount,
                       body, bodyLen, resp, RESP_CAP, &respLen, &status);
    if (rc < 0) {
+      logWarn("[yt] playlist web transport failed id=%s rc=%d status=%d respLen=%d\n",
+              playlistId, rc, status, respLen);
       free(resp);
       return rc;
    }
@@ -1881,7 +1956,11 @@ static int fetchWebPlaylistVideos(const char *playlistId, const char *continuati
 
    parseWebPlaylistVideos(resp, respLen, out);
    tagPlaylistContinuation(out, 'W');
+   if (!anonymous)
+      logInfo("[yt] playlist web parsed id=%s videos=%d continuation=%s\n",
+              playlistId, out->count, out->continuation[0] ? "yes" : "no");
    if (out->count == 0 && !out->continuation[0]) {
+      logWarn("[yt] playlist returned no videos id=%s\n", playlistId);
       int error = classifyPlaylistError(resp, status);
       if (error != PLAYLIST_FETCH_UNAVAILABLE ||
           strstr(resp, "playlist") || strstr(resp, "LOGIN_REQUIRED") || strstr(resp, "Members only")) {

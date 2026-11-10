@@ -113,6 +113,9 @@ static int suppressPlaybackCrossUntilRelease;
 static uint64_t l1HoldStartUs, r1HoldStartUs;
 static int l1HoldTriggered, r1HoldTriggered;
 #define PLAYBACK_NAV_HOLD_US 2000000ULL
+static VideoPlayer *chapterNavPlayer;
+static int chapterNavIndex = -1;
+static int chapterNavIndexValid, chapterNavQueued, chapterNavInFlight;
 static ButtonRepeat optionsNavigateRepeat, optionsDropdownRepeat, chapterNavigateRepeat;
 static Label optionsLabels[OPTIONS_COUNT];
 static Label optionsValueLabels[OPTIONS_DROPDOWN_MAX];
@@ -137,7 +140,7 @@ static int playbackSubtitleStyleOpen, playbackSubtitleStyleSelected;
 static ButtonRepeat playbackSubtitleStyleRepeat;
 static Label playbackSubtitleStyleTitle, playbackSubtitleStyleLabels[PLAYBACK_SUBTITLE_STYLE_COUNT], playbackSubtitlePreview;
 static int playbackSponsorOpen, playbackSponsorSelected;
-static ButtonRepeat playbackSettingsRepeat, playbackSponsorRepeat, playbackSubtitleOffsetRepeat;
+static ButtonRepeat playbackSettingsRepeat, playbackSponsorRepeat, playbackSubtitleOffsetRepeat, playbackOverscanRepeat;
 static Label playbackSettingsTitle, playbackSettingsLabels[PLAYBACK_SETTINGS_COUNT];
 static Label playbackSettingsValues[PLAYBACK_SETTINGS_COUNT];
 static Label playbackSettingsToggleLabels[2];
@@ -2042,7 +2045,11 @@ static void startAudioTrackSwitch(int target)
 // accumulates a scrub target while left/right is held; the engine seek fires once input goes quiet
 static void nudgeSeek(float deltaSeconds, uint64_t nowUs)
 {
-   if (!state.seeking) { state.seeking = 1; state.seekTarget = getVideoPositionSeconds(state.player); }
+   if (!state.seeking) {
+      state.seeking = 1;
+      state.seekTarget = getVideoPositionSeconds(state.player);
+      chapterNavIndexValid = chapterNavQueued = chapterNavInFlight = 0;
+   }
    state.seekTarget += deltaSeconds;
    float duration = getVideoDurationSeconds(state.player);
    if (state.seekTarget < 0.0f) state.seekTarget = 0.0f;
@@ -2237,6 +2244,34 @@ static void handlePlaybackInput(void)
       return; // keep the source stable until the staged handoff commits
    uint64_t nowUs = sys_time_get_system_time();
 
+   // Chapter navigation coalesces rapid taps into one destination. A new decoder seek is
+   // posted only after the previous seek has produced its first presented frame.
+   if (chapterNavPlayer != state.player) {
+      chapterNavPlayer = state.player;
+      chapterNavIndex = -1;
+      chapterNavIndexValid = chapterNavQueued = chapterNavInFlight = 0;
+   }
+   if (chapterNavInFlight && !isVideoSeekPending(state.player)) chapterNavInFlight = 0;
+
+   // Keep the logical chapter selected until playback actually reaches its start.
+   // Normal seeks land on the preceding keyframe, so the reported position can
+   // remain in the previous chapter for a short time after the seek has completed.
+   if (chapterNavIndexValid && !chapterNavQueued && !chapterNavInFlight &&
+       !isVideoSeekPending(state.player) && state.chapters.count > 0) {
+      float settledPosition = getVideoPositionSeconds(state.player);
+      int settledChapter = 0;
+      for (int i = 0; i < state.chapters.count; i++)
+         if (state.chapters.chapters[i].start <= settledPosition) settledChapter = i;
+      if (settledChapter >= chapterNavIndex) chapterNavIndexValid = 0;
+   }
+
+   if (chapterNavQueued && !chapterNavInFlight && !isVideoSeekPending(state.player) &&
+       state.chapters.count > 0 && chapterNavIndex >= 0 && chapterNavIndex < state.chapters.count) {
+      seekVideoPlayer(state.player, state.chapters.chapters[chapterNavIndex].start);
+      chapterNavQueued = 0;
+      chapterNavInFlight = 1;
+   }
+
    if (isPadButtonPressed(PAD_BTN_L2)) {
       refreshPlaybackInfoHud();
       showFullPlaybackHud();
@@ -2347,10 +2382,16 @@ static void handlePlaybackInput(void)
          if (state.chapters.count == 0) showToast("No chapters");
          else {
             float position = getVideoPositionSeconds(state.player);
-            int current = 0;
-            for (int i = 0; i < state.chapters.count; i++) if (state.chapters.chapters[i].start <= position) current = i;
-            if (current > 0) { state.seeking = 0; seekVideoPlayer(state.player, state.chapters.chapters[current - 1].start); showControls(); }
-            else showToast("No previous chapter");
+            int actual = 0;
+            for (int i = 0; i < state.chapters.count; i++) if (state.chapters.chapters[i].start <= position) actual = i;
+            int current = chapterNavIndexValid ? chapterNavIndex : actual;
+            if (current > 0) {
+               chapterNavIndex = current - 1;
+               chapterNavIndexValid = 1;
+               chapterNavQueued = 1;
+               state.seeking = 0;
+               showControls();
+            } else showToast("No previous chapter");
          }
       }
       l1HoldStartUs = 0; l1HoldTriggered = 0;
@@ -2360,10 +2401,16 @@ static void handlePlaybackInput(void)
          if (state.chapters.count == 0) showToast("No chapters");
          else {
             float position = getVideoPositionSeconds(state.player);
-            int current = 0;
-            for (int i = 0; i < state.chapters.count; i++) if (state.chapters.chapters[i].start <= position) current = i;
-            if (current + 1 < state.chapters.count) { state.seeking = 0; seekVideoPlayer(state.player, state.chapters.chapters[current + 1].start); showControls(); }
-            else showToast("No next chapter");
+            int actual = 0;
+            for (int i = 0; i < state.chapters.count; i++) if (state.chapters.chapters[i].start <= position) actual = i;
+            int current = chapterNavIndexValid ? chapterNavIndex : actual;
+            if (current + 1 < state.chapters.count) {
+               chapterNavIndex = current + 1;
+               chapterNavIndexValid = 1;
+               chapterNavQueued = 1;
+               state.seeking = 0;
+               showControls();
+            } else showToast("No next chapter");
          }
       }
       r1HoldStartUs = 0; r1HoldTriggered = 0;
@@ -2590,6 +2637,7 @@ static void handleChaptersInput(void)
       state.chaptersVisible = 0;
       suppressPlaybackCrossUntilRelease = 1; // consume the matching RELEASED event too
       state.seeking = 0;   // a pending scrub must not overwrite the jump
+      chapterNavIndexValid = chapterNavQueued = chapterNavInFlight = 0;
       seekVideoPlayer(state.player, state.chapters.chapters[state.chapterSelected].start);
       showControls();
       return;
@@ -2629,6 +2677,7 @@ static void openPlaybackSettings(void)
    playbackSubtitleStyleOpen = 0;
    playbackSettingsSelected = 0;
    playbackSettingsRepeat.timer = playbackSettingsRepeat.repeats = 0;
+   playbackOverscanRepeat.timer = playbackOverscanRepeat.repeats = 0;
    playbackSubtitleOffsetRepeat.timer = playbackSubtitleOffsetRepeat.repeats = 0;
 }
 
@@ -2736,9 +2785,12 @@ static void updatePlaybackSettings(void)
       float current = playbackFontScale;
       setPlaybackUiScale(current >= 1.25f ? 1.0f : 1.5f);
    } else if (playbackSettingsSelected == 2) {
-      int delta = left ? -1 : 1;
-      int overscan = getOverscanPercent() + delta;
-      if (setOverscanPercent(overscan) != 0) showToast("Could not save overscan setting");
+      int overscanDelta = isRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
+                          isRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
+      if (overscanDelta) {
+         int overscan = getOverscanPercent() + overscanDelta;
+         if (setOverscanPercent(overscan) != 0) showToast("Could not save overscan setting");
+      }
    } else if (playbackSettingsSelected == 3 && (cross || right)) {
       playbackSubtitleStyleOpen = 1;
       playbackSubtitleStyleSelected = 0;

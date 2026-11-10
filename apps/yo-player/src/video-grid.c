@@ -395,7 +395,7 @@ static void thumbCacheSaveIndex(void)
 
 #define WATCHED_ALPHA 70        // label alpha for already-watched tiles
 #define WATCH_PROGRESS_H 4      // red resume indicator along the thumbnail bottom edge
-#define WATCH_PROGRESS_COLOR 0xFFFF0000
+#define WATCH_PROGRESS_COLOR activeTheme->accent
 
 // Positive Members-only results are reused across grids/screens for the current account session.
 // IDs are kept in FIFO order; a sorted slot index provides binary-search lookups without duplicating IDs.

@@ -279,6 +279,7 @@ static Label sponsorActionLabels[3];
 static ButtonHints sponsorHints;
 static ButtonRepeat sponsorNavigateRepeat;
 static ButtonRepeat settingsNavigateRepeat;
+static ButtonRepeat settingsOverscanRepeat;
 static ButtonRepeat exitConfirmNavigateRepeat;
 static Label exitConfirmTitle, exitConfirmMessage, exitConfirmChoices[2];
 static ButtonHints exitConfirmHints;
@@ -1683,8 +1684,19 @@ static void updateSettingsPanel(void)
       home.settingsSelected = (home.settingsSelected + 1) % SETTINGS_ROW_COUNT;
    else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
       home.settingsSelected = (home.settingsSelected + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
+   int overscanDelta = 0;
+   if (home.settingsSelected == 3) {
+      if (settingsOverscanRepeat.timer == 0)
+         settingsOverscanRepeat.timer = sys_time_get_system_time();
+      if (isRepeatDue(&settingsOverscanRepeat, getPadButtonState(PAD_BTN_LEFT))) overscanDelta = -1;
+      else if (isRepeatDue(&settingsOverscanRepeat, getPadButtonState(PAD_BTN_RIGHT))) overscanDelta = 1;
+   } else {
+      settingsOverscanRepeat.timer = 0;
+      settingsOverscanRepeat.repeats = 0;
+   }
+
    if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
-       isPadButtonPressed(PAD_BTN_RIGHT)) {
+       isPadButtonPressed(PAD_BTN_RIGHT) || overscanDelta) {
       if (home.settingsSelected == 0 || home.settingsSelected == 1) {
          int enabled = home.settingsSelected == 0 ? getAutoplayEnabled() : getEnable1080p60();
          if (isPadButtonPressed(PAD_BTN_LEFT)) enabled = 0;
@@ -1695,8 +1707,8 @@ static void updateSettingsPanel(void)
       } else if (home.settingsSelected == 2) {
          cycleSdScale();
       } else if (home.settingsSelected == 3) {
-         int delta = isPadButtonPressed(PAD_BTN_LEFT) ? -1 : 1;
-         setOverscanPercent(getOverscanPercent() + delta);
+         if (overscanDelta)
+            setOverscanPercent(getOverscanPercent() + overscanDelta);
       } else if (home.settingsSelected == 4 && isPadButtonPressed(PAD_BTN_CROSS)) {
          openRegionPicker();
       } else if (home.settingsSelected == 5 && isPadButtonPressed(PAD_BTN_CROSS)) {
