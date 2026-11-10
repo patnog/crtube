@@ -1840,6 +1840,7 @@ static void initHome(void)
    initVideoGrid(&home.grid, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, gridHeight);
    setGridWatchedPredicate(&home.grid, isWatched);
    setGridWatchedPosition(&home.grid, getWatchedPosition);
+   setGridDownloadedPosition(&home.grid, getDownloadedPosition);
    setGridWatchLaterPredicate(&home.grid, isWatchLater);
    home.grid.suppressWatchLaterBadge = (home.category == HOME_WATCHLATER ||
       home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER);
@@ -2119,8 +2120,23 @@ static void updateHome(void)
       if (isPadButtonPressed(PAD_BTN_CROSS)) {
          char path[MAX_PATH_LEN];
          if (getDownloadedVideoPath(selected->videoId, path, sizeof path) == 0) {
+            char queue[MAX_SEARCH_RESULTS][16];
+            int queueCount = 0, queueIndex = -1;
+            const SearchResults *results = gridResults(&home.grid);
+            if (results) {
+               for (int i = 0; i < results->count && queueCount < MAX_SEARCH_RESULTS; i++) {
+                  const SearchResult *item = &results->items[i];
+                  if (!item->isLocalDownload || !item->videoId[0]) continue;
+                  strCopy(queue[queueCount], sizeof queue[queueCount], item->videoId);
+                  if (strcmp(item->videoId, selected->videoId) == 0) queueIndex = queueCount;
+                  queueCount++;
+               }
+            }
             stopVideoGrid(&home.grid);
-            playLocalVideo(path);
+            if (queueIndex >= 0)
+               playLocalVideoWithQueue(path, queue, queueCount, queueIndex);
+            else
+               playLocalVideo(path);
          }
          return;
       }

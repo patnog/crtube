@@ -10,6 +10,7 @@
 
 #define DATA_DIR        CRTUBE_DATA_DIR
 #define HISTORY_PATH    DATA_DIR "/history.txt"
+#define DOWNLOAD_PROGRESS_PATH DATA_DIR "/download-progress.txt"
 #define LOCAL_HISTORY_PATH DATA_DIR "/local-history.txt"
 #define SUBS_PATH       DATA_DIR "/subscriptions.txt"
 #define WATCHLATER_PATH DATA_DIR "/watchlater.txt"
@@ -47,6 +48,11 @@ typedef struct { char id[VIDEO_ID_LEN]; int position; int duration; } WatchEntry
 static WatchEntry watched[HISTORY_CAP];
 static int        watchedCount;
 static int        watchedNext;  // next slot to write when the ring is full
+
+// Downloaded videos use a separate resume database so offline playback never reads or overwrites
+// the online VOD position for the same YouTube ID.
+static WatchEntry downloadedProgress[HISTORY_CAP];
+static int        downloadedProgressCount;
 
 // PS3-local history is distinct from the watched/resume database above. It keeps display metadata
 // so the History page can render after a restart without requesting account history from YouTube.
@@ -141,6 +147,65 @@ void clearSearchHistory(void)
 {
    searchHistoryCount = 0;
    saveSearchHistory();
+}
+
+static int isDownloadProgressKey(const char *id)
+{
+   if (!id || strlen(id) != 11) return 0;
+   for (int i = 0; i < 11; i++) {
+      char c = id[i];
+      if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-')) return 0;
+   }
+   return 1;
+}
+
+static void loadDownloadedProgress(void)
+{
+   char *buffer = malloc(HISTORY_BUFFER_BYTES);
+   if (!buffer) return;
+   int length = readFile(DOWNLOAD_PROGRESS_PATH, buffer, HISTORY_BUFFER_BYTES - 1);
+   if (length > 0) {
+      buffer[length] = 0;
+      for (char *line = strtok(buffer, "\r\n"); line && downloadedProgressCount < HISTORY_CAP;
+           line = strtok(NULL, "\r\n")) {
+         char id[VIDEO_ID_LEN]; int position = 0, duration = 0;
+         if (sscanf(line, "%11s %d %d", id, &position, &duration) == 3 &&
+             isDownloadProgressKey(id)) {
+            WatchEntry *entry = &downloadedProgress[downloadedProgressCount++];
+            strCopy(entry->id, VIDEO_ID_LEN, id);
+            entry->position = position;
+            entry->duration = duration;
+         }
+      }
+   }
+   free(buffer);
+}
+
+static WatchEntry *findDownloadedProgress(const char *videoId)
+{
+   if (!isDownloadProgressKey(videoId)) return NULL;
+   for (int i = 0; i < downloadedProgressCount; i++)
+      if (strcmp(downloadedProgress[i].id, videoId) == 0) return &downloadedProgress[i];
+   return NULL;
+}
+
+static void saveDownloadedProgress(void)
+{
+   char *buffer = malloc(HISTORY_BUFFER_BYTES);
+   if (!buffer) return;
+   int length = 0;
+   for (int i = 0; i < downloadedProgressCount; i++) {
+      int remaining = HISTORY_BUFFER_BYTES - length;
+      if (remaining <= 1) break;
+      int written = snprintf(buffer + length, (size_t)remaining, "%s %d %d\n",
+                             downloadedProgress[i].id, downloadedProgress[i].position,
+                             downloadedProgress[i].duration);
+      if (written < 0 || written >= remaining) break;
+      length += written;
+   }
+   writeFile(DOWNLOAD_PROGRESS_PATH, buffer, (uint64_t)length);
+   free(buffer);
 }
 
 static void loadHistory(void)
@@ -892,6 +957,7 @@ void initStorage(void)
    loadLocalPlaylistIndex();
    loadPlaylistWatchLater();
    loadHistory();
+   loadDownloadedProgress();
    loadLocalHistory();
    loadSearchHistory();
    seedSubscriptions();
@@ -1002,4 +1068,29 @@ void setWatchedDuration(const char *videoId, int durationSeconds)
    if (!entry) entry = addWatched(videoId);
    entry->duration = durationSeconds;
    saveHistory();
+}
+
+int getDownloadedPosition(const char *videoId)
+{
+   WatchEntry *entry = findDownloadedProgress(videoId);
+   return entry ? entry->position : 0;
+}
+
+void setDownloadedProgress(const char *videoId, int positionSeconds, int durationSeconds)
+{
+   if (!isDownloadProgressKey(videoId)) return;
+   WatchEntry *entry = findDownloadedProgress(videoId);
+   if (!entry) {
+      if (downloadedProgressCount >= HISTORY_CAP) {
+         memmove(downloadedProgress, downloadedProgress + 1,
+                 (HISTORY_CAP - 1) * sizeof downloadedProgress[0]);
+         downloadedProgressCount--;
+      }
+      entry = &downloadedProgress[downloadedProgressCount++];
+      memset(entry, 0, sizeof *entry);
+      strCopy(entry->id, VIDEO_ID_LEN, videoId);
+   }
+   entry->position = positionSeconds < 0 ? 0 : positionSeconds;
+   if (durationSeconds > 0) entry->duration = durationSeconds;
+   saveDownloadedProgress();
 }

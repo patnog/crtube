@@ -88,7 +88,8 @@ typedef struct {
    void            *fetchUser;
    const SearchResults *pendingCached;                     // set = next (re)load restores these instantly
    int              (*isWatched)(const char *videoId);     // fade predicate (NULL = no fade)
-   int              (*watchedPosition)(const char *videoId); // saved resume position in seconds (NULL = no progress)
+   int              (*watchedPosition)(const char *videoId); // online VOD resume position
+   int              (*downloadedPosition)(const char *videoId); // downloaded-file resume position
    int              (*isWatchLater)(const char *videoId);  // watch-later badge predicate (NULL = no badge)
 } VideoGrid;
 
@@ -97,6 +98,7 @@ void termVideoGrid(VideoGrid *grid);
 
 void setGridWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *videoId));
 void setGridWatchedPosition(VideoGrid *grid, int (*watchedPosition)(const char *videoId));
+void setGridDownloadedPosition(VideoGrid *grid, int (*downloadedPosition)(const char *videoId));
 void setGridWatchLaterPredicate(VideoGrid *grid, int (*isWatchLater)(const char *videoId));
 void setGridSortMode(VideoGrid *grid, SortOrder mode);
 void setGridPlaylistSortMode(VideoGrid *grid, PlaylistSortOrder mode);

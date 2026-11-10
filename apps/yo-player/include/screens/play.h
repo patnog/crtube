@@ -11,3 +11,5 @@ extern Screen playScreen;
 // pushes the play screen on top of the current one.
 void playVideo(const char *input);
 void playLocalVideo(const char *path);
+// Starts a downloaded video with a snapshot of the Downloads grid order (16-byte IDs).
+void playLocalVideoWithQueue(const char *path, const char videoIds[][16], int count, int index);

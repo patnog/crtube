@@ -147,6 +147,13 @@ static char requestedInput[256] = "jNQXAC9IVRw";   // "Me at the zoo"
 static char requestedLocalPath[MAX_PATH_LEN];
 static int requestedIsLocal;
 
+// Snapshot of the Downloads grid order at playback start. It deliberately does not consult
+// the live grid while the player is open, so changing sort later cannot reorder navigation.
+#define DOWNLOAD_QUEUE_CAP MAX_SEARCH_RESULTS
+static char downloadedQueue[DOWNLOAD_QUEUE_CAP][16];
+static int downloadedQueueCount;
+static int downloadedQueueCursor;
+
 // Playback navigation: the current video plus the two most recent predecessors.
 // The cursor allows L1 to move backward; a new video after going back discards the forward branch.
 #define PLAYBACK_NAV_CAP 3
@@ -929,6 +936,18 @@ static int findPreferredSubtitleTrack(const char *languageCode)
    return -1;
 }
 
+static int getRequestedDownloadedId(char out[12])
+{
+   if (!requestedIsLocal || !requestedLocalPath[0]) return 0;
+   const char *base = strrchr(requestedLocalPath, '/');
+   base = base ? base + 1 : requestedLocalPath;
+   size_t length = strlen(base);
+   if (length != 15 || strcmp(base + 11, ".mp4") != 0) return 0;
+   memcpy(out, base, 11);
+   out[11] = 0;
+   return 1;
+}
+
 static void worker(uint64_t arg)
 {
    (void)arg;
@@ -974,6 +993,13 @@ static void worker(uint64_t arg)
          if (state.pendingPlayer) { destroyVideoPlayer(state.pendingPlayer); state.pendingPlayer = NULL; }
          if (!playbackCancelRequested()) fail("could not play downloaded file");
          goto done;
+      }
+      char downloadedId[12];
+      if (getRequestedDownloadedId(downloadedId)) {
+         int resumeAt = getDownloadedPosition(downloadedId);
+         float duration = getVideoDurationSeconds(state.pendingPlayer);
+         if (resumeAt > 3 && (duration <= 0 || resumeAt < duration - 10))
+            seekVideoPlayer(state.pendingPlayer, (float)resumeAt);
       }
       state.vidItag = state.audItag = state.vidW = state.vidH = state.vidFps = 0;
       goto done;
@@ -1316,6 +1342,23 @@ static void autoplayWorker(uint64_t arg)
    exitThread();
 }
 
+static int launchDownloadedQueueIndex(int index)
+{
+   if (index < 0 || index >= downloadedQueueCount) return 0;
+   char path[MAX_PATH_LEN];
+   if (getDownloadedVideoPath(downloadedQueue[index], path, sizeof path) != 0) {
+      logInfo("[play] queued download unavailable: %s\n", downloadedQueue[index]);
+      return 0;
+   }
+   popScreen();
+   downloadedQueueCursor = index;
+   requestedIsLocal = 1;
+   strCopy(requestedLocalPath, sizeof requestedLocalPath, path);
+   requestedInput[0] = 0;
+   pushScreen(&playScreen);
+   return 1;
+}
+
 static void launchVideo(const char *input, int addToNavigation)
 {
    requestedIsLocal = 0;
@@ -1333,6 +1376,30 @@ void playVideo(const char *input)
 void playLocalVideo(const char *path)
 {
    if (!path || !path[0]) return;
+   downloadedQueueCount = 0;
+   downloadedQueueCursor = -1;
+   requestedIsLocal = 1;
+   strCopy(requestedLocalPath, sizeof requestedLocalPath, path);
+   requestedInput[0] = 0;
+   pushScreen(&playScreen);
+}
+
+void playLocalVideoWithQueue(const char *path, const char videoIds[][16], int count, int index)
+{
+   if (!path || !path[0] || !videoIds || count <= 0 || index < 0 || index >= count) return;
+   if (count > DOWNLOAD_QUEUE_CAP) count = DOWNLOAD_QUEUE_CAP;
+   downloadedQueueCount = 0;
+   downloadedQueueCursor = -1;
+   for (int i = 0; i < count; i++) {
+      if (!videoIds[i][0]) continue;
+      strCopy(downloadedQueue[downloadedQueueCount], sizeof downloadedQueue[0], videoIds[i]);
+      if (i == index) downloadedQueueCursor = downloadedQueueCount;
+      downloadedQueueCount++;
+   }
+   if (downloadedQueueCount == 0 || downloadedQueueCursor < 0) {
+      playLocalVideo(path);
+      return;
+   }
    requestedIsLocal = 1;
    strCopy(requestedLocalPath, sizeof requestedLocalPath, path);
    requestedInput[0] = 0;
@@ -2233,7 +2300,13 @@ static void handlePlaybackInput(void)
    if (isPadButtonPressed(PAD_BTN_TRIANGLE)) toggleSubtitles();
 
    if (isPadButtonPressed(PAD_BTN_L1)) {
-      if (requestedIsLocal) { showToast("Unavailable for downloaded videos"); return; }
+      if (requestedIsLocal) {
+         if (downloadedQueueCount > 0 && downloadedQueueCursor > 0)
+            launchDownloadedQueueIndex(downloadedQueueCursor - 1);
+         else
+            showToast("No previous download");
+         return;
+      }
       char previousId[12];
       if (previousPlaybackId(previousId)) {
          popScreen();
@@ -2259,6 +2332,13 @@ static void handlePlaybackInput(void)
    }
 
    if (isPadButtonPressed(PAD_BTN_R1)) {
+      if (requestedIsLocal) {
+         if (downloadedQueueCount > 0 && downloadedQueueCursor + 1 < downloadedQueueCount)
+            launchDownloadedQueueIndex(downloadedQueueCursor + 1);
+         else
+            showToast("No next download");
+         return;
+      }
       char forwardId[12];
       if (state.nextThreadActive || state.nextNoticeVisible) {
          showToast("Next video is already loading");
@@ -4113,7 +4193,15 @@ static void termPlay(void)
    // Save the resume position on exit. A finished video stores its full duration so the grid can
    // render a 100% progress line; the resume path already treats positions near the end as completed.
    // Only save after a frame played, and keep typed URLs out of the ID-keyed history.
-   if (state.player && state.firstFrameSeen && (!state.isLive || state.liveEnded)) {
+   if (state.player && state.firstFrameSeen && requestedIsLocal) {
+      char downloadedId[12];
+      if (getRequestedDownloadedId(downloadedId)) {
+         int duration = (int)(getVideoDurationSeconds(state.player) + 0.5f);
+         int position = isVideoEnded(state.player) ? duration
+                                                   : (int)getVideoPositionSeconds(state.player);
+         setDownloadedProgress(downloadedId, position, duration);
+      }
+   } else if (state.player && state.firstFrameSeen && (!state.isLive || state.liveEnded)) {
       char historyId[12];
       if (extractPlaybackId(requestedInput, historyId)) {
          int savedPosition = isVideoEnded(state.player) ? (int)(getVideoDurationSeconds(state.player) + 0.5f)

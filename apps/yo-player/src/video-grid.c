@@ -1514,6 +1514,7 @@ void termVideoGrid(VideoGrid *grid)
 
 void setGridWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *videoId)) { grid->isWatched = isWatched; }
 void setGridWatchedPosition(VideoGrid *grid, int (*watchedPosition)(const char *videoId)) { grid->watchedPosition = watchedPosition; }
+void setGridDownloadedPosition(VideoGrid *grid, int (*downloadedPosition)(const char *videoId)) { grid->downloadedPosition = downloadedPosition; }
 void setGridWatchLaterPredicate(VideoGrid *grid, int (*isWatchLater)(const char *videoId)) { grid->isWatchLater = isWatchLater; }
 void setGridSortMode(VideoGrid *grid, SortOrder mode) { if (grid) grid->sortMode = mode >= SORT_RELEVANCE && mode < SORT_COUNT ? mode : SORT_RELEVANCE; }
 void setGridPlaylistSortMode(VideoGrid *grid, PlaylistSortOrder mode)
@@ -1647,13 +1648,14 @@ static void drawTile(VideoGrid *grid, int i)
    const SearchResult *item = &grid->results.items[i];
    int totalSeconds = 0, watchedSeconds = 0;
    int progressWidth = 0;
-   if (!item->isPlaylist && !item->isLive && grid->watchedPosition && item->duration[0]) {
+   int (*positionLookup)(const char *) = item->isLocalDownload ? grid->downloadedPosition : grid->watchedPosition;
+   if (!item->isPlaylist && !item->isLive && positionLookup && item->duration[0]) {
       int first = 0, second = 0, third = 0;
       int fields = sscanf(item->duration, "%d:%d:%d", &first, &second, &third);
       if (fields == 2) totalSeconds = first * 60 + second;
       else if (fields == 3) totalSeconds = first * 3600 + second * 60 + third;
       if (totalSeconds > 0) {
-         watchedSeconds = grid->watchedPosition(item->videoId);
+         watchedSeconds = positionLookup(item->videoId);
          if (watchedSeconds > 0) {
             if (watchedSeconds > totalSeconds) watchedSeconds = totalSeconds;
             progressWidth = (int)((float)grid->tileW * (float)watchedSeconds / (float)totalSeconds + 0.5f);

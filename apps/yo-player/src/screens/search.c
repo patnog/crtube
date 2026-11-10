@@ -344,7 +344,7 @@ static void initSearch(void)
    int promptCrossW = searchCrossGlyph.h > 0 ?
       searchCrossGlyph.w * promptCrossH / searchCrossGlyph.h : promptCrossH;
    int promptStartOffset = (int)(18 * search.uiScale + 0.5f) + queryPromptPrefix.tt.tex.w +
-                           (int)(10 * search.uiScale + 0.5f) + promptCrossW;
+                           (int)(18 * search.uiScale + 0.5f) + promptCrossW;
    int promptSuffixWidth = search.fieldWidth - promptStartOffset -
                            (int)(8 * search.uiScale + 0.5f);
    if (promptSuffixWidth < 32) promptSuffixWidth = 32;
@@ -640,13 +640,13 @@ static void drawSearchBar(void)
       drawLabel(&queryPromptPrefix);
       int crossH = (int)(PROMPT_TEXT_SIZE * search.uiScale * 0.92f + 0.5f);
       int crossW = searchCrossGlyph.h > 0 ? searchCrossGlyph.w * crossH / searchCrossGlyph.h : crossH;
-      int crossX = promptX + queryPromptPrefix.tt.tex.w + (int)(10 * search.uiScale + 0.5f);
+      int crossX = promptX + queryPromptPrefix.tt.tex.w + (int)(18 * search.uiScale + 0.5f);
       int crossY = fieldY + (fieldH - crossH) / 2;
       if (searchCrossGlyph.offset)
          drawGfxTextureFixedPosition(crossX, crossY, crossW, crossH, searchCrossGlyph,
                                      0.0f, 0.0f, 1.0f, 1.0f,
                                      activeTheme->textSecondary, GFX_FILTER_LINEAR);
-      int suffixX = crossX + crossW + (int)(10 * search.uiScale + 0.5f);
+      int suffixX = crossX + crossW + (int)(14 * search.uiScale + 0.5f);
       moveLabel(&queryPromptSuffix, suffixX, promptY);
       drawLabel(&queryPromptSuffix);
    }
