@@ -21,7 +21,7 @@ It reuses what this repo already has:
 ## Features
 
 - **Browse & search** — a sidebar with Recommended, account Subscriptions / History / Watch Later, separate PS3-local Subscriptions / History / Watch Later, Trending and Live. Search has Relevance / Views sort orders; channel views have Latest / Popular / Oldest. Pasting a YouTube link into search opens it directly. Trending tabs are Gaming, Sports and Podcasts; Live tabs are Popular, Music, Gaming, Sports, Podcasts and News.
-- **Playback with sound** — streamed as it plays (nothing is downloaded in full first), H.264 + AAC. Sony VDEC is the default decoder. An experimental setting can enable the integrated TEE Decoder for supported 1080p50/60 H.264 streams.
+- **Playback with sound** — streamed as it plays (nothing is downloaded in full first), H.264 + AAC. Sony VDEC is the default decoder. An experimental setting can enable the integrated TEE Decoder for supported 1080p50/60 H.264 streams. During the first five seconds, the player measures presented frame rate; if it is below the internal threshold, it can switch only the current video to an available 30 FPS rendition. This fallback does not modify global settings.
   Pause and seek with a scrub bar showing current / total time.
 - **Live streams** — plays anything with a LIVE badge (sports, news), a few seconds behind the live edge.
 - **Resume** — videos pick up from where you last stopped; already-watched videos are dimmed in the grid.
@@ -29,7 +29,7 @@ It reuses what this repo already has:
   uploads from every channel you follow, newest first.
 - **Watch Later** — its own home category; add or remove any video from the pad, tagged on the thumbnail.
 - **Download** — combine a video's video + audio into one `.mp4` file, in the background, with a queue and a
-  progress readout. Finished downloads are registered with the XMB and show up in its Video column.
+  progress readout. LIVE videos are rejected before queueing and checked again by the worker. Finished downloads are registered with the XMB and show up in its Video column; the Downloads category displays local thumbnails and video durations.
 - **Volume** — adjust in the player with a pill meter; the level is remembered across videos.
 - **Description** — read the full video description over the playing video, scrollable, without pausing.
 - **Chapters** — jump around by chapter. Chapters come from the description's timestamps, falling back to
@@ -65,6 +65,10 @@ under **GNU LGPL-2.1-or-later**, not Apache-2.0. Its full license is included
 at [`../../libs/simple-lib-av/tee_decoder.LICENSE`](../../libs/simple-lib-av/tee_decoder.LICENSE);
 additional attribution and bundled-runtime notices are in
 [`../../NOTICE`](../../NOTICE).
+
+## Controller support
+
+The shared input layer supports the Sony BD Remote in addition to standard PS3 controllers. BD Remote key codes are translated into the same logical buttons used by the player: directional and face buttons, L1/R1/L2/R2, Start and Select retain their usual meanings. Enter, Play and Pause map to Cross; Return maps to Circle; Next and Scan Forward map to Right; Previous and Scan Reverse map to Left. The remote has no analogue axes, so features requiring an analogue stick or stick click (such as R3 download/statistics) require a standard controller.
 
 ## Display output and aspect ratios
 
@@ -170,12 +174,13 @@ The scale is intended for library/navigation UI. Playback controls and overlays 
 
 ## Downloads
 
-Pressing **R3** on a video queues a download. The picture and sound streams are combined into one `.mp4` file.
+Pressing **R3** on a video queues a download. The app rejects videos identified as currently LIVE, and the background worker performs a second LIVE check before fetching media. The picture and sound streams are combined into one `.mp4` file.
 Downloads run in the background so you can keep browsing, queue up if you start several, and show progress in
 the top-right corner. Live streams can't be downloaded.
 
 A finished download is handed to the system with `cellVideoExport`, which moves it out of the app's folder and
-registers it in the console's media database. That is what makes it appear in the XMB's Video column, named
+registers it in the console's media database. The Downloads category keeps a local library entry with the
+thumbnail, title, description and duration; older MP4 files can have their duration recovered from the MP4 movie header. That is what makes it appear in the XMB's Video column, named
 after the video, next to anything you would normally copy over from a USB stick. Copying a file into
 `/dev_hdd0/video` by hand does not work: the XMB lists videos from that database, not from the folder.
 
@@ -261,7 +266,7 @@ These client identifiers and YouTube endpoints are implementation details, not s
 - **Live streams** use a different delivery than normal videos (a rolling sequence of segments rather than one
   file), so they take a little longer to start and to exit, and can't be downloaded or seeked. Otherwise they
   play the same, a few seconds behind the live edge.
-- **TEE Decoder support** is experimental and limited to H.264 Main/High, 8-bit 4:2:0, progressive, CABAC, one slice per picture, up to 1920×1088. CAVLC, interlaced, multi-slice, 10-bit and 4:2:2 streams are not supported by TEE; Sony VDEC remains the fallback path where supported.
+- **TEE Decoder support** is experimental and limited to H.264 Main/High, 8-bit 4:2:0, progressive, CABAC, one slice per picture, up to 1920×1088. CAVLC, interlaced, multi-slice, 10-bit and 4:2:2 streams are not supported by TEE; Sony VDEC remains the fallback path where supported. Separately, if the measured average presented frame rate is too low during the first five seconds of playback, the player attempts to switch the current video to a 30 FPS rendition. This is a per-playback recovery and does not change saved quality or other global settings.
 - The Subscriptions feed is a merged list, so it can't page past the first batch it gathers from each channel.
 
 ## Credits and component licenses

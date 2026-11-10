@@ -19,9 +19,9 @@ This repository is a fork of [vortigauntlet/yo-player-signin](https://github.com
 - **Improved YouTube playback handling:** VOD and live playback use separate InnerTube client paths. VOD uses the VISIONOS client; live streams use the Android VR client to obtain the DASH segment data required by the live player.
 - **VOD client fallback:** When the primary VISIONOS request explicitly reports an unplayable VOD, the extractor can retry supported alternate clients. Live streams are kept out of this fallback path.
 - **Members-only identification:** Restricted videos can be identified and marked in the video grid instead of being mistaken for ordinary playable videos.
-- **Streaming playback:** H.264 video and AAC audio are streamed during playback. The app includes the TEE H.264 decoder as an experimental option for supported 1080p50/60 streams, with Sony VDEC remaining the default.
+- **Streaming playback:** H.264 video and AAC audio are streamed during playback. The app includes the TEE H.264 decoder as an experimental option for supported 1080p50/60 streams, with Sony VDEC remaining the default. If the measured average presented frame rate is too low during the first five seconds, the player can switch that video to an available 30 FPS rendition without changing global settings.
 - **Navigation and feeds:** A sidebar provides Search, Recommended, account feeds and Playlists, PS3-local lists, Trending, Live, Account, Settings and Exit. Playlists is a dedicated account-library page outside the L1/R1 category cycle. Trending has Gaming, Sports and Podcasts tabs; Live has Popular, Music, Gaming, Sports, Podcasts and News.
-- **Playback and settings:** Search, channel browsing, resume, customizable subtitle styling, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, region selection and background downloads.
+- **Playback and settings:** Search, channel browsing, resume, customizable subtitle styling, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, region selection and background downloads. LIVE streams are identified and excluded from download queues.
 
 ## What this fork adds
 
@@ -31,15 +31,16 @@ The fork is based on `vortigauntlet/yo-player-signin`. In addition to the accoun
 |---|---|
 | CRT / SD presentation | Dedicated 4:3 SD grid layout and SD-specific navigation hints; configurable UI scaling (1.0x/1.5x) is available at every output resolution through the Settings panel |
 | YouTube extraction | VISIONOS-based VOD extraction and a separate Android VR request path for live streams |
-| Playback resilience | A limited alternate-client retry for VODs explicitly rejected by the primary client; live playback is excluded from that retry |
+| Playback resilience | A limited alternate-client retry for VODs explicitly rejected by the primary client; live playback is excluded from that retry. A low presented-frame-rate check during the first five seconds can trigger a per-video switch to 30 FPS, without changing saved settings |
 | Live playback | DASH manifest parsing and rolling segment-sequence playback for live broadcasts |
 | Restricted content | Members-only detection and a visible `*Members only` badge on affected grid items |
 | Diagnostics | Additional boot-stage and playback/extraction logging to make failures easier to diagnose on real hardware |
-| H.264 decoding | Optional TEE Decoder backend for supported 1080p50/60 H.264 streams, with automatic recovery to a lower rendition through Sony VDEC if TEE decoding fails |
+| H.264 decoding | Optional TEE Decoder backend for supported 1080p50/60 H.264 streams, with automatic recovery to a lower rendition through Sony VDEC if TEE decoding fails; a separate early-playback frame-rate fallback can switch a struggling video to 30 FPS |
 | Account playlists | Authenticated YouTube TV playlist discovery, playlist video browsing and continuation-based pagination; Watch Later remains a separate account feed |
 | Playlist thumbnails | Playlist cover images are resolved asynchronously from the first video. A single low-priority thumbnail request runs at a time; the queue is reprioritized for the current viewport and the playlist image cache is kept near the visible grid |
 | Video-grid progress | A red progress strip along a thumbnail's bottom edge shows the saved playback position for VODs with a resume point; watched items without a saved position retain the existing dimming treatment |
 | Subtitle styling | Independent subtitle text/background colors, background opacity, highlight effects and font size, with a live `Lorem Ipsum` preview in Playback Settings |
+| Controller input | Shared input handling maps Sony BD Remote navigation, transport and playback keys onto the same logical controls used by the application |
 | PSL1GHT build | An open-toolchain PSL1GHT target and build documentation alongside the Sony SDK project |
 
 The original account functionality remains optional. Without signing in, the app continues to provide its anonymous browsing and playback paths.
@@ -70,9 +71,9 @@ The original account functionality remains optional. Without signing in, the app
 - Subscribe to channels and browse their latest uploads.
 - Save videos to the local Watch Later list.
 - Keep local watch history and playback positions.
-- Queue VOD downloads in the background. Live streams cannot be downloaded.
-- Completed files are stored on the PS3 HDD. The Sony SDK build uses the application's content directory (`/dev_hdd0/game/YOPCRT001/USRDIR`); if the system content directory cannot be obtained, it falls back to `/dev_hdd0/tmp/crtube_sdk/downloads`. The PSL1GHT build stores downloads in `/dev_hdd0/tmp/crtube/downloads`.
-- **XMB Video column integration is planned for a future release and is not available in this release.** Downloads must currently be accessed through the PS3 file system.
+- Queue VOD downloads in the background. The app checks that a video is not currently LIVE before queuing and checks again in the download worker; LIVE streams are not downloadable.
+- The Downloads category displays completed local files with their video thumbnails and duration badges. Video metadata is retained alongside the downloaded MP4.
+- Completed downloads are kept on the PS3 HDD. The Sony SDK build uses the application's content directory (`/dev_hdd0/game/YOPCRT001/USRDIR`); if the system content directory cannot be obtained, it falls back to `/dev_hdd0/tmp/crtube_sdk/downloads`. The PSL1GHT build stores downloads in `/dev_hdd0/tmp/crtube/downloads`.
 
 ### CRT and SD display
 - The app detects SD output from the active 480-line video mode (480i or 480p). The selected aspect ratio is handled separately: 4:3 uses the compact CRT-oriented layout, while 16:9 keeps the widescreen layout.
@@ -95,6 +96,8 @@ Open **Settings** from the sidebar or press **START** on the home screen. The me
 The home Settings menu controls application-wide preferences. Playback **Options** contains per-video controls such as Quality, Audio, Subtitles, Chapters and Crop to Fill, plus **Playback Settings**. Open **Playback Settings → Subtitle Style** to customize subtitle text color, background color and opacity, highlight effect, and font size. Changes are previewed immediately with `Lorem Ipsum`, including when subtitles are disabled, and are saved independently of the application theme.
 
 ## Controls
+
+The application accepts a DualShock-compatible controller and the Sony BD Remote. The BD Remote maps directional, confirm, back, face, shoulder and transport keys to the same logical controls; Enter/Play/Pause act as Cross, Return as Circle, and Next/Previous or Scan Forward/Reverse act as Right/Left. A BD Remote has no analogue sticks, so stick-only actions such as R3 download and R3 playback statistics are not available from it.
 
 The controls below describe the main navigation and playback screens. Button hints shown
 in the app take precedence if a screen has a context-specific action.
@@ -134,7 +137,7 @@ in the app take precedence if a screen has a context-specific action.
 | **START** | Open playback Options, including Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay; press **START** again or **CIRCLE** to close the panel. Playback Settings contains Subtitle Style |
 | **CIRCLE** | Return to the video list |
 
-Live streams have no seek bar and cannot be downloaded. The description and chapter overlays temporarily take control of navigation while open. Audio tracks, quality and chapters are selected from playback Options; Square is reserved for SponsorBlock Ask actions. Background downloads are saved to the HDD locations listed above; they are not added to the XMB Video column in this release.
+Live streams have no normal VOD seek bar and cannot be downloaded. The description and chapter overlays temporarily take control of navigation while open. Audio tracks, quality and chapters are selected from playback Options; Square is reserved for SponsorBlock Ask actions. Completed downloads appear in the app's Downloads category.
 
 ## Build and installation
 
@@ -151,7 +154,7 @@ For the application architecture, settings, storage files, playback behavior, an
 
 - YouTube changes its internal APIs and client restrictions frequently. Extraction compatibility may require future updates.
 - Live streams use a rolling segment window. They start and exit differently from VOD and do not support normal seeking or background downloading.
-- Completed background downloads remain in the application's HDD storage directory. Automatic registration in the XMB Video column is planned for a future release and is not part of the current release.
+- Download storage depends on the selected build target and available HDD space. Completed MP4 files remain listed in the app's Downloads category.
 - The TEE Decoder is experimental and opt-in. It supports a defined subset of H.264 (8-bit 4:2:0, progressive, CABAC, one slice per picture, up to 1920×1088); unsupported streams continue through Sony VDEC where possible. If TEE decoding fails during playback, the player attempts to switch to a lower rendition using Sony VDEC.
 - Account feeds require a working network connection and valid Google authorization. Access can be revoked from the Google account security page.
 
