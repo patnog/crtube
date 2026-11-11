@@ -61,6 +61,10 @@ int setSubtitleLanguage(const char *languageCode);
 int getOverscanPercent(void);
 int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails
 
+// Screensaver inactivity timeout in seconds: 0=off, otherwise 30..300 in 30-second steps.
+int getScreensaverTimeout(void);
+int setScreensaverTimeout(int seconds);  // 0 on success, -1 for invalid value or persistence failure
+
 // Subtitle vertical offset in virtual screen pixels (-150..+150); positive moves up.
 int getSubtitleOffset(void);
 int setSubtitleOffset(int pixels);  // 0 on success, -1 if persistence fails

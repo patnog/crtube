@@ -19,14 +19,16 @@ INCLUDES := include ../../libs/simple-lib-app/include ../../libs/simple-lib-av/i
 
 CFILES := main.c home.c play.c search.c playlist-picker.c video-grid.c storage.c stream-select.c \
           downloads.c video-export-psl1ght.c extractor.c youtube.c sponsorblock.c \
-          subtitles.c chapters.c settings.c theme.c \
+          subtitles.c chapters.c settings.c theme.c screensaver.c \
           account.c account-oauth.c youtube-tv.c sidebar.c
 
 TITLE     := CRTube
 APPID     := CRTUBE001
 CONTENTID := UP0001-$(APPID)_00-0000000000000000
-ICON0     := $(CURDIR)/ICON0.PNG
-SFOXML    := $(CURDIR)/psl1ght/PARAM.SFO.xml
+ICON0            := $(CURDIR)/ICON0.PNG
+SFOXML           := $(CURDIR)/psl1ght/PARAM.SFO.xml
+PKGFILES         := $(CURDIR)/pkgfiles
+SCREENSAVER_LOGO := $(CURDIR)/res/BOUNCING_LOGO.JPG
 
 PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(firstword $(MAKEFILE_LIST)))))
 ROOT        := $(abspath $(PROJECT_DIR)/../..)
@@ -101,6 +103,9 @@ run: $(BUILD)
 # The conventional `pkg: $(BUILD) $(OUTPUT).pkg` form permits both prerequisites
 # to run concurrently and can start a second object build in this directory.
 pkg: $(BUILD)
+	@test -f $(SCREENSAVER_LOGO) || { echo "Missing screensaver logo: $(SCREENSAVER_LOGO)"; exit 1; }
+	@mkdir -p $(PKGFILES)/USRDIR
+	@cp $(SCREENSAVER_LOGO) $(PKGFILES)/USRDIR/BOUNCING_LOGO.JPG
 	@rm -f $(OUTPUT).pkg $(OUTPUT).gnpdrm.pkg $(CURDIR)/$(PKG_NAME).pkg $(CURDIR)/$(PKG_NAME).gnpdrm.pkg
 	@$(MAKE) --no-print-directory $(OUTPUT).pkg
 	@cp $(OUTPUT).pkg $(CURDIR)/$(PKG_NAME).pkg

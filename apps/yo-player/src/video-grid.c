@@ -945,16 +945,22 @@ static void worker(uint64_t arg)
    }
    case JOB_MORE: {    // append the next page; its thumbnails are picked up lazily by a later JOB_THUMBS
       SearchResults *page = (SearchResults *)malloc(sizeof *page);
-      if (page && grid->fetch(grid->results.continuation, page, grid->fetchUser) == 0) {
-         int base = grid->results.count;
-         if (grid->sortMode != SORT_RELEVANCE || grid->playlistSortMode == PLAYLIST_SORT_AZ)
-            sortSearchResults(page, grid->sortMode, grid->playlistSortMode);
-         appendPage(grid, page);
-         applyMemberOnlyCacheRange(grid, base, grid->results.count);
-         if ((grid->sortMode != SORT_RELEVANCE || grid->playlistSortMode == PLAYLIST_SORT_AZ) &&
-             grid->results.count > base)
-            grid->sortPendingFrom = base;
-         if (grid->results.count == base) grid->results.continuation[0] = 0;   // nothing new: stop paging
+      if (page) {
+         int rc = grid->fetch(grid->results.continuation, page, grid->fetchUser);
+         if (rc == 0) {
+            int base = grid->results.count;
+            if (grid->sortMode != SORT_RELEVANCE || grid->playlistSortMode == PLAYLIST_SORT_AZ)
+               sortSearchResults(page, grid->sortMode, grid->playlistSortMode);
+            appendPage(grid, page);
+            applyMemberOnlyCacheRange(grid, base, grid->results.count);
+            if ((grid->sortMode != SORT_RELEVANCE || grid->playlistSortMode == PLAYLIST_SORT_AZ) &&
+                grid->results.count > base)
+               grid->sortPendingFrom = base;
+            if (grid->results.count == base) grid->results.continuation[0] = 0;   // EOF: stop paging
+         } else {
+            // A failed continuation must not be retried every frame at the end of the grid.
+            grid->results.continuation[0] = 0;
+         }
       }
       free(page);
       break;
@@ -1211,15 +1217,60 @@ static void playlistCountOnly(const char *source, char *out, int cap)
    out[used] = 0;
 }
 
+static void setGridTextLabel(Label *label, int size, const char *text)
+{
+   if (size < 1) size = 1;
+   if (label->size != size) {
+      freeLabel(label);
+      label->size = size;
+   }
+   setLabelText(label, text);
+}
+
+static void resizeGridTextLabel(Label *label, int size)
+{
+   char text[LABEL_MAX_TEXT];
+   strCopy(text, sizeof text, label->text);
+   setGridTextLabel(label, size, text);
+}
+
+// Keep both text lines inside the vertical gap between this thumbnail and the
+// next row. Measure the actual rasterised textures because font metrics and UI
+// scaling do not map exactly to the nominal point size.
+static void fitGridTileText(VideoGrid *grid, int i)
+{
+   Label *title = &grid->rows[i];
+   Label *meta = &grid->metas[i];
+   const int edgeGap = 6;
+   int available = grid->rowStep - grid->thumbH - edgeGap * 2;
+   if (available < 2) return;
+
+   // Preserve the title as much as possible: reduce the channel/meta line first.
+   while (title->tt.tex.h + meta->tt.tex.h > available && meta->size > 8)
+      resizeGridTextLabel(meta, meta->size - 1);
+   while (title->tt.tex.h + meta->tt.tex.h > available && title->size > 8)
+      resizeGridTextLabel(title, title->size - 1);
+}
+
 static void materializeTile(VideoGrid *grid, int i)
 {
    char meta[128];
    const SearchResult *item = &grid->results.items[i];
    char title[LABEL_MAX_TEXT];
-   formatGridTitle(grid, item->title, title, sizeof title, getGfxUiScaleFactor());
-   setLabelText(&grid->rows[i], title);
+   float uiScale = getGfxUiScaleFactor();
+   if (uiScale < 1.0f) uiScale = 1.0f;
+   int titleSize = grid->titleSize;
+   int metaSize = grid->metaSize;
+   if (isGfxSdVideoOutput()) {
+      float titleScale = uiScale >= 1.40f ? 2.0f : 1.5f;
+      titleSize = (int)(grid->titleSize * titleScale / uiScale + 0.5f);
+      metaSize = titleSize;
+   }
+   formatGridTitle(grid, item->title, title, sizeof title, uiScale);
+   setGridTextLabel(&grid->rows[i], titleSize, title);
    composeMeta(meta, sizeof meta, item);
-   setLabelText(&grid->metas[i], meta);
+   setGridTextLabel(&grid->metas[i], metaSize, meta);
+   fitGridTileText(grid, i);
    if (item->isPlaylist) {
       char count[24];
       playlistCountOnly(item->duration, count, sizeof count);
@@ -1769,12 +1820,60 @@ static void drawTile(VideoGrid *grid, int i)
       drawLabelAt(&grid->watchLaterBadge, badgeX + padX, badgeY + padY);
    }
 
-   int textY = ty + grid->thumbH + 6, alpha = watched ? WATCHED_ALPHA : 255;
+   const int textEdgeGap = 6;
+   int textY = ty + grid->thumbH + textEdgeGap, alpha = watched ? WATCHED_ALPHA : 255;
    moveLabel(&grid->rows[i], tx, textY);
    drawLabelAlpha(&grid->rows[i], alpha);
-   // Keep metadata directly below the title with no inter-line gap.
+   // Metadata follows the title; fitGridTileText reserves the same edge gap
+   // below this line before the next row's thumbnail begins.
    moveLabel(&grid->metas[i], tx, textY + grid->rows[i].tt.tex.h);
    drawLabelAlpha(&grid->metas[i], alpha);
+}
+
+static void drawGridScrollbar(const VideoGrid *grid)
+{
+   if (!grid || grid->columns <= 0 || grid->visibleRows <= 0 || grid->rowStep <= 0) return;
+
+   int totalRows = (grid->results.count + grid->columns - 1) / grid->columns;
+   if (totalRows <= grid->visibleRows) return;
+
+   float scale = getGfxUiScaleFactor();
+   if (scale < 1.0f) scale = 1.0f;
+   int trackW = (int)(4.0f * scale + 0.5f);
+   int thumbW = (int)(6.0f * scale + 0.5f);
+   int sideGap = (int)(12.0f * scale + 0.5f);
+   int radius = thumbW / 2;
+   int right = grid->x + grid->columns * grid->tileW + (grid->columns - 1) * grid->gap;
+   int trackX = right + sideGap;
+   int trackY = grid->y;
+   int trackH = (grid->visibleRows - 1) * grid->rowStep +
+                grid->thumbH + grid->tileTextH;
+   if (trackH < 1) return;
+
+   int minimumThumbH = (int)((DUR_SIZE + 8) * scale + 0.5f);
+   int thumbH = (int)((float)trackH * (float)grid->visibleRows / (float)totalRows + 0.5f);
+   if (thumbH < minimumThumbH) thumbH = minimumThumbH;
+   if (thumbH > trackH) thumbH = trackH;
+
+   int maxScroll = totalRows - grid->visibleRows;
+   int maxThumbY = trackH - thumbH;
+   int thumbY = trackY;
+   if (maxScroll > 0 && maxThumbY > 0) {
+      int scroll = grid->scrollRow;
+      if (scroll < 0) scroll = 0;
+      if (scroll > maxScroll) scroll = maxScroll;
+      thumbY += (int)((float)maxThumbY * (float)scroll / (float)maxScroll + 0.5f);
+   }
+
+   // Theme-derived neutral colors: the track remains subdued and the thumb
+   // follows the theme's readable foreground in both dark and light presets.
+   uint32_t bg = activeTheme->appBg;
+   unsigned int luminance = (((bg >> 16) & 255) * 299u + ((bg >> 8) & 255) * 587u + (bg & 255) * 114u) / 1000u;
+   uint32_t thumbColor = luminance > 150u ? 0xFF555555u : 0xFFCCCCCCu;
+   uint32_t trackColor = luminance > 150u ? 0x55808080u : 0x55777777u;
+   fillGfxRoundedRectangleFixed(trackX + (thumbW - trackW) / 2, trackY,
+                                trackW, trackH, radius, trackColor);
+   fillGfxRoundedRectangleFixed(trackX, thumbY, thumbW, thumbH, radius, thumbColor);
 }
 
 void drawVideoGrid(VideoGrid *grid)
@@ -1804,6 +1903,7 @@ void drawVideoGrid(VideoGrid *grid)
          char title[LABEL_MAX_TEXT];
          formatGridTitle(grid, grid->results.items[i].title, title, sizeof title, scale);
          setLabelText(&grid->rows[i], title);
+         fitGridTileText(grid, i);
       }
       grid->membersOnlyBadge.size = isGfxSdVideoOutput()
          ? (int)(DUR_SIZE * 1.5f / sizeScale + 0.5f) : DUR_SIZE;
@@ -1816,6 +1916,7 @@ void drawVideoGrid(VideoGrid *grid)
       int row = i / grid->columns;
       if (row >= grid->scrollRow && row < grid->scrollRow + grid->visibleRows) drawTile(grid, i);
    }
+   drawGridScrollbar(grid);
 }
 
 GridStage            gridStage(const VideoGrid *grid)    { return grid->stage; }

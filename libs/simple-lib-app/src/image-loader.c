@@ -64,6 +64,41 @@ static int32_t imgFree(void *ptr, void *arg)     { (void)arg; free(ptr); return 
 #define PNG_OUTPUT_WIDTH_BYTES(value) ((value).outputWidthByte)
 #endif
 
+// Diagnostic only: run the same PNGDEC create/destroy sequence on the caller
+// thread so it can be compared with the screensaver worker's create call.
+int probePngDecoderCreate(void)
+{
+   CellPngDecMainHandle mainHandle = 0;
+   CellPngDecThreadInParam threadIn;
+   CellPngDecThreadOutParam threadOut;
+   int ret;
+
+   memset(&threadIn, 0, sizeof(threadIn));
+   memset(&threadOut, 0, sizeof(threadOut));
+   threadIn.spuThreadEnable   = CELL_PNGDEC_SPU_THREAD_DISABLE;
+   threadIn.ppuThreadPriority = 512;
+   threadIn.spuThreadPriority = 200;
+   threadIn.cbCtrlMallocFunc  = imgMalloc;
+   threadIn.cbCtrlMallocArg   = NULL;
+   threadIn.cbCtrlFreeFunc    = imgFree;
+   threadIn.cbCtrlFreeArg     = NULL;
+
+   logInfo("[pngdec-diag] main create begin: spu=%u ppu_prio=%u spu_prio=%u malloc_cb=%d free_cb=%d\n",
+           (unsigned)threadIn.spuThreadEnable,
+           (unsigned)threadIn.ppuThreadPriority,
+           (unsigned)threadIn.spuThreadPriority,
+           threadIn.cbCtrlMallocFunc != NULL,
+           threadIn.cbCtrlFreeFunc != NULL);
+   ret = cellPngDecCreate(&mainHandle, &threadIn, &threadOut);
+   logInfo("[pngdec-diag] main create end: rc=0x%08x handle=%d\n",
+           (unsigned)ret, (int)mainHandle);
+   if (ret == CELL_OK) {
+      int destroyRet = cellPngDecDestroy(mainHandle);
+      logInfo("[pngdec-diag] main destroy: rc=0x%08x\n", (unsigned)destroyRet);
+   }
+   return ret == CELL_OK ? 0 : -1;
+}
+
 // Fill a PNG source descriptor for an in-memory buffer. We always decode from
 // memory (the file is read through the VFS first) so images on userland volumes
 // like /exfat0 work -- the SDK codec's own file source can only see cellFs.
@@ -75,7 +110,7 @@ static void pngSrcMem(CellPngDecSrc *s, const void *buf, uint32_t size)
 }
 
 // decodes a PNG from a prepared source into a freshly malloc'd ARGB8888 buffer. returns 0 ok.
-static int decodePng(const CellPngDecSrc *src, ImageBuffer *out)
+static int decodePng(const CellPngDecSrc *src, ImageBuffer *out, int trace)
 {
    CellPngDecMainHandle mainHandle;
    CellPngDecSubHandle  subHandle;
@@ -85,10 +120,12 @@ static int decodePng(const CellPngDecSrc *src, ImageBuffer *out)
    CellPngDecInfo       info;
    CellPngDecInParam    inParam;
    CellPngDecOutParam   outParam;
-   CellPngDecDataOutInfo dataInfo;
+   CellPngDecDataOutInfo dataInfo = { 0 };
    CellPngDecDataCtrlParam ctrl;
    int ret;
 
+   memset(&threadIn, 0, sizeof(threadIn));
+   memset(&threadOut, 0, sizeof(threadOut));
    threadIn.spuThreadEnable   = CELL_PNGDEC_SPU_THREAD_DISABLE;
    threadIn.ppuThreadPriority = 512;
    threadIn.spuThreadPriority = 200;
@@ -97,13 +134,31 @@ static int decodePng(const CellPngDecSrc *src, ImageBuffer *out)
    threadIn.cbCtrlFreeFunc    = imgFree;
    threadIn.cbCtrlFreeArg     = NULL;
 
+   uint64_t stageUs = getTimeUs();
+   if (trace) logInfo("[pngdec-diag] worker create begin: spu=%u ppu_prio=%u spu_prio=%u malloc_cb=%d free_cb=%d\n",
+      (unsigned)threadIn.spuThreadEnable,
+      (unsigned)threadIn.ppuThreadPriority,
+      (unsigned)threadIn.spuThreadPriority,
+      threadIn.cbCtrlMallocFunc != NULL,
+      threadIn.cbCtrlFreeFunc != NULL);
    ret = cellPngDecCreate(&mainHandle, &threadIn, &threadOut);
+   if (trace) logInfo("[pngdec-diag] worker create end: rc=0x%08x handle=%d ms=%llu\n",
+      (unsigned)ret, (int)mainHandle,
+      (unsigned long long)((getTimeUs() - stageUs) / 1000ULL));
    if (ret != CELL_OK) return -1;
 
+   stageUs = getTimeUs();
+   if (trace) logInfo("[image-loader] PNG cellPngDecOpen begin\n");
    ret = cellPngDecOpen(mainHandle, &subHandle, src, &openInfo);
+   if (trace) logInfo("[image-loader] PNG cellPngDecOpen end rc=0x%x ms=%llu\n", ret,
+      (unsigned long long)((getTimeUs() - stageUs) / 1000ULL));
    if (ret != CELL_OK) { cellPngDecDestroy(mainHandle); return -1; }
 
+   stageUs = getTimeUs();
+   if (trace) logInfo("[image-loader] PNG cellPngDecReadHeader begin\n");
    ret = cellPngDecReadHeader(mainHandle, subHandle, &info);
+   if (trace) logInfo("[image-loader] PNG cellPngDecReadHeader end rc=0x%x ms=%llu\n", ret,
+      (unsigned long long)((getTimeUs() - stageUs) / 1000ULL));
    if (ret != CELL_OK) { cellPngDecClose(mainHandle, subHandle); cellPngDecDestroy(mainHandle); return -1; }
 
    // The PNG codec has no downscale, so an oversized PNG can't be made into a
@@ -124,7 +179,11 @@ static int decodePng(const CellPngDecSrc *src, ImageBuffer *out)
    inParam.outputAlphaSelect = hasAlpha ? CELL_PNGDEC_STREAM_ALPHA : CELL_PNGDEC_FIX_ALPHA;
    inParam.outputColorAlpha = 0xff;
 
+   stageUs = getTimeUs();
+   if (trace) logInfo("[image-loader] PNG cellPngDecSetParameter begin\n");
    ret = cellPngDecSetParameter(mainHandle, subHandle, &inParam, &outParam);
+   if (trace) logInfo("[image-loader] PNG cellPngDecSetParameter end rc=0x%x ms=%llu\n", ret,
+      (unsigned long long)((getTimeUs() - stageUs) / 1000ULL));
    if (ret != CELL_OK) { cellPngDecClose(mainHandle, subHandle); cellPngDecDestroy(mainHandle); return -1; }
 
    uint32_t w = outParam.outputWidth;
@@ -135,7 +194,11 @@ static int decodePng(const CellPngDecSrc *src, ImageBuffer *out)
    if (!buf) { cellPngDecClose(mainHandle, subHandle); cellPngDecDestroy(mainHandle); return -1; }
 
    ctrl.outputBytesPerLine = stride;
+   stageUs = getTimeUs();
+   if (trace) logInfo("[image-loader] PNG cellPngDecDecodeData begin (%ux%u, stride=%u)\n", w, h, stride);
    ret = cellPngDecDecodeData(mainHandle, subHandle, (uint8_t *)buf, &ctrl, &dataInfo);
+   if (trace) logInfo("[image-loader] PNG cellPngDecDecodeData end rc=0x%x status=%d ms=%llu\n", ret,
+      IMAGE_DECODE_STATUS(dataInfo), (unsigned long long)((getTimeUs() - stageUs) / 1000ULL));
    cellPngDecClose(mainHandle, subHandle);
    cellPngDecDestroy(mainHandle);
 
@@ -274,46 +337,80 @@ decode_failed:
    return -1;
 }
 
-static int decodeImageMem(const void *data, uint32_t size, ImageBuffer *out);
+static int decodeImageMem(const void *data, uint32_t size, ImageBuffer *out, int trace);
 
 // Reads a file through the VFS into a heap buffer and decodes it from memory.
 // Going via the VFS (rather than the SDK codec's own cellFs file source) is what
 // lets images on userland volumes such as /exfat0 decode -- the codec file source
 // can only see kernel cellFs devices. Works for cellFs paths too. 0 / -1.
-static int decodeImageToBuffer(const char *path, ImageBuffer *out)
+static int decodeImageToBuffer(const char *path, ImageBuffer *out, int trace)
 {
+   uint64_t stageUs = getTimeUs();
    VfsStat st;
-   if (statPath(path, &st) != 0) { logError("[image-loader] stat failed: %s\n", path); return -1; }
+   if (trace) logInfo("[image-loader] file stat begin: %s\n", path);
+   int statRc = statPath(path, &st);
+   if (trace) logInfo("[image-loader] file stat end rc=%d ms=%llu size=%llu\n", statRc,
+      (unsigned long long)((getTimeUs() - stageUs) / 1000ULL),
+      statRc == 0 ? (unsigned long long)st.size : 0ULL);
+   if (statRc != 0) { logError("[image-loader] stat failed: %s\n", path); return -1; }
    uint32_t size = (uint32_t)st.size;
    if (size == 0) { logError("[image-loader] empty file: %s\n", path); return -1; }
 
    VfsFile file;
-   if (openFs(path, VFS_O_RDONLY, &file) != 0) { logError("[image-loader] open failed: %s\n", path); return -1; }
+   stageUs = getTimeUs();
+   if (trace) logInfo("[image-loader] file open begin\n");
+   int openRc = openFs(path, VFS_O_RDONLY, &file);
+   if (trace) logInfo("[image-loader] file open end rc=%d ms=%llu\n", openRc,
+      (unsigned long long)((getTimeUs() - stageUs) / 1000ULL));
+   if (openRc != 0) { logError("[image-loader] open failed: %s\n", path); return -1; }
 
    uint8_t *data = (uint8_t *)malloc(size);
    if (!data) { closeFs(&file); logError("[image-loader] out of memory (%u bytes): %s\n", size, path); return -1; }
 
    uint64_t got = 0;
+   stageUs = getTimeUs();
+   if (trace) logInfo("[image-loader] file read begin (%u bytes)\n", size);
    while (got < size) {
       int64_t r = readFs(&file, data + got, (uint64_t)size - got);
       if (r <= 0) break;
       got += (uint64_t)r;
    }
+   if (trace) logInfo("[image-loader] file read end bytes=%llu/%u ms=%llu\n",
+      (unsigned long long)got, size, (unsigned long long)((getTimeUs() - stageUs) / 1000ULL));
+   stageUs = getTimeUs();
+   if (trace) logInfo("[image-loader] file close begin\n");
    closeFs(&file);
+   if (trace) logInfo("[image-loader] file close end ms=%llu\n",
+      (unsigned long long)((getTimeUs() - stageUs) / 1000ULL));
    if (got != size) { free(data); logError("[image-loader] short read %llu/%u: %s\n", (unsigned long long)got, size, path); return -1; }
 
-   int rc = decodeImageMem(data, size, out);
+   stageUs = getTimeUs();
+   if (trace) logInfo("[image-loader] memory decoder begin (%u bytes)\n", size);
+   int rc = decodeImageMem(data, size, out, trace);
+   if (trace) logInfo("[image-loader] memory decoder end rc=%d size=%dx%d ms=%llu\n", rc,
+      out->w, out->h, (unsigned long long)((getTimeUs() - stageUs) / 1000ULL));
    free(data);
    return rc;
 }
 
+// Public heap-only decode entry point for independent background tasks.
+// It does not touch RSX/VRAM; callers must upload on the main thread.
+int decodeImageFileToBuffer(const char *path, ImageBuffer *out)
+{
+   if (!path || !out) return -1;
+   out->pixels = NULL;
+   out->w = out->h = out->pitch = 0;
+   return decodeImageToBuffer(path, out, 1);
+}
+
 // dispatches an in-memory image by sniffing its magic bytes (PNG \x89PNG, JPEG \xFF\xD8).
 // returns 0 on success, -1 otherwise. No temp file / no filesystem touch.
-static int decodeImageMem(const void *data, uint32_t size, ImageBuffer *out)
+static int decodeImageMem(const void *data, uint32_t size, ImageBuffer *out, int trace)
 {
    const unsigned char *b = (const unsigned char *)data;
+   if (trace) logInfo("[image-loader] decoder format check (%u bytes)\n", size);
    if (size >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G')
-      { CellPngDecSrc s; pngSrcMem(&s, data, size); return decodePng(&s, out); }
+      { CellPngDecSrc s; pngSrcMem(&s, data, size); return decodePng(&s, out, trace); }
    if (size >= 2 && b[0] == 0xFF && b[1] == 0xD8)
       return decodeJpeg(data, size, out);
 
@@ -359,7 +456,7 @@ GfxTexture loadGfxTexture(const char *path)
 {
    ImageBuffer buf;
    GfxTexture zero = { 0, 0, 0, 0 };
-   if (decodeImageToBuffer(path, &buf) != 0) return zero;
+   if (decodeImageToBuffer(path, &buf, 0) != 0) return zero;
    GfxTexture t = uploadImageBuffer(&buf);
    freeImageBuffer(&buf);
    return t;
@@ -371,7 +468,7 @@ GfxTexture loadGfxTextureMem(const void *data, uint32_t size)
 {
    ImageBuffer buf;
    GfxTexture zero = { 0, 0, 0, 0 };
-   if (decodeImageMem(data, size, &buf) != 0) return zero;
+   if (decodeImageMem(data, size, &buf, 0) != 0) return zero;
    GfxTexture t = uploadImageBuffer(&buf);
    freeImageBuffer(&buf);
    return t;
@@ -398,6 +495,15 @@ static int      reqFromMemory;
 static uint32_t reqGen;                // newest request id
 static int      reqPending;            // a new request awaits the worker
 
+// Reserved high-priority lane. It shares the decoder worker but has an independent
+// request/result slot, so a screensaver request cannot steal a grid/playback result.
+static char     priorityReqPath[MAX_PATH_LEN];
+static uint32_t priorityReqGen;
+static int      priorityReqPending;
+static ImageBuffer priorityResBuf;
+static uint32_t priorityResGen;
+static int      priorityResState;
+
 static ImageBuffer resBuf;             // decoded pixels for resGen
 static uint32_t    resGen;             // generation resBuf/resState belong to
 static int         resState;           // 0 none, 1 ok, -1 failed
@@ -409,10 +515,16 @@ static void imgWorker(uint64_t arg)
       char     path[MAX_PATH_LEN];
       uint8_t *data = NULL;
       uint32_t dataSize = 0, gen = 0;
-      int      fromMemory = 0, have = 0;
+      int      fromMemory = 0, have = 0, priority = 0;
 
       lock(&imgLock);
-      if (reqPending) {
+      if (priorityReqPending) {
+         strCopy(path, sizeof path, priorityReqPath);
+         gen = priorityReqGen;
+         priorityReqPending = 0;
+         priority = 1;
+         have = 1;
+      } else if (reqPending) {
          strCopy(path, sizeof path, reqPath);
          gen = reqGen;
          fromMemory = reqFromMemory;
@@ -431,24 +543,33 @@ static void imgWorker(uint64_t arg)
       int ok;
       if (fromMemory) {
          logInfo("[image-loader] memory decode start (%u bytes)\n", dataSize);
-         int rc = data ? decodeImageMem(data, dataSize, &b) : -1;
+         int rc = data ? decodeImageMem(data, dataSize, &b, 0) : -1;
          ok = rc == 0;
          logInfo("[image-loader] memory decode returned rc=%d size=%dx%d\n", rc, b.w, b.h);
          free(data);
       } else {
-         ok = decodeImageToBuffer(path, &b) == 0;
+         ok = decodeImageToBuffer(path, &b, 0) == 0;
       }
 
       lock(&imgLock);
-      if (gen == reqGen) {
+      if (priority) {
+         if (gen == priorityReqGen) {
+            if (priorityResState == 1) freeImageBuffer(&priorityResBuf);
+            priorityResBuf = b;
+            priorityResGen = gen;
+            priorityResState = ok ? 1 : -1;
+         } else if (ok) {
+            freeImageBuffer(&b);
+         }
+      } else if (gen == reqGen) {
          // still the request the main thread is waiting on
          if (resState == 1) freeImageBuffer(&resBuf);  // drop an unconsumed prior result
          resBuf   = b;
          resGen   = gen;
          resState = ok ? 1 : -1;
-      } else {
+      } else if (ok) {
          // superseded while decoding: throw it away
-         if (ok) freeImageBuffer(&b);
+         freeImageBuffer(&b);
       }
       unlock(&imgLock);
    }
@@ -488,6 +609,53 @@ void requestImageAsync(const char *path)
    strCopy(reqPath, sizeof reqPath, path);
    reqPending = 1;
    unlock(&imgLock);
+}
+
+int requestImagePriorityAsync(const char *path)
+{
+   if (!path || !path[0]) return -1;
+   ensureWorker();
+   if (!workerStarted) return -1;
+
+   lock(&imgLock);
+   priorityReqGen++;
+   priorityReqPending = 0;
+   if (priorityResState == 1) freeImageBuffer(&priorityResBuf);
+   priorityResState = 0;
+   strCopy(priorityReqPath, sizeof priorityReqPath, path);
+   priorityReqPending = 1;
+   unlock(&imgLock);
+   return 0;
+}
+
+void cancelImagePriorityAsync(void)
+{
+   if (!imgInit) return;
+   lock(&imgLock);
+   priorityReqGen++;
+   priorityReqPending = 0;
+   if (priorityResState == 1) freeImageBuffer(&priorityResBuf);
+   priorityResState = 0;
+   unlock(&imgLock);
+}
+
+int pollImagePriorityAsync(ImageBuffer *out)
+{
+   int r = 0;
+   if (!out || !imgInit) return 0;
+   lock(&imgLock);
+   if (priorityResState != 0 && priorityResGen == priorityReqGen) {
+      if (priorityResState == 1) {
+         *out = priorityResBuf;
+         priorityResBuf.pixels = NULL;
+         r = 1;
+      } else {
+         r = -1;
+      }
+      priorityResState = 0;
+   }
+   unlock(&imgLock);
+   return r;
 }
 
 int requestImageMemAsync(const void *data, uint32_t size)

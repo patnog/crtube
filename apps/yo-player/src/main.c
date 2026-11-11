@@ -23,6 +23,9 @@
 #include "font.h"
 #include "screen-manager.h"
 #include "screens/home.h"
+#include "screens/play.h"
+#include "screensaver.h"
+#include "thread.h"
 #include "storage.h"
 #include "account.h"
 #include "settings.h"
@@ -182,19 +185,78 @@ int main(int argc, char **argv)
    openHome();       // boot into the home screen (trending categories)
    BOOT_MARK("home\n");
 
+   uint64_t lastUserActivityUs = getTimeUs();
+   int screensaverReleaseGuard = 0;
+   int screensaverTimeoutLogged = 0;
+
    while (!appExitRequested) {
       appPoll();
       applyPendingTeeDisableRequest();
       updateVideoExport();   // right after the sysutil pump, which is what delivers its results
       updatePad();
-      updateScreen();
+
+      // Treat both digital controls and deliberate analogue-stick movement as activity.
+      unsigned downButtons = getPadDownButtons();
+      Stick leftStick = getPadLeftStick();
+      Stick rightStick = getPadRightStick();
+      int hasPadActivity = downButtons != 0 ||
+         leftStick.x < -20 || leftStick.x > 20 ||
+         leftStick.y < -20 || leftStick.y > 20 ||
+         rightStick.x < -20 || rightStick.x > 20 ||
+         rightStick.y < -20 || rightStick.y > 20;
+      uint64_t nowUs = getTimeUs();
+      updateScreenSaver(); // also polls the asynchronous logo decode before activation
+
+      if (isScreenSaverActive()) {
+         if (hasPadActivity) {
+            // While paused playback is underneath the saver, Cross is the one
+            // input that both dismisses the saver and resumes the video.
+            if (isPadButtonPressed(PAD_BTN_CROSS))
+               resumePlaybackFromScreenSaver();
+            stopScreenSaver();
+            lastUserActivityUs = nowUs;
+            screensaverReleaseGuard = 1;
+         }
+      } else if (screensaverReleaseGuard) {
+         // Do not let the control used to dismiss the saver leak into the screen underneath.
+         if (!hasPadActivity) screensaverReleaseGuard = 0;
+      } else {
+         if (hasPadActivity) {
+            lastUserActivityUs = nowUs;
+            screensaverTimeoutLogged = 0;
+         }
+
+         int timeoutSeconds = getScreensaverTimeout();
+         int eligibleScreen = playScreen.status == SCREEN_TERMINATED ||
+            isPlaybackPausedForScreenSaver();
+         if (eligibleScreen && timeoutSeconds > 0 &&
+             nowUs - lastUserActivityUs >= (uint64_t)timeoutSeconds * 1000000ULL) {
+            if (!screensaverTimeoutLogged) {
+               logInfo("[screensaver] idle timeout reached (%d s)\n", timeoutSeconds);
+               screensaverTimeoutLogged = 1;
+            }
+            startScreenSaver();
+         }
+      }
+
+      // Keep the underlying screen and its input handlers untouched while the overlay is visible.
+      // Background workers continue independently; updateScreen is resumed after dismissal.
+      if (!isScreenSaverActive() && !screensaverReleaseGuard)
+         updateScreen();
 
       beginGfxFrame();
-      clearGfx(activeTheme->appBg);
-      drawScreen();
+      if (isScreenSaverActive()) {
+         drawScreenSaver();
+      } else {
+         clearGfx(activeTheme->appBg);
+         drawScreen();
+      }
       endGfxFrame();
+
    }
 
+   stopScreenSaver();
+   termScreenSaver();
    changeScreen(NULL);
    applyPendingTeeDisableRequest();
    shutdownAccount();     // stop a sign-in poll before the http layer goes away

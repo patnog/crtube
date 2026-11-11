@@ -244,7 +244,7 @@ static int         panelConfirmHint, panelBackHint;
 #define SETTINGS_ROW_HEIGHT 38
 #define SETTINGS_ROW_TOP 56
 #define SETTINGS_ROW_STEP 43
-#define SETTINGS_ROW_COUNT 8
+#define SETTINGS_ROW_COUNT 9
 static Label settingsTitle, settingsLabels[SETTINGS_ROW_COUNT], settingsValues[SETTINGS_ROW_COUNT];
 static ButtonHints settingsHints;
 #define THEME_PANEL_W 860
@@ -279,7 +279,7 @@ static Label sponsorActionLabels[3];
 static ButtonHints sponsorHints;
 static ButtonRepeat sponsorNavigateRepeat;
 static ButtonRepeat settingsNavigateRepeat;
-static ButtonRepeat settingsOverscanRepeat;
+static ButtonRepeat settingsOverscanRepeat, settingsScreensaverRepeat;
 static ButtonRepeat exitConfirmNavigateRepeat;
 static Label exitConfirmTitle, exitConfirmMessage, exitConfirmChoices[2];
 static ButtonHints exitConfirmHints;
@@ -519,11 +519,15 @@ static int homeFetch(const char *token, SearchResults *out, void *user)
    if (home.category == HOME_DOWNLOADS)
       return getDownloadedVideos(out, home.playlistSort == PLAYLIST_SORT_AZ) >= 0 ? 0 : -1;
    if (home.category == HOME_PLAYLIST_CONTENTS) {
-      home.playlistError = 0;
+      int firstPage = token == NULL || token[0] == 0;
       int rc = getAccountPlaylistVideos(home.playlistId, token, out);
-      home.playlistError = rc < 0 ? rc : 0;
-      if (rc == 0 && out->count == 0)
-         home.playlistError = PLAYLIST_FETCH_UNAVAILABLE;
+      // A continuation that yields no new items is the normal end-of-playlist signal.
+      // Only the initial browse can make the whole playlist screen an access error.
+      if (firstPage) {
+         home.playlistError = rc < 0 ? rc : 0;
+         if (rc == 0 && out->count == 0)
+            home.playlistError = PLAYLIST_FETCH_UNAVAILABLE;
+      }
       return rc;
    }
    if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY)
@@ -1685,6 +1689,7 @@ static void updateSettingsPanel(void)
    else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
       home.settingsSelected = (home.settingsSelected + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
    int overscanDelta = 0;
+   int screensaverDelta = 0;
    if (home.settingsSelected == 3) {
       if (settingsOverscanRepeat.timer == 0)
          settingsOverscanRepeat.timer = sys_time_get_system_time();
@@ -1694,9 +1699,20 @@ static void updateSettingsPanel(void)
       settingsOverscanRepeat.timer = 0;
       settingsOverscanRepeat.repeats = 0;
    }
+   if (home.settingsSelected == 8) {
+      if (settingsScreensaverRepeat.timer == 0)
+         settingsScreensaverRepeat.timer = sys_time_get_system_time();
+      if (isRepeatDue(&settingsScreensaverRepeat, getPadButtonState(PAD_BTN_LEFT))) screensaverDelta = -1;
+      else if (isRepeatDue(&settingsScreensaverRepeat, getPadButtonState(PAD_BTN_RIGHT))) screensaverDelta = 1;
+   } else {
+      settingsScreensaverRepeat.timer = 0;
+      settingsScreensaverRepeat.repeats = 0;
+   }
+   if (home.settingsSelected == 8 && isPadButtonPressed(PAD_BTN_CROSS))
+      screensaverDelta = 1;
 
    if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
-       isPadButtonPressed(PAD_BTN_RIGHT) || overscanDelta) {
+       isPadButtonPressed(PAD_BTN_RIGHT) || overscanDelta || screensaverDelta) {
       if (home.settingsSelected == 0 || home.settingsSelected == 1) {
          int enabled = home.settingsSelected == 0 ? getAutoplayEnabled() : getEnable1080p60();
          if (isPadButtonPressed(PAD_BTN_LEFT)) enabled = 0;
@@ -1724,6 +1740,11 @@ static void updateSettingsPanel(void)
          home.themeCustomOpen = 0;
          home.themeConfirmOpen = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
+      } else if (home.settingsSelected == 8 && screensaverDelta) {
+         int timeout = getScreensaverTimeout();
+         int option = timeout == 0 ? 0 : timeout / 30;
+         option = (option + (screensaverDelta > 0 ? 1 : 10)) % 11;
+         setScreensaverTimeout(option * 30);
       }
    }
 }
@@ -1794,6 +1815,11 @@ static void drawSettingsPanel(void)
    setLabelIfChanged(&settingsValues[5], "Configure");
    setLabelIfChanged(&settingsValues[6], "Configure");
    setLabelIfChanged(&settingsValues[7], "Configure");
+   char screensaverValue[16];
+   int screensaverSeconds = getScreensaverTimeout();
+   if (screensaverSeconds == 0) strCopy(screensaverValue, sizeof screensaverValue, "Off");
+   else snprintf(screensaverValue, sizeof screensaverValue, "%ds", screensaverSeconds);
+   setLabelIfChanged(&settingsValues[8], screensaverValue);
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
    int x = (home.screenW - panelW) / 2;
@@ -2355,7 +2381,8 @@ static void initHome(void)
    addButtonHint(&themeHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
    static const char *settingNames[SETTINGS_ROW_COUNT] = {
       "Autoplay", "Enable 1080p60 (experimental)", "UI Scaling",
-      "Overscan", "Content Region", "SponsorBlock", "Download settings", "Themes"
+      "Overscan", "Content Region", "SponsorBlock", "Download settings", "Themes",
+      "Screensaver timeout"
    };
    for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
       initLabel(&settingsLabels[i], &uiFont, 0, 0, settingsTextW - 220, AUTO, 20,
@@ -2989,8 +3016,30 @@ static void updateHome(void)
    }
    if (isPadButtonPressed(PAD_BTN_CROSS)) {
       markWatched(selected->videoId);
-      stopVideoGrid(&home.grid);   // no per-call http fetch may overlap the http media stream during playback
-      playVideo(selected->videoId);
+      if (home.category == HOME_PLAYLIST_CONTENTS ||
+          home.category == HOME_LOCAL_PLAYLIST_CONTENTS ||
+          home.category == HOME_WATCHLATER) {
+         char queue[MAX_SEARCH_RESULTS][16];
+         int queueCount = 0, queueIndex = -1;
+         const SearchResults *results = gridResults(&home.grid);
+         if (results) {
+            for (int i = 0; i < results->count && queueCount < MAX_SEARCH_RESULTS; i++) {
+               const SearchResult *item = &results->items[i];
+               if (!item->videoId[0] || item->isPlaylist || item->isLive) continue;
+               strCopy(queue[queueCount], sizeof queue[queueCount], item->videoId);
+               if (strcmp(item->videoId, selected->videoId) == 0) queueIndex = queueCount;
+               queueCount++;
+            }
+         }
+         stopVideoGrid(&home.grid);
+         if (queueIndex >= 0)
+            playVideoWithQueue(selected->videoId, queue, queueCount, queueIndex);
+         else
+            playVideo(selected->videoId);
+      } else {
+         stopVideoGrid(&home.grid);   // no per-call http fetch may overlap the http media stream during playback
+         playVideo(selected->videoId);
+      }
    }
 }
 

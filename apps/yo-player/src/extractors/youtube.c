@@ -1959,15 +1959,15 @@ static int fetchWebPlaylistVideos(const char *playlistId, const char *continuati
    if (!anonymous)
       logInfo("[yt] playlist web parsed id=%s videos=%d continuation=%s\n",
               playlistId, out->count, out->continuation[0] ? "yes" : "no");
-   if (out->count == 0 && !out->continuation[0]) {
-      logWarn("[yt] playlist returned no videos id=%s\n", playlistId);
+   if (out->count == 0 && !out->continuation[0] && !continuation) {
+      // An empty first browse is an actual failure; an empty continuation is simply EOF.
+      logWarn("[yt] playlist first page returned no videos id=%s\n", playlistId);
       int error = classifyPlaylistError(resp, status);
-      if (error != PLAYLIST_FETCH_UNAVAILABLE ||
-          strstr(resp, "playlist") || strstr(resp, "LOGIN_REQUIRED") || strstr(resp, "Members only")) {
-         free(resp);
-         return error;
-      }
+      free(resp);
+      return error;
    }
+   if (out->count == 0 && !out->continuation[0] && continuation)
+      logInfo("[yt] playlist reached end id=%s\n", playlistId);
    free(resp);
    return 0;
 }

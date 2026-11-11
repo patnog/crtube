@@ -156,6 +156,9 @@ static int requestedIsLocal;
 // Snapshot of the Downloads grid order at playback start. It deliberately does not consult
 // the live grid while the player is open, so changing sort later cannot reorder navigation.
 #define DOWNLOAD_QUEUE_CAP MAX_SEARCH_RESULTS
+static char playlistQueue[DOWNLOAD_QUEUE_CAP][16];
+static int playlistQueueCount;
+static int playlistQueueCursor;
 static char downloadedQueue[DOWNLOAD_QUEUE_CAP][16];
 static int downloadedQueueCount;
 static int downloadedQueueCursor;
@@ -1349,6 +1352,19 @@ static void autoplayWorker(uint64_t arg)
    exitThread();
 }
 
+static void launchVideo(const char *input, int addToNavigation);
+
+static int launchPlaylistQueueIndex(int index)
+{
+   if (index < 0 || index >= playlistQueueCount) return 0;
+   playlistQueueCursor = index;
+   char videoId[16];
+   strCopy(videoId, sizeof videoId, playlistQueue[index]);
+   popScreen();
+   launchVideo(videoId, 0);
+   return 1;
+}
+
 static int launchDownloadedQueueIndex(int index)
 {
    if (index < 0 || index >= downloadedQueueCount) return 0;
@@ -1377,6 +1393,30 @@ static void launchVideo(const char *input, int addToNavigation)
 
 void playVideo(const char *input)
 {
+   playlistQueueCount = 0;
+   playlistQueueCursor = -1;
+   launchVideo(input, 1);
+}
+
+void playVideoWithQueue(const char *input, const char videoIds[][16], int count, int index)
+{
+   if (!input || !input[0] || !videoIds || count <= 0 || index < 0 || index >= count) {
+      playVideo(input);
+      return;
+   }
+   if (count > DOWNLOAD_QUEUE_CAP) count = DOWNLOAD_QUEUE_CAP;
+   playlistQueueCount = 0;
+   playlistQueueCursor = -1;
+   for (int i = 0; i < count; i++) {
+      if (!videoIds[i][0]) continue;
+      strCopy(playlistQueue[playlistQueueCount], sizeof playlistQueue[0], videoIds[i]);
+      if (i == index) playlistQueueCursor = playlistQueueCount;
+      playlistQueueCount++;
+   }
+   if (playlistQueueCount == 0 || playlistQueueCursor < 0) {
+      playlistQueueCount = 0;
+      playlistQueueCursor = -1;
+   }
    launchVideo(input, 1);
 }
 
@@ -1612,6 +1652,19 @@ static void showFullPlaybackHud(void)
    state.controlsDismissed = 0;
    state.controlsShownUs = now;
    state.hudShownUs = now;
+}
+
+int isPlaybackPausedForScreenSaver(void)
+{
+   return state.stage == STAGE_PLAYING && state.player && isVideoPaused(state.player);
+}
+
+int resumePlaybackFromScreenSaver(void)
+{
+   if (!isPlaybackPausedForScreenSaver()) return 0;
+   setVideoPaused(state.player, 0);
+   showFullPlaybackHud();
+   return 1;
 }
 
 // Rebuild the right-side playback HUD only on input/state changes, never in the render loop.
@@ -2349,7 +2402,14 @@ static void handlePlaybackInput(void)
       if (requestedIsLocal) {
          if (downloadedQueueCount > 0 && downloadedQueueCursor > 0) { launchDownloadedQueueIndex(downloadedQueueCursor - 1); return; }
          else showToast("No previous download");
+      } else if (playlistQueueCount > 0 && playlistQueueCursor > 0) {
+         launchPlaylistQueueIndex(playlistQueueCursor - 1);
+         return;
       } else {
+         if (playlistQueueCount > 0) {
+            playlistQueueCount = 0;
+            playlistQueueCursor = -1;
+         }
          char previousId[12];
          if (previousPlaybackId(previousId)) { popScreen(); launchVideo(previousId, 0); return; }
          showToast("No previous video");
@@ -2360,10 +2420,13 @@ static void handlePlaybackInput(void)
       if (requestedIsLocal) {
          if (downloadedQueueCount > 0 && downloadedQueueCursor + 1 < downloadedQueueCount) { launchDownloadedQueueIndex(downloadedQueueCursor + 1); return; }
          else showToast("No next download");
+      } else if (playlistQueueCount > 0 && playlistQueueCursor + 1 < playlistQueueCount) {
+         launchPlaylistQueueIndex(playlistQueueCursor + 1);
+         return;
       } else {
          char nextId[12];
          if (state.nextThreadActive || state.nextNoticeVisible) showToast("Next video is already loading");
-         else if (nextPlaybackId(nextId)) { popScreen(); launchVideo(nextId, 0); return; }
+         else if (playlistQueueCount == 0 && nextPlaybackId(nextId)) { popScreen(); launchVideo(nextId, 0); return; }
          else {
             state.nextAttempted = 1;
             state.nextWorkerDone = 0;
@@ -3594,6 +3657,10 @@ static void updatePlay(void)
       strCopy(nextId, sizeof nextId, state.nextVideoId);
       state.nextNoticeVisible = 0;
       if (state.nextThumbTexture.offset) retireGfxTexture(&state.nextThumbTexture);
+      if (playlistQueueCount > 0) {
+         playlistQueueCount = 0;
+         playlistQueueCursor = -1;
+      }
       popScreen();
       launchVideo(nextId, 1);
       return;
@@ -3688,10 +3755,21 @@ static void updatePlay(void)
       }
    }
 
+   // Playlist order takes precedence over the global autoplay setting.
+   if (state.stage == STAGE_PLAYING && state.player && !requestedIsLocal &&
+       playlistQueueCount > 0 && playlistQueueCursor >= 0 &&
+       playlistQueueCursor + 1 < playlistQueueCount &&
+       (!state.isLive || state.liveEnded) && isVideoEnded(state.player) &&
+       !state.nextAttempted) {
+      state.nextAttempted = 1;
+      launchPlaylistQueueIndex(playlistQueueCursor + 1);
+      return;
+   }
+
    // With autoplay disabled, ending a VOD behaves like pressing Circle:
    // return to the screen that launched this video instead of requesting /next.
    if (state.stage == STAGE_PLAYING && state.player && (!state.isLive || state.liveEnded) &&
-       isVideoEnded(state.player) && !getAutoplayEnabled()) {
+       isVideoEnded(state.player) && !getAutoplayEnabled() && !state.nextAttempted) {
       popScreen();
       return;
    }

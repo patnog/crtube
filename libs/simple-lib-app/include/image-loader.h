@@ -37,6 +37,13 @@ typedef struct {
 // one's result is discarded when it finishes). Lazily starts the worker.
 void requestImageAsync(const char *path);
 
+// Queues a high-priority file decode on the same worker used by normal image requests.
+// High-priority work is selected before pending normal work, without discarding it.
+// A decode already in progress is allowed to finish before the priority request starts.
+int requestImagePriorityAsync(const char *path);
+void cancelImagePriorityAsync(void);
+int pollImagePriorityAsync(ImageBuffer *out);
+
 // Requests an async decode of an in-memory PNG/JPEG buffer. The input is copied, so the caller may
 // release or reuse its source immediately. Returns 0 when queued, -1 on allocation/worker failure.
 int requestImageMemAsync(const void *data, uint32_t size);
@@ -49,6 +56,13 @@ void cancelImageAsync(void);
 // out->pixels) when it finished decoding; 0 while still decoding; -1 once if it
 // failed. Results from superseded requests are never reported.
 int pollImageAsync(ImageBuffer *out);
+
+// Decodes a file into a heap buffer without touching RSX/VRAM.
+// Intended for independent background tasks; upload on the main thread.
+int decodeImageFileToBuffer(const char *path, ImageBuffer *out);
+
+// Diagnostic probe: calls PNGDEC create/destroy on the calling thread.
+int probePngDecoderCreate(void);
 
 // Frees a buffer handed back by pollImageAsync().
 void freeImageBuffer(ImageBuffer *buf);

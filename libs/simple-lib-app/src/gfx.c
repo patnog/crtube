@@ -3,6 +3,7 @@
 #include "gfx.h"
 #include "colors.h"
 #include "dbg.h"
+#include "image-loader.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -391,7 +392,8 @@ int initGfx(GfxVsync vsync)
       return 0;
    }
 
-   cellSysmoduleLoadModule(CELL_SYSMODULE_PNGDEC);
+   ret = cellSysmoduleLoadModule(CELL_SYSMODULE_PNGDEC);
+   logInfo("[pngdec-diag] module load: rc=0x%08x\n", (unsigned)ret);
 
    // allocate host-side command buffer pool
    void *hostAddr = memalign(1024 * 1024, HOST_MEM_SIZE);

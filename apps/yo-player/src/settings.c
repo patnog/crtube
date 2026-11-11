@@ -44,6 +44,7 @@ static const char *DEFAULT_SETTINGS =
    "# Each category accepts skip, ask, or keep.\n"
    "\n"
    "overscan=0\n"
+   "screensaver-timeout=30\n"
    "# output zoom in percent (-15 to +15); 0 keeps the original framing\n"
    "subtitle-offset=0\n"
    "# subtitle vertical offset in virtual screen pixels (-150 to +150); positive moves up, negative moves down\n"
@@ -86,6 +87,7 @@ static int autoplayEnabled = 1;
 static int enable1080p60 = 0;
 static char subtitleLanguage[12] = "en";
 static int overscanPercent = 0;
+static int screensaverTimeout = 30;
 static int subtitleOffsetPixels = 0;
 static int subtitleStyle[5] = { 0, 0, 3, 0, 2 };
 static const char *SUBTITLE_STYLE_KEYS[5] = { "subtitle-text-color", "subtitle-background-color", "subtitle-background-opacity", "subtitle-highlight", "subtitle-font-size" };
@@ -174,6 +176,7 @@ void loadSettings(void)
 {
    char text[4096];
    overscanPercent = 0;
+   screensaverTimeout = 30;
    subtitleOffsetPixels = 0;
    regionIndex = defaultRegionIndex();
    regionRevision = 0;
@@ -369,6 +372,23 @@ void loadSettings(void)
    }
    setGfxOverscan(overscanPercent);
 
+   const char *screensaverTimeoutValue = findSettingValue(text, "screensaver-timeout");
+   if (!screensaverTimeoutValue) {
+      if (rewriteSettingKey(SETTINGS_PATH, "screensaver-timeout", "30") != 0)
+         logWarn("[settings] could not add default screensaver-timeout key\n");
+   } else {
+      char *end = NULL;
+      long parsed = strtol(screensaverTimeoutValue, &end, 10);
+      if (end != screensaverTimeoutValue &&
+          (*end == 0 || *end == '\n' || *end == '\r' || *end == ' ' || *end == '\t') &&
+          (parsed == 0 || (parsed >= 30 && parsed <= 300 && parsed % 30 == 0))) {
+         screensaverTimeout = (int)parsed;
+      } else {
+         screensaverTimeout = 30;
+         logWarn("[settings] invalid screensaver-timeout value, using 30\n");
+      }
+   }
+
    const char *subtitleOffsetValue = findSettingValue(text, "subtitle-offset");
    if (!subtitleOffsetValue) {
       if (rewriteSettingKey(SETTINGS_PATH, "subtitle-offset", "0") != 0)
@@ -537,6 +557,26 @@ int setSubtitleOffset(int pixels)
 
    subtitleOffsetPixels = pixels;
    logInfo("[settings] subtitle-offset=%d px\n", subtitleOffsetPixels);
+   return 0;
+}
+
+int getScreensaverTimeout(void) { return screensaverTimeout; }
+
+int setScreensaverTimeout(int seconds)
+{
+   if (seconds != 0 && (seconds < 30 || seconds > 300 || seconds % 30 != 0)) return -1;
+   if (seconds == screensaverTimeout) return 0;
+
+   char value[8];
+   int length = snprintf(value, sizeof value, "%d", seconds);
+   if (length <= 0 || length >= (int)sizeof value ||
+       rewriteSettingKey(SETTINGS_PATH, "screensaver-timeout", value) != 0) {
+      logWarn("[settings] could not persist screensaver-timeout=%d\n", seconds);
+      return -1;
+   }
+
+   screensaverTimeout = seconds;
+   logInfo("[settings] screensaver-timeout=%d\n", screensaverTimeout);
    return 0;
 }
 
