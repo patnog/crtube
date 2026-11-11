@@ -1543,7 +1543,7 @@ void initVideoGrid(VideoGrid *grid, Font *font, int x, int y, int width, int hei
       setLabelScaleWithUi(&grid->metas[i], 1);
       setLabelScaleWithUi(&grid->durations[i], 1);
    }
-   initLabel(&grid->watchLaterBadge, font, 0, 0, AUTO, AUTO, WATCHLATER_BADGE_SIZE, activeTheme->textPrimary, TEXT_NOWRAP, "Watch Later");
+   initLabel(&grid->watchLaterBadge, font, 0, 0, AUTO, AUTO, WATCHLATER_BADGE_SIZE, 0xFFFFFFFF, TEXT_NOWRAP, "Watch Later");
    setLabelScaleWithUi(&grid->watchLaterBadge, 1);
    initLabel(&grid->membersOnlyBadge, font, 0, 0, AUTO, AUTO, DUR_SIZE, 0xFF00FF00, TEXT_NOWRAP, "*Members only");
    float badgeScale = getGfxUiScaleFactor();
@@ -1562,7 +1562,7 @@ void refreshVideoGridThemeColors(VideoGrid *grid)
       setLabelColor(&grid->metas[i], activeTheme->textSecondary);
       setLabelColor(&grid->durations[i], activeTheme->textPrimary);
    }
-   setLabelColor(&grid->watchLaterBadge, activeTheme->textPrimary);
+   setLabelColor(&grid->watchLaterBadge, 0xFFFFFFFF);
 }
 
 void termVideoGrid(VideoGrid *grid)
@@ -1820,7 +1820,7 @@ static void drawTile(VideoGrid *grid, int i)
       int badgeW = grid->watchLaterBadge.tt.tex.w + 2 * padX;
       int badgeH = grid->watchLaterBadge.tt.tex.h + 2 * padY;
       int badgeX = tx + grid->tileW - badgeW - edgeGap, badgeY = ty + 6;
-      fillGfxRectangleFixed(badgeX, badgeY, badgeW, badgeH, activeTheme->badgeFill);
+      fillGfxRectangleFixed(badgeX, badgeY, badgeW, badgeH, 0xFF000000);
       drawLabelAt(&grid->watchLaterBadge, badgeX + padX, badgeY + padY);
    }
 

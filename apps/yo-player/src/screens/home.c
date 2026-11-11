@@ -1952,7 +1952,13 @@ static void drawHomeIconFixed(Icon *icon, int x, int y, uint32_t color)
                                0.0f, 0.0f, 1.0f, 1.0f, color, GFX_FILTER_LINEAR);
 }
 
-static void drawShuffleCurve(int x, int y, int direction, uint32_t color)
+static void drawShuffleStrokePoint(int x, int y, uint32_t color, uint32_t outline)
+{
+   fillGfxRectangleFixed(x - 2, y - 2, 9, 9, outline);
+   fillGfxRectangleFixed(x, y, 5, 5, color);
+}
+
+static void drawShuffleCurve(int x, int y, int direction, uint32_t color, uint32_t outline)
 {
    // Curved S-shaped route with a clear arrowhead and padding from the badge edge.
    static const int points[2][13][2] = {
@@ -1970,13 +1976,15 @@ static void drawShuffleCurve(int x, int y, int direction, uint32_t color)
       for (int n = 0; n <= steps; n++) {
          int px = x1 + dx * n / steps;
          int py = y1 + dy * n / steps;
-         fillGfxRectangleFixed(px, py, 3, 3, color);
+         drawShuffleStrokePoint(px, py, color, outline);
       }
    }
    int tipX = x + 49;
    int tipY = y + (direction > 0 ? 23 : 5);
-   fillGfxRectangleFixed(tipX - 5, tipY - 5, 5, 3, color);
-   fillGfxRectangleFixed(tipX - 5, tipY + 2, 5, 3, color);
+   for (int i = 0; i < 5; i++) {
+      drawShuffleStrokePoint(tipX - 5 + i, tipY - 5 + i, color, outline);
+      drawShuffleStrokePoint(tipX - 5 + i, tipY + 5 - i, color, outline);
+   }
 }
 
 static void drawPlaylistShuffleBadge(void)
@@ -1990,12 +1998,13 @@ static void drawPlaylistShuffleBadge(void)
    if (y < titleLabel.y) y = titleLabel.y;
    uint32_t edge = active ? activeTheme->accent : activeTheme->rowHighlight;
    uint32_t fill = active ? activeTheme->rowHighlight : activeTheme->surface;
-   uint32_t ink = active ? activeTheme->textPrimary : activeTheme->textSecondary;
+   uint32_t ink = homeThemeIsDark() ? 0xFFFFFFFF : 0xFF202020;
+   uint32_t outline = homeThemeIsDark() ? 0xFF000000 : 0xFFFFFFFF;
    fillGfxRoundedRectangleFixed(x, y, width, height, 12, edge);
    fillGfxRoundedRectangleFixed(x + 1, y + 1, width - 2, height - 2, 11, fill);
    int cx = x + 12, cy = y + 9;
-   drawShuffleCurve(cx, cy, 1, ink);
-   drawShuffleCurve(cx, cy, -1, ink);
+   drawShuffleCurve(cx, cy, 1, ink, outline);
+   drawShuffleCurve(cx, cy, -1, ink, outline);
 }
 
 #define DOWNLOAD_SPACE_REFRESH_US (15ULL * 1000000ULL)
