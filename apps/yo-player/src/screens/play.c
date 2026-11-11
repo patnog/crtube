@@ -153,6 +153,7 @@ static Label playbackSponsorActionLabels[3];
 // the video to play, set by playVideo() before the screen is pushed. defaults to
 // a short public clip so pushing the screen directly still does something.
 static char requestedInput[256] = "jNQXAC9IVRw";   // "Me at the zoo"
+static char playbackOriginVideoId[16];
 static char requestedLocalPath[MAX_PATH_LEN];
 static int requestedIsLocal;
 
@@ -1456,6 +1457,8 @@ static void launchVideo(const char *input, int addToNavigation)
 
 void playVideo(const char *input)
 {
+   playbackOriginVideoId[0] = 0;
+   extractPlaybackId(input, playbackOriginVideoId);
    playlistQueueCount = 0;
    playlistQueueCursor = -1;
    launchVideo(input, 1);
@@ -1463,6 +1466,8 @@ void playVideo(const char *input)
 
 void playVideoWithQueue(const char *input, const char videoIds[][16], int count, int index)
 {
+   playbackOriginVideoId[0] = 0;
+   extractPlaybackId(input, playbackOriginVideoId);
    if (!input || !input[0] || !videoIds || count <= 0 || index < 0 || index >= count) {
       playVideo(input);
       return;
@@ -4540,6 +4545,15 @@ static void termPlay(void)
    if (state.nextThumbTexture.offset) { finishGfx(); freeGfxTexture(&state.nextThumbTexture); }
    closeFont(&uiFont);
    setHttpRequestsCancelled(0);
+}
+
+void getPlaybackReturnVideoIds(char origin[16], char current[16])
+{
+   if (origin) strCopy(origin, 16, playbackOriginVideoId);
+   if (current) {
+      current[0] = 0;
+      if (!requestedIsLocal) extractPlaybackId(requestedInput, current);
+   }
 }
 
 Screen playScreen = { initPlay, NULL, updatePlay, drawPlay, NULL, termPlay, SCREEN_TERMINATED };

@@ -1219,6 +1219,22 @@ void updateDownloadOverlay(void)
    setLabelText(&overlayLabel, text);   // only rasterises on a real change
 }
 
+static int downloadsThemeIsDark(void)
+{
+   uint32_t color = activeTheme->appBg;
+   int r = (color >> 16) & 0xFF;
+   int g = (color >> 8) & 0xFF;
+   int b = color & 0xFF;
+   return (r * 299 + g * 587 + b * 114) / 1000 < 128;
+}
+
+static uint32_t downloadNotificationBackground(int largePanel)
+{
+   if (downloadsThemeIsDark())
+      return largePanel ? activeTheme->appBg : activeTheme->badgeFill;
+   return 0xFFFFFFFF;
+}
+
 void drawDownloadOverlay(int screenWidth)
 {
    if (!dl.initialized) return;
@@ -1230,23 +1246,26 @@ void drawDownloadOverlay(int screenWidth)
       drawLabelAt(&overlayLabel, x + 6, y + 4);
    }
    if (dl.spacePrompt && downloadToastLabel.tt.tex.w > 0) {
+      setLabelColor(&downloadToastLabel, activeTheme->textPrimary);
       refreshLabelScale(&downloadToastLabel);
       int panelW = downloadToastLabel.tt.tex.w + 48;
       int panelH = downloadToastLabel.tt.tex.h + 40;
       int x = (screenWidth - panelW) / 2;
       int y = (getGfxScreenHeight() - panelH) / 2;
-      fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+      fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12,
+                                   downloadNotificationBackground(1));
       drawLabelAt(&downloadToastLabel, x + 24, y + 20);
       return;
    }
    if (downloadToastShownAt && getTimeUs() - downloadToastShownAt < DOWNLOAD_TOAST_US &&
        downloadToastLabel.tt.tex.w > 0) {
+      setLabelColor(&downloadToastLabel, activeTheme->textPrimary);
       refreshLabelScale(&downloadToastLabel);
       int x = (screenWidth - downloadToastLabel.tt.tex.w) / 2;
       int y = (getGfxScreenHeight() - downloadToastLabel.tt.tex.h) / 2;
       fillGfxRoundedRectangleFixed(x - 20, y - 12,
                                    downloadToastLabel.tt.tex.w + 40, downloadToastLabel.tt.tex.h + 24,
-                                   10, activeTheme->badgeFill);
+                                   10, downloadNotificationBackground(0));
       drawLabelAt(&downloadToastLabel, x, y);
    }
 }

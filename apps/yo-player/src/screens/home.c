@@ -187,6 +187,8 @@ static int         downloadSpaceAvailableLow;
 static Label       downloadManagerTitle, downloadManagerRows[7], downloadManagerStatuses[7], downloadManagerFooter;
 static ButtonHints downloadManagerHints;
 static uint64_t    playlistToastShownAt;
+static int         playbackRestorePending;
+static void restoreHomePlaybackSelection(void);
 static ButtonHints hints;
 static int         sdHintsTwoRows;
 static int         homeFooterBottomY;
@@ -338,6 +340,20 @@ static int getSettingsPanelHeight(void)
 {
    int height = home.screenH - 48;
    return height < SETTINGS_PANEL_H ? height : SETTINGS_PANEL_H;
+}
+
+static int homeThemeIsDark(void)
+{
+   uint32_t color = activeTheme->appBg;
+   int r = (color >> 16) & 0xFF;
+   int g = (color >> 8) & 0xFF;
+   int b = color & 0xFF;
+   return (r * 299 + g * 587 + b * 114) / 1000 < 128;
+}
+
+static uint32_t homeNotificationBackground(void)
+{
+   return homeThemeIsDark() ? activeTheme->badgeFill : 0xFFFFFFFF;
 }
 
 static void setHintsThemeColor(ButtonHints *bar, uint32_t color)
@@ -3155,6 +3171,7 @@ static void updateHome(void)
          playVideo(selected->videoId);
       }
    }
+   restoreHomePlaybackSelection();
 }
 
 static void drawDownloadManagement(void)
@@ -3328,9 +3345,10 @@ static void drawHome(void)
       refreshLabelScale(&playlistToastLabel);
       int toastX = (home.screenW - playlistToastLabel.tt.tex.w) / 2;
       int toastY = (home.screenH - playlistToastLabel.tt.tex.h) / 2;
+      setLabelColor(&playlistToastLabel, activeTheme->textPrimary);
       fillGfxRoundedRectangleFixed(toastX - 20, toastY - 12,
                                    playlistToastLabel.tt.tex.w + 40, playlistToastLabel.tt.tex.h + 24,
-                                   10, activeTheme->badgeFill);
+                                   10, homeNotificationBackground());
       drawLabelAt(&playlistToastLabel, toastX, toastY);
    }
    if (home.playlistDeleteConfirmOpen) {
@@ -3354,10 +3372,44 @@ static void suspendHome(void)
    stopVideoGrid(&home.grid);   // free the http pools for the pushed screen
 }
 
+static void restoreHomePlaybackSelection(void)
+{
+   if (!playbackRestorePending || gridStage(&home.grid) != GRID_READY ||
+       home.grid.results.count <= 0) return;
+   playbackRestorePending = 0;
+   char origin[16], current[16];
+   getPlaybackReturnVideoIds(origin, current);
+   if (!origin[0]) return;
+
+   if (!homeIsPlaylistContents() && current[0] && strcmp(current, origin) != 0) {
+      home.grid.selected = 0;
+      home.grid.scrollRow = 0;
+      return;
+   }
+
+   const char *target = homeIsPlaylistContents() && current[0] ? current : origin;
+   for (int i = 0; i < home.grid.results.count; i++) {
+      if (!home.grid.results.items[i].isPlaylist &&
+          strcmp(home.grid.results.items[i].videoId, target) == 0) {
+         home.grid.selected = i;
+         home.grid.scrollRow = i / (home.grid.columns > 0 ? home.grid.columns : 1);
+         int columns = home.grid.columns > 0 ? home.grid.columns : 1;
+         int totalRows = (home.grid.results.count + columns - 1) / columns;
+         int maxScroll = totalRows - home.grid.visibleRows;
+         if (maxScroll < 0) maxScroll = 0;
+         if (home.grid.scrollRow > maxScroll) home.grid.scrollRow = maxScroll;
+         return;
+      }
+   }
+   home.grid.selected = 0;
+   home.grid.scrollRow = 0;
+}
+
 // returning from search/play: if the load was interrupted mid-flight (worker stopped), restart it; an
 // already-loaded grid is kept as-is (instant, thumbnails intact).
 static void resumeHome(void)
 {
+   playbackRestorePending = 1;
    if (home.category == HOME_DOWNLOADS) {
       downloadSpaceStatsUpdatedUs = 0;
       loadCategory();
@@ -3394,6 +3446,7 @@ static void resumeHome(void)
       }
    }
    if (gridStage(&home.grid) != GRID_READY) loadCategory();
+   else restoreHomePlaybackSelection();
 }
 
 static void termHome(void)

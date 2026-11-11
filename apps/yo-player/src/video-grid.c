@@ -1767,9 +1767,10 @@ static void drawTile(VideoGrid *grid, int i)
       fillGfxRoundedRectangleFixed(badgeX, badgeY, badgeW, badgeH, badgeH / 3, 0xFF000000);
       int lineX = badgeX + badgePadX;
       int lineY = badgeY + (badgeH - lineH * 3 - lineGap * 2) / 2;
-      fillGfxRectangleFixed(lineX, lineY, iconW, lineH, activeTheme->textPrimary);
-      fillGfxRectangleFixed(lineX, lineY + lineH + lineGap, iconW, lineH, activeTheme->textPrimary);
-      fillGfxRectangleFixed(lineX, lineY + 2 * (lineH + lineGap), iconW, lineH, activeTheme->textPrimary);
+      fillGfxRectangleFixed(lineX, lineY, iconW, lineH, 0xFFFFFFFF);
+      fillGfxRectangleFixed(lineX, lineY + lineH + lineGap, iconW, lineH, 0xFFFFFFFF);
+      fillGfxRectangleFixed(lineX, lineY + 2 * (lineH + lineGap), iconW, lineH, 0xFFFFFFFF);
+      setLabelColor(&grid->durations[i], 0xFFFFFFFF);
       drawLabelAt(&grid->durations[i], lineX + iconW + iconGap, badgeY + badgePadY);
    } else if (item->isLocalDownload) {
       float scale = getGfxUiScaleFactor();

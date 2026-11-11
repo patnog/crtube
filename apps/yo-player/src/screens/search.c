@@ -87,6 +87,8 @@ static int selectHint = -1, downloadHint = -1, settingsHint = -1;
 static int sortHint = -1, refreshHint = -1, clearHistoryHint = -1;
 static SearchResult squarePendingItem;
 static uint64_t squarePressedAt;
+static int playbackRestorePending;
+static void restoreSearchPlaybackSelection(void);
 #define SQUARE_HOLD_US 550000ULL
 
 static void reloadHistory(void)
@@ -584,6 +586,7 @@ static void updateSearch(void)
          playVideo(selected->videoId);
       }
    }
+   restoreSearchPlaybackSelection();
 }
 
 static uint32_t getSearchFieldColor(void)
@@ -757,9 +760,39 @@ static void suspendSearch(void)
    pauseVideoGrid(&search.grid);
 }
 
+static void restoreSearchPlaybackSelection(void)
+{
+   if (!playbackRestorePending || gridStage(&search.grid) != GRID_READY ||
+       search.grid.results.count <= 0) return;
+   playbackRestorePending = 0;
+   char origin[16], current[16];
+   getPlaybackReturnVideoIds(origin, current);
+   if (!origin[0]) return;
+   const char *target = (current[0] && strcmp(current, origin) != 0) ? NULL : origin;
+   int selected = 0;
+   if (target) {
+      for (int i = 0; i < search.grid.results.count; i++) {
+         if (!search.grid.results.items[i].isPlaylist &&
+             strcmp(search.grid.results.items[i].videoId, target) == 0) {
+            selected = i;
+            break;
+         }
+      }
+   }
+   search.grid.selected = selected;
+   search.grid.scrollRow = selected / (search.grid.columns > 0 ? search.grid.columns : 1);
+   int columns = search.grid.columns > 0 ? search.grid.columns : 1;
+   int totalRows = (search.grid.results.count + columns - 1) / columns;
+   int maxScroll = totalRows - search.grid.visibleRows;
+   if (maxScroll < 0) maxScroll = 0;
+   if (search.grid.scrollRow > maxScroll) search.grid.scrollRow = maxScroll;
+}
+
 static void resumeSearch(void)
 {
+   playbackRestorePending = 1;
    resumeVideoGrid(&search.grid);
+   restoreSearchPlaybackSelection();
 }
 
 static void termSearch(void)

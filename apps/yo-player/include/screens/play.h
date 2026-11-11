@@ -10,6 +10,7 @@ extern Screen playScreen;
 // resolves and plays `input` (a youtube link or 11-char video id): stores it and
 // pushes the play screen on top of the current one.
 void playVideo(const char *input);
+void getPlaybackReturnVideoIds(char origin[16], char current[16]);
 void playVideoWithQueue(const char *input, const char videoIds[][16], int count, int index);
 void setPlaylistShuffleEnabled(int enabled);
 void setPlaylistShuffleContext(int enabled);
