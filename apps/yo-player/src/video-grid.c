@@ -1577,6 +1577,7 @@ void termVideoGrid(VideoGrid *grid)
 void setGridWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *videoId)) { grid->isWatched = isWatched; }
 void setGridWatchedPosition(VideoGrid *grid, int (*watchedPosition)(const char *videoId)) { grid->watchedPosition = watchedPosition; }
 void setGridDownloadedPosition(VideoGrid *grid, int (*downloadedPosition)(const char *videoId)) { grid->downloadedPosition = downloadedPosition; }
+void setGridDownloadedWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *videoId)) { grid->downloadedWatched = isWatched; }
 void setGridWatchLaterPredicate(VideoGrid *grid, int (*isWatchLater)(const char *videoId)) { grid->isWatchLater = isWatchLater; }
 void setGridPlaylistWatchLaterPredicate(VideoGrid *grid, int (*isWatchLater)(const char *playlistId)) { grid->isPlaylistWatchLater = isWatchLater; }
 void setGridSortMode(VideoGrid *grid, SortOrder mode) { if (grid) grid->sortMode = mode >= SORT_RELEVANCE && mode < SORT_COUNT ? mode : SORT_RELEVANCE; }
@@ -1728,8 +1729,10 @@ static void drawTile(VideoGrid *grid, int i)
    }
    // A partially watched tile stays at full image brightness; only entries without a resume position
    // use the existing WATCHED dimming treatment. Completed videos store their duration as the position.
-   int watched = progressWidth == 0 && !item->isPlaylist && !item->isLive &&
-                 grid->isWatched && grid->isWatched(item->videoId);
+   int watched = !item->isPlaylist && !item->isLive &&
+      (item->isLocalDownload ?
+         (grid->downloadedWatched && grid->downloadedWatched(item->videoId)) :
+         (progressWidth == 0 && grid->isWatched && grid->isWatched(item->videoId)));
 
    if (i == grid->selected && !grid->focusHidden) {
       int ring = activeTheme->focusThickness;

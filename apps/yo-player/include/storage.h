@@ -34,6 +34,7 @@ void setWatchedDuration(const char *videoId, int durationSeconds);
 
 // Downloaded-file playback progress is stored separately from online VOD watch history.
 int  getDownloadedPosition(const char *videoId);
+int  isDownloadedWatched(const char *videoId);
 void setDownloadedProgress(const char *videoId, int positionSeconds, int durationSeconds);
 
 #define CHANNEL_ID_LEN    32

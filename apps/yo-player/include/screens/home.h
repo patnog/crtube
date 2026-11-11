@@ -6,6 +6,7 @@
 
 void openHome(void);
 void openHomeSettingsPanel(void);
+void openHomeSettingsPanelFromSearch(const char *query, int sort, int landing);
 void openHomePlaylist(const char *playlistId, const char *title);
 void openHomePlaylistFromSearch(const char *playlistId, const char *title, const char *query, int sort);
 

@@ -90,6 +90,7 @@ typedef struct {
    int              (*isWatched)(const char *videoId);     // fade predicate (NULL = no fade)
    int              (*watchedPosition)(const char *videoId); // online VOD resume position
    int              (*downloadedPosition)(const char *videoId); // downloaded-file resume position
+   int              (*downloadedWatched)(const char *videoId); // downloaded-file completion predicate
    int              (*isWatchLater)(const char *videoId);  // video Watch Later badge predicate (NULL = no badge)
    int              (*isPlaylistWatchLater)(const char *playlistId); // playlist Watch Later badge predicate
 } VideoGrid;
@@ -101,6 +102,7 @@ void refreshVideoGridThemeColors(VideoGrid *grid);
 void setGridWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *videoId));
 void setGridWatchedPosition(VideoGrid *grid, int (*watchedPosition)(const char *videoId));
 void setGridDownloadedPosition(VideoGrid *grid, int (*downloadedPosition)(const char *videoId));
+void setGridDownloadedWatchedPredicate(VideoGrid *grid, int (*isWatched)(const char *videoId));
 void setGridWatchLaterPredicate(VideoGrid *grid, int (*isWatchLater)(const char *videoId));
 void setGridPlaylistWatchLaterPredicate(VideoGrid *grid, int (*isWatchLater)(const char *playlistId));
 void setGridSortMode(VideoGrid *grid, SortOrder mode);

@@ -19,7 +19,7 @@ static const Theme themeYouTube = {
    .focusBorder = 0xFFFFFFFF, .textPrimary = 0xFFFFFFFF, .textSecondary = 0xFFAAAAAA,
    .badgeFill = 0xCC000000, .scrim = 0xD9000000, .rowHighlight = 0x28FFFFFF,
    .seekTrack = 0x66FFFFFF, .seekNotch = 0xFF000000,
-   .watchedThumbTint = 0xFF4D4D4D, .focusThickness = 3
+   .watchedThumbTint = 0xFF707070, .focusThickness = 3
 };
 
 static const uint32_t ACCENT_PALETTE[] = {
@@ -55,7 +55,7 @@ static Theme makeTheme(int dark, uint32_t accent)
       t.rowHighlight = 0x28FFFFFF;
       t.seekTrack = 0x66FFFFFF;
       t.seekNotch = 0xFF000000;
-      t.watchedThumbTint = 0xFF4D4D4D;
+      t.watchedThumbTint = 0xFF707070;
    } else {
       t.appBg = 0xFFF1F1F1;
       t.surface = 0xFFDADADA;
@@ -67,7 +67,7 @@ static Theme makeTheme(int dark, uint32_t accent)
       t.rowHighlight = 0x22000000;
       t.seekTrack = 0x55000000;
       t.seekNotch = 0xFFFFFFFF;
-      t.watchedThumbTint = 0xFFB0B0B0;
+      t.watchedThumbTint = 0xFFC0C0C0;
    }
    return t;
 }

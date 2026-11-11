@@ -117,6 +117,10 @@ static struct {
    int       accountOpen;   // the sign-in / account panel is showing
    int       settingsOpen;  // the settings window is showing
    int       settingsSelected;
+   int       settingsReturnToSearch;
+   int       settingsReturnLanding;
+   int       settingsReturnSort;
+   char      settingsReturnQuery[SEARCH_QUERY_LEN];
    int       themeOpen;
    int       themeSelected;
    int       themeCustomOpen;
@@ -1268,6 +1272,20 @@ static void onHomePlaylistNameEntered(const char *name)
 
 void openHomeSettingsPanel(void)
 {
+   home.settingsReturnToSearch = 0;
+   home.settingsOpen = 1;
+   home.settingsSelected = 0;
+   home.downloadSettingsOpen = 0;
+   settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
+}
+
+
+void openHomeSettingsPanelFromSearch(const char *query, int sort, int landing)
+{
+   home.settingsReturnToSearch = 1;
+   home.settingsReturnLanding = landing != 0;
+   home.settingsReturnSort = sort;
+   strCopy(home.settingsReturnQuery, sizeof home.settingsReturnQuery, query ? query : "");
    home.settingsOpen = 1;
    home.settingsSelected = 0;
    home.downloadSettingsOpen = 0;
@@ -1683,7 +1701,19 @@ static void updateSettingsPanel(void)
    if (home.downloadSettingsOpen) { updateDownloadSettingsPanel(); return; }
    if (home.regionOpen) { updateRegionPicker(); return; }
    if (home.sponsorblockOpen) { updateSponsorBlockPanel(); return; }
-   if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) { home.settingsOpen = 0; return; }
+   if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
+      home.settingsOpen = 0;
+      if (home.settingsReturnToSearch) {
+         int landing = home.settingsReturnLanding;
+         int sort = home.settingsReturnSort;
+         char query[SEARCH_QUERY_LEN];
+         strCopy(query, sizeof query, home.settingsReturnQuery);
+         home.settingsReturnToSearch = 0;
+         if (landing || !query[0]) openSearchPage();
+         else openSearchQueryWithSort(query, sort);
+      }
+      return;
+   }
    if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
       home.settingsSelected = (home.settingsSelected + 1) % SETTINGS_ROW_COUNT;
    else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
@@ -2217,6 +2247,8 @@ static void initHome(void)
    home.liveCategory = LIVE_POPULAR;
    home.settingsOpen = 0;
    home.settingsSelected = 0;
+   home.settingsReturnToSearch = 0;
+   home.settingsReturnQuery[0] = 0;
    home.themeOpen = 0;
    home.themeSelected = 0;
    home.themeCustomOpen = 0;
@@ -2525,6 +2557,7 @@ static void initHome(void)
    setGridWatchedPredicate(&home.grid, isWatched);
    setGridWatchedPosition(&home.grid, getWatchedPosition);
    setGridDownloadedPosition(&home.grid, getDownloadedPosition);
+   setGridDownloadedWatchedPredicate(&home.grid, isDownloadedWatched);
    setGridWatchLaterPredicate(&home.grid, isWatchLater);
    setGridPlaylistWatchLaterPredicate(&home.grid, isPlaylistWatchLater);
    home.grid.suppressWatchLaterBadge = (home.category == HOME_WATCHLATER ||

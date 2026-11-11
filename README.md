@@ -76,7 +76,7 @@ The original account functionality remains optional. Without signing in, the app
 - Keep local watch history and playback positions.
 - Queue VOD downloads in the background. The app checks that a video is not currently LIVE before queuing and checks again in the download worker; LIVE streams are not downloadable.
 - The Downloads category displays completed local files with their video thumbnails and duration badges. Press X to play a downloaded video locally; hold Square to delete it after confirmation. Video metadata and downloaded subtitle files are retained alongside the downloaded MP4.
-- Completed downloads are kept on the PS3 HDD. The Sony SDK build uses the application's content directory (`/dev_hdd0/game/YOPCRT001/USRDIR`); if the system content directory cannot be obtained, it falls back to `/dev_hdd0/tmp/crtube_sdk/downloads`. The PSL1GHT build stores downloads in `/dev_hdd0/tmp/crtube/downloads`.
+- Completed downloads are kept on the PS3 HDD under `/dev_hdd0/tmp/crtube_sdk/downloads`.
 
 ### CRT and SD display
 - The app detects SD output from the active 480-line video mode (480i or 480p). The selected aspect ratio is handled separately: 4:3 uses the compact CRT-oriented layout, while 16:9 keeps the widescreen layout.
@@ -150,7 +150,7 @@ Live playback has a separate timeline: when a stream is paused or has fallen beh
 
 ## Build and installation
 
-The application has two build paths:
+The application has two build paths, but all the releases are done using PSL1GHT:
 
 - **Sony SDK project:** Uses the repository's existing PS3 development environment and shared build infrastructure.
 - **PSL1GHT project:** An open-toolchain build intended for Linux, macOS, or the included GitHub Actions workflow.

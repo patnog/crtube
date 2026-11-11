@@ -336,7 +336,7 @@ static void initSearch(void)
                 queryWidth, FIELD_H - 10, FIELD_TEXT_SIZE,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
    setLabelScaleWithUi(&queryLabel, 1);
-   initLabelRaw(&queryPromptPrefix, &uiFont, 0, 0, 100, FIELD_H - 10,
+   initLabelRaw(&queryPromptPrefix, &uiFont, 0, 0, search.fieldWidth, FIELD_H - 10,
                 PROMPT_TEXT_SIZE, activeTheme->textSecondary, TEXT_NOWRAP, "Press ");
    setLabelScaleWithUi(&queryPromptPrefix, 1);
    searchCrossGlyph = getConsoleGlyph(GLYPH_CROSS);
@@ -435,8 +435,8 @@ static void updateSearch(void)
    }
 
    if (isPadButtonPressed(PAD_BTN_START)) {
+      openHomeSettingsPanelFromSearch(search.query, (int)search.sort, search.landing);
       popScreen();
-      openHomeSettingsPanel();
       return;
    }
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { popScreen(); return; }

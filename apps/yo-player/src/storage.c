@@ -1085,6 +1085,12 @@ int getDownloadedPosition(const char *videoId)
    return entry ? entry->position : 0;
 }
 
+int isDownloadedWatched(const char *videoId)
+{
+   WatchEntry *entry = findDownloadedProgress(videoId);
+   return entry && entry->duration > 0 && entry->position >= entry->duration;
+}
+
 void setDownloadedProgress(const char *videoId, int positionSeconds, int durationSeconds)
 {
    if (!isDownloadProgressKey(videoId)) return;
