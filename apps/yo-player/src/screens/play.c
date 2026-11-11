@@ -1659,10 +1659,15 @@ int isPlaybackPausedForScreenSaver(void)
    return state.stage == STAGE_PLAYING && state.player && isVideoPaused(state.player);
 }
 
+// The Cross press that dismisses the screensaver must not be interpreted again
+// as the release half of the normal playback pause toggle.
+static int suppressNextCrossRelease;
+
 int resumePlaybackFromScreenSaver(void)
 {
    if (!isPlaybackPausedForScreenSaver()) return 0;
    setVideoPaused(state.player, 0);
+   if (!state.isLive) suppressNextCrossRelease = 1;
    showFullPlaybackHud();
    return 1;
 }
@@ -2360,7 +2365,10 @@ static void handlePlaybackInput(void)
          seekVideoPlayer(state.player, 0.0f);
          showControls();
       } else if (crossState == PAD_BUTTON_STATE_RELEASED) {
-         if (!crossRestartTriggered) {
+         if (suppressNextCrossRelease) {
+            // The screensaver handler already resumed playback on the press edge.
+            suppressNextCrossRelease = 0;
+         } else if (!crossRestartTriggered) {
             if (isVideoEnded(state.player)) {
                seekVideoPlayer(state.player, 0.0f);
                showControls();

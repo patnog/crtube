@@ -21,7 +21,7 @@ This repository is a fork of [vortigauntlet/yo-player-signin](https://github.com
 - **Members-only identification:** Restricted videos can be identified and marked in the video grid instead of being mistaken for ordinary playable videos.
 - **Streaming playback:** H.264 video and AAC audio are streamed during playback. The app includes the TEE H.264 decoder as an experimental option for supported 1080p50/60 streams, with Sony VDEC remaining the default. If the measured average presented frame rate is too low during the first five seconds, the player can switch that video to an available 30 FPS rendition without changing global settings.
 - **Navigation and feeds:** A sidebar provides Search, Recommended, account feeds and Playlists, PS3-local lists and playlists, Trending, Live, Account, Settings and Exit. Account Playlists is a dedicated library page outside the L1/R1 category cycle; PS3-local Playlists has separate Watch Later and PS3 tabs. Trending has Gaming, Sports and Podcasts tabs; Live has Popular, Music, Gaming, Sports, Podcasts and News.
-- **Playback and settings:** Search, channel browsing, resume, customizable subtitle styling, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, region selection and background downloads. Download settings include resolution, audio language/source, and primary/secondary subtitle selection. LIVE streams are identified and excluded from download queues.
+- **Playback and settings:** Search, channel browsing, resume, customizable subtitle styling and vertical subtitle offset, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, regional content selection, themes, an inactivity screensaver and background downloads. Download settings include resolution, audio language/source, and primary/secondary subtitle selection. LIVE streams are identified and excluded from download queues.
 
 ## What this fork adds
 
@@ -82,7 +82,7 @@ The original account functionality remains optional. Without signing in, the app
 - The app detects SD output from the active 480-line video mode (480i or 480p). The selected aspect ratio is handled separately: 4:3 uses the compact CRT-oriented layout, while 16:9 keeps the widescreen layout.
 - **UI Scaling** in the home Settings panel offers **1.0x** and **1.5x** at every output resolution, including 480p, 720p and 1080p. The selected aspect ratio independently determines whether the app uses its 4:3 CRT-oriented layout or 16:9 widescreen layout.
 - The video grid uses a two-column arrangement on 4:3 SD output to preserve readable titles and usable thumbnail sizes. In 16:9 it uses three columns.
-- The UI scale affects display-target interface drawing, not video frames or offscreen rendering. Playback controls and overlays deliberately remain at 1.0x.
+- The UI scale affects display-target interface drawing, not video frames or offscreen rendering. Playback uses the selected scale for text rasterisation, while video geometry and HUD placement remain unchanged; playback UI scaling can also be adjusted separately in Playback Settings.
 - Developer implementation rules and component-level guidance are documented in [`apps/yo-player/UI-SCALING.md`](apps/yo-player/UI-SCALING.md).
 
 ## Settings
@@ -90,14 +90,16 @@ The original account functionality remains optional. Without signing in, the app
 Open **Settings** from the sidebar or press **START** on the home screen. The menu contains the following application-wide options:
 
 - **UI Scaling** — select **1.0x** or **1.5x** at any output resolution. Change it here; there is no L2 scaling shortcut.
-- **Overscan** — apply a uniform zoom adjustment to compensate for televisions that crop the edges of the image. The value ranges from `-10` to `+10` percent; `0` leaves the output unchanged.
-- **Region** — select the two-letter country code used for regional YouTube content lists (default: `US`).
+- **Overscan** — apply a uniform zoom adjustment to compensate for televisions that crop the edges of the image. The value ranges from `-15` to `+15` percent; `0` leaves the output unchanged.
+- **Content Region** — select one of the 33 supported countries used for YouTube browse and search requests (default: United States / `US`). Changing it refreshes affected regional feeds.
+- **Themes** — choose CRTube, Blue, Green, Light or Monochrome, or use the Custom editor to select a dark/light background and accent colour. Changes are saved immediately.
+- **Screensaver timeout** — choose Off or 30–300 seconds in 30-second increments (default: 30 seconds). The bouncing CRTube logo appears after inactivity on the home screen or while playback is paused.
 - **Autoplay** — enable or disable automatic playback of the next recommended video when the current video ends.
 - **Enable 1080p60 (experimental)** — opt in to the TEE H.264 decoder path for supported 1080p50/60 streams. It is disabled by default; Sony VDEC remains the standard playback path.
 - **SponsorBlock** — configure each supported segment category independently as **Skip**, **Ask** or **Keep**.
 - **Download settings** — choose Auto, 480p, 720p or 1080p; select the audio language (or Original upload); allow or reject auto-dubbed audio when a translated language is selected; enable/disable primary subtitles that follow the chosen audio language; and optionally select a second subtitle language.
 
-The home Settings menu controls application-wide preferences and includes **Download settings**. That panel configures download resolution (Auto / 480p / 720p / 1080p), audio language, whether auto-dubbed audio is allowed, whether primary subtitles should follow the selected audio language, and an optional secondary subtitle language. These preferences are saved for subsequent downloads. Playback **Options** contains per-video controls such as Quality, Audio, Subtitles, Chapters and Crop to Fill, plus **Playback Settings**. Open **Playback Settings → Subtitle Style** to customize subtitle text color, background color and opacity, highlight effect, and font size. Changes are previewed immediately with `Lorem Ipsum`, including when subtitles are disabled, and are saved independently of the application theme.
+The home Settings menu controls application-wide preferences and includes **Download settings**. That panel configures download resolution (Auto / 480p / 720p / 1080p), audio language, whether auto-dubbed audio is allowed, whether primary subtitles should follow the selected audio language, and an optional secondary subtitle language. These preferences are saved for subsequent downloads. Playback **Options** contains per-video controls such as Quality, Audio, Subtitles, Chapters and Crop to Fill, plus **Playback Settings**. In Playback Settings, **Subtitle Style** customizes subtitle text colour, background colour and opacity, highlight effect, and font size. Changes are previewed immediately with `Lorem Ipsum`, including when subtitles are disabled, and are saved independently of the application theme. **Subtitle Offset** adjusts the vertical subtitle position in one-pixel steps; hold LEFT or RIGHT to repeat. Positive values move subtitles up. The playback panel also provides its own UI Scaling and Overscan adjustments.
 
 ## Controls
 
@@ -141,6 +143,7 @@ in the app take precedence if a screen has a context-specific action.
 | **R3** (right-stick click) | Toggle playback statistics |
 | **SELECT** | Open the video description overlay; use **UP / DOWN** to scroll and **SELECT** or **CIRCLE** to close |
 | **START** | Open playback Options, including Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay; press **START** again or **CIRCLE** to close the panel. Playback Settings contains Subtitle Style |
+| **LEFT / RIGHT** (Playback Settings → Subtitle Offset) | Move subtitles down / up one virtual screen pixel; hold to repeat the adjustment |
 | **CIRCLE** | Return to the video list |
 
 Live playback has a separate timeline: when a stream is paused or has fallen behind the live edge, **R1** returns playback to the current live point. When it is already at the live edge, **R1** continues with the next queued video or requests a recommendation. For VOD, **R1** advances to the next queued video or requests a recommendation; **L1** opens the previous video when one is available. These previous/next actions are unavailable for locally downloaded playback. Live streams cannot be downloaded. The description and chapter overlays temporarily take control of navigation while open. Audio tracks, quality and chapters are selected from playback Options; Square is reserved for SponsorBlock Ask actions. Completed downloads appear in the app's Downloads category.

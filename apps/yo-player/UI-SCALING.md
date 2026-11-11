@@ -126,15 +126,17 @@ Avoid applying the UI factor to thumbnail dimensions merely because labels besid
 thumbnail scale. Keep the image, badge, duration, title and metadata behavior consistent
 with the existing `video-grid.c` implementation.
 
-## 6. Playback is intentionally 1.0x
+## 6. Playback scaling
 
-`apps/yo-player/src/screens/play.c` temporarily sets the selected UI scale to 1.0x while
-rendering the playback screen, then restores the user's selected value. This keeps the seek
-bar, playback HUD, subtitles, menus and overlays at their designed geometry. Do not remove
-this override or assume the library/navigation scale should affect playback controls.
+Playback does not use the display-target geometry transform. `drawPlay()` keeps video
+geometry and HUD placement in their designed coordinates, while playback labels and other
+text are rasterised using `playbackFontScale`. On entry, that value is initialised from the
+selected application UI scale. **Playback Options → Playback Settings → UI Scaling** can
+then switch the playback text scale between 1.0x and 1.5x for the current playback screen.
 
-If a future feature intentionally changes playback scaling, it must be designed and tested
-as a separate behavior rather than relying on the library UI scale.
+This is intentionally separate from the graphics-layer transform used by the home and
+navigation screens. Do not multiply video coordinates, seek-bar geometry or overlay
+positions by the text scale. Review text wrapping and available space at both settings.
 
 ## 7. Application-level examples
 
@@ -160,7 +162,7 @@ available scales and across the relevant aspect ratios.
 - [ ] 480i/480p anamorphic 16:9 at 1.0x and 1.5x.
 - [ ] 720p 16:9 at 1.0x and 1.5x.
 - [ ] 1080p 16:9 at 1.0x and 1.5x.
-- [ ] HD 16:9 output, where the effective scale must remain 1.0x.
+- [ ] HD 16:9 output at both 1.0x and 1.5x; the selected scale remains available in HD.
 - [ ] No clipped text, unexpected wrapping, overlap or off-screen controls.
 - [ ] Icons, badges, thumbnails and labels remain visually coherent.
 - [ ] Focus/highlight and controller hit areas still match the visible controls.

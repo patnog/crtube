@@ -103,7 +103,7 @@ Treat `account.txt` as a credential: anyone who can read the file may be able to
 ## How it works (high level)
 
 1. On launch it brings up the network, the modern TLS transport, graphics, audio, fonts and the pad, then loads
-   the home screen on the **Subscriptions** feed.
+   the home screen with its default category selected (Trending when signed out).
 2. Feeds, searches and channel pages are fetched from YouTube on demand and shown as a grid of thumbnails. Only
    the tiles currently on screen hold a thumbnail image, so a feed can hold up to 500 videos at a flat memory
    cost, and each category is cached for the session so switching back to it is instant.
@@ -158,10 +158,13 @@ The app boots into the home feed. The sidebar switches between account feeds, PS
 - **R2** — toggle Crop-to-Fill mode.
 - **Right Analog Stick** — while Crop-to-Fill is enabled, move the cropped picture horizontally and vertically to adjust which part of the image is visible.
 - **R3** (right-stick click) — toggle playback statistics.
-- **Select** — show the video **description** over the video (playback carries on); scroll with up / down, close
-  with Select or Circle.
+- **Select** — show the video information panel over the video (playback carries on); scroll with up / down, close
+  with Select or Circle. It includes the description and metadata such as view count,
+  publication date and like count. Metadata is fetched only when the panel is opened,
+  so it does not delay playback startup.
 - **Triangle** — toggle **subtitles**.
-- **Start** — open playback Options. Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay are selected there.
+- **Start** — open playback Options. Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay are selected there. Playback Settings provides UI Scaling, Overscan, Subtitle Style, Subtitle Offset and SponsorBlock preferences.
+- In **Playback Settings → Subtitle Offset**, use **Left / Right** to move subtitles down / up one virtual screen pixel. Hold a direction to repeat the adjustment; positive values move subtitles upward.
 - **Circle** — back to the list.
 
 Community **SponsorBlock** segments are marked on the seek bar in their category colours. Categories set to Ask can be skipped with Square. Live streams have no seek bar (there's nothing to scrub).
@@ -177,8 +180,10 @@ restored on the next launch:
 - Sony SDK: `/dev_hdd0/tmp/crtube_sdk/sd-ui-scale.txt`
 
 The 4:3 aspect ratio selects the CRT-oriented layout; 16:9 retains the widescreen layout.
-The scale is intended for library/navigation UI. Playback controls and overlays remain at
-1.0x, and video frames are not enlarged by this setting. Developer details are in
+Playback uses the selected value for text rasterisation, while video geometry and HUD
+placement remain unchanged. A separate **Playback Settings → UI Scaling** row can switch
+the playback text scale between 1.0x and 1.5x. Video frames are not enlarged by either
+setting. Developer details are in
 [UI-SCALING.md](UI-SCALING.md).
 
 ## Downloads
@@ -211,11 +216,15 @@ overscan are saved immediately. A bad value quietly falls back to its default.
 - **`download-audio-auto-dub`** — `on` (default) allows YouTube auto-dubbed tracks when a translated audio language is selected; `off` prefers uploaded tracks only. This option is not applicable to Original upload.
 - **`download-primary-subtitles`** — `on` (default) automatically downloads a primary subtitle track matching the selected audio language; `off` disables it.
 - **`download-secondary-subtitle`** — `off` (default) or a supported language code for an optional second subtitle track.
-- **`region`** — two-letter country code for content lists (default `US`).
+- **`region`** — two-letter country code for content lists (default `US`); selectable in Home Settings → Content Region.
+- **`screensaver-timeout`** — `0` (off) or `30`–`300` seconds in 30-second steps (default `30`).
+- **`overscan`** — uniform output zoom from `-15` to `+15` percent (default `0`).
+- **`subtitle-offset`** — subtitle vertical offset in virtual screen pixels, `-150` to `+150` (default `0`; positive moves up).
+- **`subtitle-text-color`**, **`subtitle-background-color`**, **`subtitle-background-opacity`**, **`subtitle-highlight`**, **`subtitle-font-size`** — subtitle appearance indexes with ranges `0–5`, `0–4`, `0–4`, `0–2` and `0–5`.
+- **`theme-custom-bg`** and **`theme-custom-accent`** — custom theme background (`dark`/`light`) and accent colour (`#RRGGBB`).
 - **`sponsorblock-mode`** — legacy global mode (`off`, `ads`, `all`) used to migrate older settings files; per-category settings take precedence.
 - **`sponsorblock-sponsor`, `sponsorblock-selfpromo`, `sponsorblock-interaction`, `sponsorblock-intro`, `sponsorblock-outro`, `sponsorblock-music-offtopic`, `sponsorblock-filler`** — each accepts `skip`, `ask` or `keep`.
-- **`theme`** — which colour theme to start in, naming one of the blocks in `themes.txt` (default `youtube`).
-- **`overscan`** — uniform output zoom from `-10` to `+10` percent (default `0`). The Settings panel saves changes immediately.
+- **`theme`** — colour theme to start in: `crtube` (default), `blue`, `green`, `light`, `monochrome` or `custom`; registered theme slugs are also supported.
 
 ## Themes
 
@@ -224,16 +233,58 @@ Every colour the app draws comes from one theme, and the shipped one is YouTube'
 badges and the volume meter, and a white ring around the selected thumbnail. Everything is drawn flat
 from plain rectangles and text — there are no sprite sheets.
 
-`/dev_hdd0/tmp/yo-player/themes.txt` is written on first launch with the full YouTube block, so every key
-is there to edit over FTP. Change a colour in that block to restyle the app, or add a `[Name]` block of
-your own and point `settings.txt` at it with `theme=<name>` (lower case, spaces become hyphens). A new
-block inherits YouTube, so it only has to list what it changes. Colours are `#RRGGBB`, or `#RRGGBBAA` for
-transparency. Changes apply on the next launch; delete the file to get the shipped theme back.
+`themes.txt` is stored in the toolchain-specific data directory. The home
+**Settings → Themes** panel provides CRTube, Blue, Green, Light and Monochrome
+presets, plus a Custom editor for dark/light background and accent colour. Custom
+choices are persisted in `settings.txt` as `theme=custom`, `theme-custom-bg` and
+`theme-custom-accent`.
+
+The registry also supports custom `[Name]` blocks for FTP editing. A custom block
+inherits the built-in CRTube palette unless overridden. Colours are `#RRGGBB` or
+`#RRGGBBAA` (alpha last). The `theme` setting selects a preset or registered theme
+slug. Changes made in the theme panel are saved immediately.
+
+## Screensaver
+
+The inactivity screensaver is enabled by default with a 30-second timeout. Change it
+in **Home → Settings → Screensaver timeout**; available values are Off and
+30–300 seconds in 30-second increments. It displays the packaged bouncing CRTube
+logo on a black background. The logo is decoded asynchronously and uploaded to the
+GPU on the main thread.
+
+Any controller activity dismisses the screensaver. It can activate on the home screen
+or while playback is paused; it does not interrupt actively playing video. During paused
+playback, pressing **X** while the screensaver is visible also resumes the video. The
+dismissal input is prevented from reaching the underlying screen. The underlying screen
+and its input handlers remain untouched while the overlay is active.
+
+## Subtitle appearance
+
+Playback **Options → Playback Settings → Subtitle Style** exposes five preferences:
+text colour, background colour, background opacity, text highlight and font size.
+They are stored as `subtitle-text-color`, `subtitle-background-color`,
+`subtitle-background-opacity`, `subtitle-highlight` and `subtitle-font-size`.
+Their accepted ranges are respectively 0–5, 0–4, 0–4, 0–2 and 0–5.
+**Subtitle Offset** is separate (`subtitle-offset`, -150 to +150 virtual screen
+pixels); positive values move subtitles upward.
+
+## Content region
+
+**Home → Settings → Content Region** selects the country code (`region`) used for
+YouTube browse and search requests. The default is `US`. Changing the region
+invalidates regional feed caches so affected lists are fetched again. The available
+countries are defined by the application; this is not an unrestricted country-code
+field.
 
 ## Storage
 
-Everything is plain files under `/dev_hdd0/tmp/yo-player/` — no account binding, so copy the folder to back it up
-or move it to another console. PS3-local playlists and their index are stored alongside the other local library data:
+Persistent application data is stored under a toolchain-specific directory — no account binding, so copy
+the corresponding folder to back it up or move it to another console:
+
+- PSL1GHT: `/dev_hdd0/tmp/crtube/`
+- Sony SDK: `/dev_hdd0/tmp/crtube_sdk/`
+
+PS3-local playlists and their index are stored alongside the other local library data:
 
 - `settings.txt` — user settings (above).
 - `subscriptions.txt` — subscribed channel ids, one per line (seeded with a few defaults on first run; editable
