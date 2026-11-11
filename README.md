@@ -183,6 +183,10 @@ Upstream repositories:
 - [Original Yo! Player in ps3-dev](https://github.com/mohasi/ps3-dev/tree/main/apps/yo-player)
 - [PSL1GHT Yo! Player project](https://github.com/openlewa/yo-player-psl1ght)
 
+## AI-assisted development
+
+Development of this project is AI-assisted. AI tools may be used to help analyze the codebase, implement changes, debug issues, and maintain documentation. Generated contributions are reviewed and integrated as part of the project development process; AI assistance does not replace the work of the project contributors or change the applicable licenses and attribution requirements.
+
 ## License
 
 The repository's original `ps3-dev`-derived code is licensed under Apache-2.0 (`LICENSE`). That license does **not** override component-specific licenses: the integrated TEE Decoder is LGPL-2.1-or-later (`libs/simple-lib-av/tee_decoder.LICENSE`), and its bundled runtime portions retain their own notices. See `NOTICE` before redistributing source or binary packages.
