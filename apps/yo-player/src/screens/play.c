@@ -3465,11 +3465,12 @@ static void drawPlaybackOptions(void)
          int buttonW = 150, buttonH = 34;
          int buttonX = x + panelW - 38 - buttonW;
          int buttonY = rowY + (rowH - buttonH) / 2;
-         uint32_t buttonColor = disabled ? activeTheme->surface : activeTheme->accent;
-         if (!disabled && getTimeUs() < optionsDownloadPressedUntil)
-            buttonColor = activeTheme->rowHighlight;
+         int pressed = !disabled && getTimeUs() < optionsDownloadPressedUntil;
+         uint32_t buttonColor = pressed ? activeTheme->accent : activeTheme->surface;
          fillGfxRoundedRectangleFixed(buttonX, buttonY, buttonW, buttonH, 8, buttonColor);
-         setLabelColor(&optionsDownloadLabel, disabled ? activeTheme->textSecondary : activeTheme->appBg);
+         setLabelColor(&optionsDownloadLabel,
+                       disabled ? activeTheme->textSecondary :
+                       (pressed ? activeTheme->appBg : activeTheme->textPrimary));
          drawLabelAt(&optionsDownloadLabel,
                      buttonX + (buttonW - optionsDownloadLabel.tt.tex.w) / 2,
                      getCenteredLabelY(&optionsDownloadLabel, buttonY, buttonH));

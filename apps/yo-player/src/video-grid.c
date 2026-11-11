@@ -1740,7 +1740,7 @@ static void drawTile(VideoGrid *grid, int i)
    }
 
    if (grid->thumbs[i].tex.offset)
-      drawGfxTextureFixedSize(tx, ty, grid->tileW, grid->thumbH, grid->thumbs[i].tex, 0, 0, 1, 1, watched ? activeTheme->watchedThumbTint : 0xFFFFFFFF, GFX_FILTER_LINEAR);
+      drawGfxTextureFixedSize(tx, ty, grid->tileW, grid->thumbH, grid->thumbs[i].tex, 0, 0, 1, 1, watched ? 0xFF707070 : 0xFFFFFFFF, GFX_FILTER_LINEAR);
    else
       fillGfxRectangleFixed(tx, ty, grid->tileW, grid->thumbH, activeTheme->surface);
 

@@ -1239,6 +1239,8 @@ void drawDownloadOverlay(int screenWidth)
 {
    if (!dl.initialized) return;
    if (dl.active && overlayLabel.tt.tex.w > 0) {
+      setLabelColor(&overlayLabel, downloadsThemeIsDark() ? 0xFFFFFFFF : 0xFF000000);
+      refreshLabelScale(&overlayLabel);
       int badgeW = overlayLabel.tt.tex.w + 12, badgeH = OVERLAY_TEXT_SIZE + 8;
       int screenHeight = getGfxScreenHeight();
       int x = 12, y = screenHeight - badgeH - 10;

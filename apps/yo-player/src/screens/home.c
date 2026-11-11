@@ -1952,40 +1952,50 @@ static void drawHomeIconFixed(Icon *icon, int x, int y, uint32_t color)
                                0.0f, 0.0f, 1.0f, 1.0f, color, GFX_FILTER_LINEAR);
 }
 
-static void drawShuffleArrow(int x, int y, int direction, uint32_t color)
+static void drawShuffleCurve(int x, int y, int direction, uint32_t color)
 {
-   // Pixel-stepped diagonal strokes keep the shuffle mark crisp at both UI scales.
-   int step = 4;
-   for (int i = 0; i < 8; i++) {
-      int px = x + i * step;
-      int py = direction > 0 ? y + i * step : y + (7 - i) * step;
-      fillGfxRectangleFixed(px, py, 5, 4, color);
+   // Curved S-shaped route with a clear arrowhead and padding from the badge edge.
+   static const int points[2][13][2] = {
+      {{0,5},{5,5},{9,6},{13,9},{17,13},{21,17},{25,20},{29,22},{33,23},{37,23},{41,23},{45,23},{49,23}},
+      {{0,23},{5,23},{9,22},{13,19},{17,15},{21,11},{25,8},{29,6},{33,5},{37,5},{41,5},{45,5},{49,5}}
+   };
+   for (int i = 0; i < 12; i++) {
+      int x1 = x + points[direction > 0 ? 0 : 1][i][0];
+      int y1 = y + points[direction > 0 ? 0 : 1][i][1];
+      int x2 = x + points[direction > 0 ? 0 : 1][i + 1][0];
+      int y2 = y + points[direction > 0 ? 0 : 1][i + 1][1];
+      int dx = x2 - x1, dy = y2 - y1;
+      int steps = dx > (dy < 0 ? -dy : dy) ? dx : (dy < 0 ? -dy : dy);
+      if (steps < 1) steps = 1;
+      for (int n = 0; n <= steps; n++) {
+         int px = x1 + dx * n / steps;
+         int py = y1 + dy * n / steps;
+         fillGfxRectangleFixed(px, py, 3, 3, color);
+      }
    }
-   int tipX = x + 28;
-   int tipY = direction > 0 ? y + 28 : y;
-   fillGfxRectangleFixed(tipX, tipY, 5, 4, color);
-   fillGfxRectangleFixed(tipX - 4, tipY - (direction > 0 ? 4 : -4), 4, 4, color);
-   fillGfxRectangleFixed(tipX - 4, tipY + (direction > 0 ? 4 : -4), 4, 4, color);
+   int tipX = x + 49;
+   int tipY = y + (direction > 0 ? 23 : 5);
+   fillGfxRectangleFixed(tipX - 5, tipY - 5, 5, 3, color);
+   fillGfxRectangleFixed(tipX - 5, tipY + 2, 5, 3, color);
 }
 
 static void drawPlaylistShuffleBadge(void)
 {
    if (!homeIsPlaylistContents()) return;
    int active = isPlaylistShuffleEnabled();
-   int width = 60;
-   int height = 42;
+   int width = 76;
+   int height = 48;
    int x = home.screenW - MARGIN_X - width;
    int y = titleLabel.y + (titleLabel.tt.tex.h - height) / 2;
    if (y < titleLabel.y) y = titleLabel.y;
    uint32_t edge = active ? activeTheme->accent : activeTheme->rowHighlight;
    uint32_t fill = active ? activeTheme->rowHighlight : activeTheme->surface;
    uint32_t ink = active ? activeTheme->textPrimary : activeTheme->textSecondary;
-   fillGfxRoundedRectangleFixed(x, y, width, height, height / 2, edge);
-   fillGfxRoundedRectangleFixed(x + 1, y + 1, width - 2, height - 2, height / 2 - 1, fill);
-   int cx = x + 13, cy = y + 5;
-   // Two crossing paths with arrowheads, matching the familiar shuffle symbol.
-   drawShuffleArrow(cx, cy, 1, ink);
-   drawShuffleArrow(cx, cy, -1, ink);
+   fillGfxRoundedRectangleFixed(x, y, width, height, 12, edge);
+   fillGfxRoundedRectangleFixed(x + 1, y + 1, width - 2, height - 2, 11, fill);
+   int cx = x + 12, cy = y + 9;
+   drawShuffleCurve(cx, cy, 1, ink);
+   drawShuffleCurve(cx, cy, -1, ink);
 }
 
 #define DOWNLOAD_SPACE_REFRESH_US (15ULL * 1000000ULL)
