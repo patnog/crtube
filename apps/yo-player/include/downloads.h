@@ -27,7 +27,9 @@ int getDownloadManagementItems(DownloadManagementItem *out, int capacity);
 // 0 = accepted, 1 = not found, -1 = already finalizing / cannot cancel.
 int cancelManagedDownload(const char *videoId);
 
-void enqueueDownload(const SearchResult *item);   // queue a video for download
+void enqueueDownload(const SearchResult *item);   // queue using global download preferences
+void enqueuePlaybackDownload(const SearchResult *item, const char *audioTrackId,
+                             const char *activeSubtitleLanguage);
 int getDownloadedVideos(SearchResults *out, int sortAZ);
 unsigned int getDownloadLibraryRevision(void);
 int deleteDownloadedVideo(const char *videoId);
@@ -39,6 +41,7 @@ int loadDownloadedMetadata(const char *videoPath, char *title, int titleCap,
                            char *publishedDate, int publishedCap,
                            char *viewCount, int viewsCap, char *likeCount, int likesCap);
 
+int isDownloadSpacePromptOpen(void);
 void updateDownloadOverlay(void);         // refresh the "Downloading ..." label; call each frame in a screen update
 void drawDownloadOverlay(int screenWidth); // draw progress and the short enqueue toast; call in a screen draw
 int consumeDownloadCompletion(void); // consume a completion event on the UI thread

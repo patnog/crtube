@@ -569,6 +569,14 @@ static int homeSupportsSort(void)
           home.category == HOME_ACCOUNT + ACCOUNT_FEED_SUBSCRIPTIONS;
 }
 
+static int homeIsPlaylistContents(void)
+{
+   return home.category == HOME_PLAYLIST_CONTENTS ||
+          home.category == HOME_LOCAL_PLAYLIST_CONTENTS ||
+          home.category == HOME_WATCHLATER ||
+          home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER;
+}
+
 static int homeSupportsPlaylistSort(void)
 {
    return home.category == HOME_PLAYLISTS || home.category == HOME_LOCAL_PLAYLISTS || home.category == HOME_DOWNLOADS;
@@ -592,7 +600,13 @@ static SortPreference currentPlaylistSortPreference(void)
 static void updateHomeSortHint(void)
 {
    if (homeSortHint < 0) return;
-   setButtonHintShown(&hints, homeSortHint, homeSupportsSort() || homeSupportsPlaylistSort());
+   if (homeIsPlaylistContents()) {
+      setButtonHintCaption(&hints, homeSortHint, "Shuffle");
+      setButtonHintShown(&hints, homeSortHint, 1);
+   } else {
+      setButtonHintCaption(&hints, homeSortHint, "Sort");
+      setButtonHintShown(&hints, homeSortHint, homeSupportsSort() || homeSupportsPlaylistSort());
+   }
 }
 
 static int homeSortGroupLeft(void)
@@ -625,7 +639,8 @@ static void refreshCurrentCategory(void)
 static void loadCategory(void)
 {
    home.grid.suppressWatchLaterBadge = (home.category == HOME_WATCHLATER ||
-      home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER);
+      home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER ||
+      (home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 0));
    if (homeSupportsSort()) home.sort = (SortOrder)getSortPreference(currentFeedSortPreference());
    if (homeSupportsPlaylistSort() && home.category != HOME_DOWNLOADS)
       home.playlistSort = (PlaylistSortOrder)getSortPreference(currentPlaylistSortPreference());
@@ -1921,6 +1936,42 @@ static void drawHomeIconFixed(Icon *icon, int x, int y, uint32_t color)
                                0.0f, 0.0f, 1.0f, 1.0f, color, GFX_FILTER_LINEAR);
 }
 
+static void drawShuffleArrow(int x, int y, int direction, uint32_t color)
+{
+   // Pixel-stepped diagonal strokes keep the shuffle mark crisp at both UI scales.
+   int step = 4;
+   for (int i = 0; i < 8; i++) {
+      int px = x + i * step;
+      int py = direction > 0 ? y + i * step : y + (7 - i) * step;
+      fillGfxRectangleFixed(px, py, 5, 4, color);
+   }
+   int tipX = x + 28;
+   int tipY = direction > 0 ? y + 28 : y;
+   fillGfxRectangleFixed(tipX, tipY, 5, 4, color);
+   fillGfxRectangleFixed(tipX - 4, tipY - (direction > 0 ? 4 : -4), 4, 4, color);
+   fillGfxRectangleFixed(tipX - 4, tipY + (direction > 0 ? 4 : -4), 4, 4, color);
+}
+
+static void drawPlaylistShuffleBadge(void)
+{
+   if (!homeIsPlaylistContents()) return;
+   int active = isPlaylistShuffleEnabled();
+   int width = 60;
+   int height = 42;
+   int x = home.screenW - MARGIN_X - width;
+   int y = titleLabel.y + (titleLabel.tt.tex.h - height) / 2;
+   if (y < titleLabel.y) y = titleLabel.y;
+   uint32_t edge = active ? activeTheme->accent : activeTheme->rowHighlight;
+   uint32_t fill = active ? activeTheme->rowHighlight : activeTheme->surface;
+   uint32_t ink = active ? activeTheme->textPrimary : activeTheme->textSecondary;
+   fillGfxRoundedRectangleFixed(x, y, width, height, height / 2, edge);
+   fillGfxRoundedRectangleFixed(x + 1, y + 1, width - 2, height - 2, height / 2 - 1, fill);
+   int cx = x + 13, cy = y + 5;
+   // Two crossing paths with arrowheads, matching the familiar shuffle symbol.
+   drawShuffleArrow(cx, cy, 1, ink);
+   drawShuffleArrow(cx, cy, -1, ink);
+}
+
 #define DOWNLOAD_SPACE_REFRESH_US (15ULL * 1000000ULL)
 #define DOWNLOAD_SPACE_LOW_BYTES  (1024ULL * 1024ULL * 1024ULL)
 
@@ -2033,9 +2084,23 @@ static void drawLocalPlaylistTabs(void)
       uint32_t fill = active ? activeTheme->rowHighlight : activeTheme->surface;
       fillGfxRoundedRectangleFixed(x, y, width, TREND_CHIP_HEIGHT, TREND_CHIP_HEIGHT / 2, edge);
       fillGfxRoundedRectangleFixed(x + 1, y + 1, width - 2, TREND_CHIP_HEIGHT - 2, TREND_CHIP_HEIGHT / 2 - 1, fill);
-      setLabelColor(label, active ? activeTheme->textPrimary : activeTheme->textSecondary);
-      moveLabel(label, x + pad, getCenteredLabelY(label, y, TREND_CHIP_HEIGHT));
-      drawLabel(label);
+      int bg = (int)((((activeTheme->appBg >> 16) & 255) * 299u +
+                      ((activeTheme->appBg >> 8) & 255) * 587u +
+                      (activeTheme->appBg & 255) * 114u) / 1000u);
+      if (active && bg > 150) {
+         int textX = x + (width - label->tt.tex.w) / 2;
+         int textY = getCenteredLabelY(label, y, TREND_CHIP_HEIGHT);
+         setLabelColor(label, 0xFF202020);
+         drawLabelAt(label, textX - 2, textY); drawLabelAt(label, textX + 2, textY);
+         drawLabelAt(label, textX - 1, textY - 1); drawLabelAt(label, textX + 1, textY - 1);
+         drawLabelAt(label, textX - 1, textY + 1); drawLabelAt(label, textX + 1, textY + 1);
+         setLabelColor(label, 0xFFFFFFFF);
+         drawLabelAt(label, textX, textY);
+      } else {
+         setLabelColor(label, active ? activeTheme->textPrimary : activeTheme->textSecondary);
+         moveLabel(label, x + pad, getCenteredLabelY(label, y, TREND_CHIP_HEIGHT));
+         drawLabel(label);
+      }
       x += width + gap;
    }
 }
@@ -2338,6 +2403,8 @@ static void initHome(void)
    addButtonHint(&hints, getConsoleGlyph(GLYPH_R1), "Category");
    addButtonHint(&hints, getConsoleGlyph(GLYPH_R2), "Refresh");
    homeSortHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L2), "Sort");
+   // Reserve footer space for the longer playlist-page caption as well.
+   setButtonHintCaption(&hints, homeSortHint, "Shuffle");
    setButtonHintsStableLayout(&hints, 1);
    setButtonHintGap(&hints, 14);
    homeFooterBottomY = home.screenH - (sdHintsTwoRows ? SD_HINTS_BOTTOM : HINTS_BOTTOM);
@@ -2561,7 +2628,8 @@ static void initHome(void)
    setGridWatchLaterPredicate(&home.grid, isWatchLater);
    setGridPlaylistWatchLaterPredicate(&home.grid, isPlaylistWatchLater);
    home.grid.suppressWatchLaterBadge = (home.category == HOME_WATCHLATER ||
-      home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER);
+      home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER ||
+      (home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 0));
 
    subsRevisionSeen = getSubscriptionsRevision();
    watchLaterRevisionSeen = getWatchLaterRevision();
@@ -2667,7 +2735,9 @@ static void updateDownloadManagement(void)
 
 static void updateHome(void)
 {
+   setPlaylistShuffleContext(homeIsPlaylistContents());
    updateDownloadOverlay();
+   if (isDownloadSpacePromptOpen()) return;
    unsigned int downloadRevision = getDownloadLibraryRevision();
    if (downloadRevision != downloadLibraryRevisionSeen) {
       downloadLibraryRevisionSeen = downloadRevision;
@@ -2829,6 +2899,15 @@ static void updateHome(void)
    if (isPadButtonPressed(PAD_BTN_SELECT)) { cacheCurrent(); openSearchPage(); return; }
    if (isPadButtonPressed(PAD_BTN_START)) { openHomeSettingsPanel(); return; }
    if (isPadButtonPressed(PAD_BTN_R2)) { refreshCurrentCategory(); return; }
+   if (isPadButtonPressed(PAD_BTN_L2) && homeIsPlaylistContents()) {
+      setPlaylistShuffleEnabled(!isPlaylistShuffleEnabled());
+      setPlaylistShuffleContext(1);
+      playlistToastShownAt = getTimeUs();
+      setLabelText(&playlistToastLabel,
+                   isPlaylistShuffleEnabled() ? "Playlist shuffle: ON" : "Playlist shuffle: OFF");
+      updateHomeSortHint();
+      return;
+   }
    if (isPadButtonPressed(PAD_BTN_L2) && homeSupportsSort()) {
       home.sort = (SortOrder)((home.sort + 1) % SORT_COUNT);
       setSortPreference(currentFeedSortPreference(), (int)home.sort);
@@ -3051,7 +3130,8 @@ static void updateHome(void)
       markWatched(selected->videoId);
       if (home.category == HOME_PLAYLIST_CONTENTS ||
           home.category == HOME_LOCAL_PLAYLIST_CONTENTS ||
-          home.category == HOME_WATCHLATER) {
+          home.category == HOME_WATCHLATER ||
+          home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER) {
          char queue[MAX_SEARCH_RESULTS][16];
          int queueCount = 0, queueIndex = -1;
          const SearchResults *results = gridResults(&home.grid);
@@ -3065,6 +3145,7 @@ static void updateHome(void)
             }
          }
          stopVideoGrid(&home.grid);
+         setPlaylistShuffleContext(homeIsPlaylistContents());
          if (queueIndex >= 0)
             playVideoWithQueue(selected->videoId, queue, queueCount, queueIndex);
          else
@@ -3226,6 +3307,7 @@ static void drawHome(void)
    else if (home.category == HOME_LIVE) drawLiveTabs();
    else if (home.category == HOME_LOCAL_PLAYLISTS) drawLocalPlaylistTabs();
    if (homeSupportsSort() || homeSupportsPlaylistSort()) drawHomeSortPills();
+   drawPlaylistShuffleBadge();
    if (home.category == HOME_DOWNLOADS) drawDownloadSpaceStatus();
    drawButtonHintsFitted(&hints, home.screenW, homeFooterBottomY, HINT_ROW_GAP, MAX_HINT_ROWS);
    drawDownloadOverlay(home.screenW);

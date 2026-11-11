@@ -416,7 +416,7 @@ static void initSearch(void)
 static void updateSearch(void)
 {
    updateDownloadOverlay();
-   if (oskInputActive()) return;
+   if (isDownloadSpacePromptOpen() || oskInputActive()) return;
 
    if (!isSidebarActive() && isPadButtonPressed(PAD_BTN_LEFT) &&
        (search.landing || search.fieldFocused || gridStage(&search.grid) != GRID_READY ||

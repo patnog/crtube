@@ -21,6 +21,7 @@
 #include "dbg.h"
 #include "http.h"
 #include "path.h"
+#include "pad.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -33,7 +34,14 @@
 #define DOWNLOAD_LIBRARY_DIR CRTUBE_DATA_DIR "/downloads"
 #define DOWNLOAD_THUMB_CAP (96 * 1024)       // matches the grid's Watch Later / duration badge
 
-typedef struct { char videoId[16]; char title[160]; } QueueItem;
+typedef struct {
+   char videoId[16];
+   char title[160];
+   char audioTrackId[40];
+   char activeSubtitleLanguage[16];
+   int playbackAudioOverride;
+   int playbackSubtitleOverride;
+} QueueItem;
 
 static struct {
    sys_lwmutex_t    mutex;         // guards queue[], count, workerSpawned
@@ -52,6 +60,10 @@ static struct {
    char             activeId[16];  // videoId of the running download (for dedupe; valid while active)
 
    int              initialized;
+   volatile int     spacePrompt;       // 0 none, 1 confirm (low remaining), 2 insufficient space
+   volatile int     spaceDecision;    // -1 waiting, 0 cancel, 1 continue
+   uint64_t         spaceEstimate;
+   uint64_t         spaceAvailable;
 } dl;
 
 static Font  uiFont;
@@ -219,14 +231,15 @@ static const CaptionTrack *findOriginalUploadCaption(const StreamInfo *info)
 }
 
 static int saveDownloadSubtitles(const char *videoId, const StreamInfo *info,
-                                 const char *primaryLanguage, const char *secondaryLanguage)
+                                 const char *primaryLanguage, const char *secondaryLanguage,
+                                 int forcePrimary)
 {
    char manifestPath[MAX_PATH_LEN], subtitlePath[MAX_PATH_LEN];
    char manifest[64] = "";
    char resolvedPrimaryLanguage[12] = "";
    int used = 0, saved = 0;
    clearDownloadSubtitleSidecars(videoId);
-   if (getDownloadPrimarySubtitlesEnabled()) {
+   if (forcePrimary || getDownloadPrimarySubtitlesEnabled()) {
       const CaptionTrack *track = (primaryLanguage && primaryLanguage[0]) ?
          findDownloadCaption(info, primaryLanguage) : findOriginalUploadCaption(info);
       /* A muxed one-track MP4 may not expose audioTrackId. In that case use the
@@ -262,6 +275,20 @@ static int saveDownloadSubtitles(const char *videoId, const StreamInfo *info,
       logWarn("[dl] subtitle manifest write failed for %s\n", videoId);
    else if (!saved) deleteFile(manifestPath);
    return saved;
+}
+
+static const StreamFormat *findDownloadAudioTrack(const StreamInfo *info, const char *trackId)
+{
+   if (!info || !trackId || !trackId[0]) return NULL;
+   const StreamFormat *best = NULL;
+   for (int i = 0; i < info->formatCount; i++) {
+      const StreamFormat *format = &info->formats[i];
+      if (!format->hasAudio || format->hasVideo || format->needsCipher || !format->url[0] ||
+          strcmp(format->container, "mp4") != 0 || strcmp(format->audioTrackId, trackId) != 0)
+         continue;
+      if (!best || format->itag == 140) best = format;
+   }
+   return best;
 }
 
 static int validDownloadId(const char *id)
@@ -757,6 +784,60 @@ cleanup:
    return result;
 }
 
+static void formatEstimatedSpace(uint64_t bytes, char *out, int capacity)
+{
+   const uint64_t mb = 1024ULL * 1024ULL;
+   const uint64_t gb = 1024ULL * 1024ULL * 1024ULL;
+   if (bytes >= gb) {
+      uint64_t hundredths = (bytes % gb) * 100ULL / gb;
+      snprintf(out, capacity, "%llu.%02llu GB", (unsigned long long)(bytes / gb),
+               (unsigned long long)hundredths);
+   } else if (bytes >= mb) {
+      snprintf(out, capacity, "%llu MB", (unsigned long long)(bytes / mb));
+   } else {
+      snprintf(out, capacity, "%llu KB", (unsigned long long)(bytes / 1024ULL));
+   }
+}
+
+static uint64_t estimateDownloadBytes(const StreamFormat *video, const StreamFormat *audio, int durationSeconds)
+{
+   if (!video || durationSeconds <= 0) return 0;
+   int height = video->height > 0 ? video->height : 720;
+   uint64_t videoKbps;
+   if (height <= 240) videoKbps = 350;
+   else if (height <= 360) videoKbps = 650;
+   else if (height <= 480) videoKbps = 1100;
+   else if (height <= 720) videoKbps = 2600;
+   else if (height <= 1080) videoKbps = 5200;
+   else if (height <= 1440) videoKbps = 9000;
+   else videoKbps = 18000;
+   if (video->fps > 30) videoKbps = videoKbps * 5 / 4;
+   uint64_t audioKbps = audio ? 192 : (video->hasAudio ? 192 : 0);
+   uint64_t bytes = (uint64_t)durationSeconds * (videoKbps + audioKbps) * 1000ULL / 8ULL;
+   return bytes + bytes / 5 + 2ULL * 1024ULL * 1024ULL; // 20% headroom + MP4/sidecars
+}
+
+static int confirmDownloadSpace(uint64_t estimate)
+{
+   uint64_t freeBytes = 0, totalBytes = 0;
+   makeDir(DOWNLOAD_LIBRARY_DIR);
+   if (getFreeSpace(DOWNLOAD_LIBRARY_DIR, &freeBytes, &totalBytes) != 0) {
+      logWarn("[dl] unable to query free space; allowing download without preflight\n");
+      return 1;
+   }
+   dl.spaceEstimate = estimate;
+   dl.spaceAvailable = freeBytes;
+   dl.spaceDecision = -1;
+   dl.spacePrompt = estimate > freeBytes ? 2 : (freeBytes - estimate < 1024ULL * 1024ULL * 1024ULL ? 1 : 0);
+   if (!dl.spacePrompt) return 1;
+
+   while (!downloadCancellationRequested() && dl.spaceDecision < 0) sleepMs(50);
+   int accepted = dl.spaceDecision == 1;
+   dl.spacePrompt = 0;
+   dl.spaceDecision = -1;
+   return accepted && !downloadCancellationRequested();
+}
+
 static void runOneDownload(const QueueItem *item)
 {
    char finalPath[MAX_PATH_LEN] = "", partPath[MAX_PATH_LEN] = "";
@@ -780,17 +861,21 @@ static void runOneDownload(const QueueItem *item)
       case DOWNLOAD_RESOLUTION_1080P: maxHeight = 1080; break;
       default: break;
    }
-   const char *requestedAudioLanguage = getDownloadAudioLanguage();
+   const char *requestedAudioLanguage = item->playbackAudioOverride ?
+      (item->audioTrackId[0] ? item->audioTrackId : "original") : getDownloadAudioLanguage();
+   if (item->playbackAudioOverride) maxHeight = 0; // playback action always requests the highest available rendition
    const StreamFormat *video = pickDownloadVideo(info, maxHeight,
       requestedAudioLanguage && strcmp(requestedAudioLanguage, "original") != 0);
    if (!video) { logError("[dl] no downloadable video for %s\n", item->videoId); goto failed; }
    if (video->isLiveSegmented) { logInfo("[dl] %s is a live stream, not downloadable\n", item->videoId); goto failed; }
 
-   int allowAutoDubbed = getDownloadAutoDubEnabled();
+   int allowAutoDubbed = item->playbackAudioOverride ? 1 : getDownloadAutoDubEnabled();
    const StreamFormat *audio = NULL;
    char actualAudioLanguage[16] = "";
    if (!video->hasAudio) {
-      audio = pickDownloadAudio(info, requestedAudioLanguage, allowAutoDubbed);
+      audio = (item->playbackAudioOverride && strcmp(item->audioTrackId, "original") != 0) ?
+         findDownloadAudioTrack(info, item->audioTrackId) :
+         pickDownloadAudio(info, requestedAudioLanguage, allowAutoDubbed);
       if (!audio && requestedAudioLanguage && strcmp(requestedAudioLanguage, "original") != 0) {
          logInfo("[dl] requested audio %s unavailable for %s; falling back to original upload\n",
                  requestedAudioLanguage, item->videoId);
@@ -811,6 +896,13 @@ static void runOneDownload(const QueueItem *item)
    if (!actualAudioLanguage[0]) {
       audioLanguageFromTrackId(video->audioTrackId, actualAudioLanguage, sizeof actualAudioLanguage);
       if (!actualAudioLanguage[0]) audioLanguageFromTrackId(info->defaultAudioTrackId, actualAudioLanguage, sizeof actualAudioLanguage);
+   }
+
+   uint64_t estimatedBytes = estimateDownloadBytes(video, audio, info->durationSeconds);
+   if (estimatedBytes && !confirmDownloadSpace(estimatedBytes)) {
+      logInfo("[dl] %s skipped by disk-space check (estimate=%llu free=%llu)\n", item->videoId,
+              (unsigned long long)estimatedBytes, (unsigned long long)dl.spaceAvailable);
+      goto failed;
    }
 
    buildDownloadPath(finalPath, sizeof finalPath, item->videoId);
@@ -860,8 +952,12 @@ static void runOneDownload(const QueueItem *item)
    if (downloadCancellationRequested()) goto cancelled;
    saveDownloadThumbnail(finalPath, item->videoId);
    if (downloadCancellationRequested()) goto cancelled;
-   const char *primaryLanguage = getDownloadPrimarySubtitlesEnabled() ? actualAudioLanguage : "";
-   saveDownloadSubtitles(item->videoId, info, primaryLanguage, getDownloadSecondarySubtitleLanguage());
+   const char *primaryLanguage = item->playbackSubtitleOverride ? actualAudioLanguage :
+      (getDownloadPrimarySubtitlesEnabled() ? actualAudioLanguage : "");
+   const char *secondaryLanguage = item->playbackSubtitleOverride ? item->activeSubtitleLanguage :
+      getDownloadSecondarySubtitleLanguage();
+   saveDownloadSubtitles(item->videoId, info, primaryLanguage, secondaryLanguage,
+                         item->playbackSubtitleOverride);
    if (downloadCancellationRequested()) goto cancelled;
 
    // Lock establishes a commit point: once finalizing is set, the UI can no longer
@@ -987,9 +1083,11 @@ int cancelManagedDownload(const char *videoId)
    return result;
 }
 
-void enqueueDownload(const SearchResult *item)
+static void enqueueDownloadItem(const SearchResult *item, const char *audioTrackId,
+                                const char *activeSubtitleLanguage, int playbackOverride,
+                                int subtitleOverride)
 {
-   if (!dl.initialized || !item->videoId[0]) return;
+   if (!dl.initialized || !item || !item->videoId[0]) return;
 
    int spawn = 0, duplicate = 0, full = 0;
    lock(&dl.mutex);
@@ -1000,8 +1098,19 @@ void enqueueDownload(const SearchResult *item)
    if (!dl.cancelAll && !duplicate) {
       if (dl.count >= MAX_QUEUE) full = 1;
       else {
-         strCopy(dl.queue[dl.count].videoId, sizeof dl.queue[dl.count].videoId, item->videoId);
-         strCopy(dl.queue[dl.count].title,   sizeof dl.queue[dl.count].title,   item->title);
+         QueueItem *queued = &dl.queue[dl.count];
+         memset(queued, 0, sizeof *queued);
+         strCopy(queued->videoId, sizeof queued->videoId, item->videoId);
+         strCopy(queued->title, sizeof queued->title, item->title);
+         if (playbackOverride) {
+            strCopy(queued->audioTrackId, sizeof queued->audioTrackId,
+                    audioTrackId && audioTrackId[0] ? audioTrackId : "original");
+            queued->playbackAudioOverride = 1;
+            queued->playbackSubtitleOverride = subtitleOverride;
+            if (subtitleOverride)
+               strCopy(queued->activeSubtitleLanguage, sizeof queued->activeSubtitleLanguage,
+                       activeSubtitleLanguage ? activeSubtitleLanguage : "");
+         }
          dl.count++;
          if (!dl.workerSpawned) { dl.workerSpawned = 1; spawn = 1; }
       }
@@ -1021,6 +1130,18 @@ void enqueueDownload(const SearchResult *item)
       setLabelText(&downloadToastLabel, "");
       logError("[dl] worker spawn failed\n");
    }
+}
+
+void enqueueDownload(const SearchResult *item)
+{
+   enqueueDownloadItem(item, NULL, NULL, 0, 0);
+}
+
+void enqueuePlaybackDownload(const SearchResult *item, const char *audioTrackId,
+                             const char *activeSubtitleLanguage)
+{
+   enqueueDownloadItem(item, audioTrackId, activeSubtitleLanguage, 1,
+                       activeSubtitleLanguage && activeSubtitleLanguage[0]);
 }
 
 // ---- overlay ----
@@ -1071,9 +1192,25 @@ int consumeDownloadCompletion(void)
    return 1;
 }
 
+int isDownloadSpacePromptOpen(void) { return dl.initialized && dl.spacePrompt != 0; }
+
 void updateDownloadOverlay(void)
 {
    if (!dl.initialized) return;
+   /* The worker pauses at preflight until the user explicitly confirms or dismisses the warning. */
+   if (dl.spacePrompt) {
+      if (isPadButtonPressed(PAD_BTN_CROSS)) dl.spaceDecision = (dl.spacePrompt == 1) ? 1 : 0;
+      else if (isPadButtonPressed(PAD_BTN_CIRCLE)) dl.spaceDecision = 0;
+      char estimateText[32], freeText[32], message[192];
+      formatEstimatedSpace(dl.spaceEstimate, estimateText, sizeof estimateText);
+      formatEstimatedSpace(dl.spaceAvailable, freeText, sizeof freeText);
+      if (dl.spacePrompt == 2)
+         snprintf(message, sizeof message, "Not enough free space\nRequired: %s  Available: %s\nCROSS / CIRCLE: close", estimateText, freeText);
+      else
+         snprintf(message, sizeof message, "Download may leave less than 1 GB free\nEstimated: %s  Available: %s\nCROSS: continue   CIRCLE: cancel", estimateText, freeText);
+      setLabelText(&downloadToastLabel, message);
+      return;
+   }
    /* Completions while browsing should not produce a stale toast on a later playback. */
    consumedCompletionSerial = dl.completionSerial;
    if (!dl.active) return;
@@ -1091,6 +1228,16 @@ void drawDownloadOverlay(int screenWidth)
       int x = 12, y = screenHeight - badgeH - 10;
       fillGfxRectangle(x, y, badgeW, badgeH, activeTheme->badgeFill);
       drawLabelAt(&overlayLabel, x + 6, y + 4);
+   }
+   if (dl.spacePrompt && downloadToastLabel.tt.tex.w > 0) {
+      refreshLabelScale(&downloadToastLabel);
+      int panelW = downloadToastLabel.tt.tex.w + 48;
+      int panelH = downloadToastLabel.tt.tex.h + 40;
+      int x = (screenWidth - panelW) / 2;
+      int y = (getGfxScreenHeight() - panelH) / 2;
+      fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+      drawLabelAt(&downloadToastLabel, x + 24, y + 20);
+      return;
    }
    if (downloadToastShownAt && getTimeUs() - downloadToastShownAt < DOWNLOAD_TOAST_US &&
        downloadToastLabel.tt.tex.w > 0) {
@@ -1144,7 +1291,7 @@ void initDownloads(void)
    createLock(&dl.mutex);
    uiFont = openSystemFont(FONT_POP);
    initLabel(&overlayLabel, &uiFont, 0, 0, AUTO, AUTO, OVERLAY_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP, "");
-   initLabel(&downloadToastLabel, &uiFont, 0, 0, AUTO, AUTO, 23, activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabel(&downloadToastLabel, &uiFont, 0, 0, 1200, AUTO, 23, activeTheme->textPrimary, TEXT_WRAP, "");
    downloadToastShownAt = 0;
    /* Rasterize at the selected UI scale without scaling the screen-space anchor. */
    setLabelScaleWithUi(&overlayLabel, 1);

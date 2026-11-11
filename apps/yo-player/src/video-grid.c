@@ -1727,12 +1727,12 @@ static void drawTile(VideoGrid *grid, int i)
          }
       }
    }
-   // A partially watched tile stays at full image brightness; only entries without a resume position
-   // use the existing WATCHED dimming treatment. Completed videos store their duration as the position.
-   int watched = !item->isPlaylist && !item->isLive &&
+   // Online completion is shared by every online category. Local downloads use their
+   // separate completion database and never inherit the online account's watched state.
+   int watched = !item->isPlaylist &&
       (item->isLocalDownload ?
          (grid->downloadedWatched && grid->downloadedWatched(item->videoId)) :
-         (progressWidth == 0 && grid->isWatched && grid->isWatched(item->videoId)));
+         (grid->isWatched && grid->isWatched(item->videoId)));
 
    if (i == grid->selected && !grid->focusHidden) {
       int ring = activeTheme->focusThickness;
@@ -1764,7 +1764,7 @@ static void drawTile(VideoGrid *grid, int i)
       int badgeH = grid->durations[i].tt.tex.h + 2 * badgePadY;
       int badgeX = tx + grid->tileW - badgeW - badgeEdgeGap;
       int badgeY = ty + grid->thumbH - badgeH - badgeEdgeGap;
-      fillGfxRoundedRectangleFixed(badgeX, badgeY, badgeW, badgeH, badgeH / 3, activeTheme->badgeFill);
+      fillGfxRoundedRectangleFixed(badgeX, badgeY, badgeW, badgeH, badgeH / 3, 0xFF000000);
       int lineX = badgeX + badgePadX;
       int lineY = badgeY + (badgeH - lineH * 3 - lineGap * 2) / 2;
       fillGfxRectangleFixed(lineX, lineY, iconW, lineH, activeTheme->textPrimary);
@@ -1784,23 +1784,23 @@ static void drawTile(VideoGrid *grid, int i)
       int badgeH = (grid->durations[i].tt.tex.h > iconH ? grid->durations[i].tt.tex.h : iconH) + 2 * badgePadY;
       int badgeX = tx + grid->tileW - badgeW - badgeGap;
       int badgeY = ty + grid->thumbH - badgeH - badgeGap;
-      fillGfxRoundedRectangleFixed(badgeX, badgeY, badgeW, badgeH, badgeH / 3, activeTheme->badgeFill);
+      fillGfxRoundedRectangleFixed(badgeX, badgeY, badgeW, badgeH, badgeH / 3, 0xFF000000);
       int iconX = badgeX + badgePadX;
       int iconY = badgeY + (badgeH - iconH) / 2;
       /* Compact floppy-disk silhouette. */
       fillGfxRectangleFixed(iconX, iconY, iconW, iconH, activeTheme->textPrimary);
       fillGfxRectangleFixed(iconX + (int)(3 * scale + 0.5f), iconY,
-                            (int)(7 * scale + 0.5f), (int)(4 * scale + 0.5f), activeTheme->badgeFill);
+                            (int)(7 * scale + 0.5f), (int)(4 * scale + 0.5f), 0xFF000000);
       fillGfxRectangleFixed(iconX + (int)(4 * scale + 0.5f), iconY + (int)(7 * scale + 0.5f),
-                            (int)(6 * scale + 0.5f), (int)(5 * scale + 0.5f), activeTheme->badgeFill);
+                            (int)(6 * scale + 0.5f), (int)(5 * scale + 0.5f), 0xFF000000);
       drawLabelAt(&grid->durations[i], iconX + iconW + iconGap,
                   badgeY + (badgeH - grid->durations[i].tt.tex.h) / 2);
    } else if (!item->isPlaylist && (item->duration[0] || item->isLive)) {
       int badgeW = grid->durations[i].tt.tex.w + 2 * padX;
       int badgeH = grid->durations[i].tt.tex.h + 2 * padY;
       int badgeX = tx + grid->tileW - badgeW - edgeGap, badgeY = ty + grid->thumbH - badgeH - edgeGap;
-      fillGfxRectangleFixed(badgeX, badgeY, badgeW, badgeH, item->isLive ? 0xFFFF0000 : activeTheme->badgeFill);
-      setLabelColor(&grid->durations[i], item->isLive ? 0xFFFFFFFF : activeTheme->textPrimary);
+      fillGfxRectangleFixed(badgeX, badgeY, badgeW, badgeH, item->isLive ? 0xFFFF0000 : 0xFF000000);
+      setLabelColor(&grid->durations[i], 0xFFFFFFFF);
       drawLabelAt(&grid->durations[i], badgeX + padX, badgeY + padY);
    }
 

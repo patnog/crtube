@@ -87,11 +87,11 @@
 #define CHAPTER_VISIBLE_ROWS 12
 #define CHAPTER_TIME_GAP     24   // between the right-aligned time column and the title column
 
-#define OPTIONS_COUNT 8
+#define OPTIONS_COUNT 9
 #define MAX_PLAYBACK_QUALITIES 12
 #define OPTIONS_DROPDOWN_MAX MAX_AUDIO_TRACKS
 #define OPTIONS_DROPDOWN_VISIBLE_MAX 10
-static const char *optionsNames[OPTIONS_COUNT] = {"Quality", "Audio", "Subtitles", "Subs language", "Chapters", "Crop to Fill", "Autoplay", "Playback Settings"};
+static const char *optionsNames[OPTIONS_COUNT] = {"Quality", "Audio", "Subtitles", "Subs language", "Chapters", "Crop to Fill", "Autoplay", "Download", "Playback Settings"};
 static const char *optionsValues[OPTIONS_COUNT][OPTIONS_DROPDOWN_MAX] = {
    {"Auto"},
    {"Default"},
@@ -100,9 +100,10 @@ static const char *optionsValues[OPTIONS_COUNT][OPTIONS_DROPDOWN_MAX] = {
    {"Open chapters"},
    {"Off", "On"},
    {"Off", "On"},
+   {"Start"},
    {"Open settings"}
 };
-static int optionsValueCounts[OPTIONS_COUNT] = {1, 1, 2, 1, 1, 2, 2, 1};
+static int optionsValueCounts[OPTIONS_COUNT] = {1, 1, 2, 1, 1, 2, 2, 1, 1};
 static char optionsQualityLabels[OPTIONS_DROPDOWN_MAX][32];
 static char optionsAudioLabels[MAX_AUDIO_TRACKS][64];
 static int optionsQualityTargets[OPTIONS_DROPDOWN_MAX];
@@ -119,6 +120,8 @@ static int chapterNavIndexValid, chapterNavQueued, chapterNavInFlight;
 static ButtonRepeat optionsNavigateRepeat, optionsDropdownRepeat, chapterNavigateRepeat;
 static Label optionsLabels[OPTIONS_COUNT];
 static Label optionsValueLabels[OPTIONS_DROPDOWN_MAX];
+static Label optionsDownloadLabel;
+static uint64_t optionsDownloadPressedUntil;
 static Label optionsCurrentValueLabels[3]; // Quality, Audio, Subs language
 
 // Playback-owned settings panel. It deliberately shares the persisted settings APIs
@@ -159,6 +162,9 @@ static int requestedIsLocal;
 static char playlistQueue[DOWNLOAD_QUEUE_CAP][16];
 static int playlistQueueCount;
 static int playlistQueueCursor;
+static int playlistShuffleEnabled;
+static int playlistShuffleContext;
+static uint32_t playlistShuffleRandomState;
 static char downloadedQueue[DOWNLOAD_QUEUE_CAP][16];
 static int downloadedQueueCount;
 static int downloadedQueueCursor;
@@ -1354,6 +1360,63 @@ static void autoplayWorker(uint64_t arg)
 
 static void launchVideo(const char *input, int addToNavigation);
 
+void setPlaylistShuffleEnabled(int enabled)
+{
+   playlistShuffleEnabled = enabled != 0;
+}
+
+void setPlaylistShuffleContext(int enabled)
+{
+   playlistShuffleContext = enabled != 0;
+}
+
+int isPlaylistShuffleEnabled(void)
+{
+   return playlistShuffleEnabled;
+}
+
+static uint32_t nextPlaylistShuffleRandom(void)
+{
+   if (!playlistShuffleRandomState) {
+      uint64_t seed = getTimeUs();
+      playlistShuffleRandomState = (uint32_t)(seed ^ (seed >> 32) ^ 0x9E3779B9u);
+      if (!playlistShuffleRandomState) playlistShuffleRandomState = 0xA341316Cu;
+   }
+   uint32_t x = playlistShuffleRandomState;
+   x ^= x << 13;
+   x ^= x >> 17;
+   x ^= x << 5;
+   playlistShuffleRandomState = x;
+   return x;
+}
+
+static void shufflePlaylistQueueFromCurrent(void)
+{
+   if (!playlistShuffleEnabled || !playlistShuffleContext || playlistQueueCount < 2 || playlistQueueCursor < 0)
+      return;
+
+   char ordered[DOWNLOAD_QUEUE_CAP][16];
+   int count = 0;
+   strCopy(ordered[count++], sizeof ordered[0], playlistQueue[playlistQueueCursor]);
+   for (int i = 0; i < playlistQueueCount; i++) {
+      if (i == playlistQueueCursor) continue;
+      strCopy(ordered[count++], sizeof ordered[0], playlistQueue[i]);
+   }
+
+   // Keep the selected video first; randomize every remaining item without replacement.
+   for (int i = count - 1; i > 1; i--) {
+      int j = 1 + (int)(nextPlaylistShuffleRandom() % (uint32_t)i);
+      char temp[16];
+      strCopy(temp, sizeof temp, ordered[i]);
+      strCopy(ordered[i], sizeof ordered[i], ordered[j]);
+      strCopy(ordered[j], sizeof ordered[j], temp);
+   }
+   for (int i = 0; i < count; i++)
+      strCopy(playlistQueue[i], sizeof playlistQueue[0], ordered[i]);
+   playlistQueueCount = count;
+   playlistQueueCursor = 0;
+}
+
 static int launchPlaylistQueueIndex(int index)
 {
    if (index < 0 || index >= playlistQueueCount) return 0;
@@ -1416,6 +1479,8 @@ void playVideoWithQueue(const char *input, const char videoIds[][16], int count,
    if (playlistQueueCount == 0 || playlistQueueCursor < 0) {
       playlistQueueCount = 0;
       playlistQueueCursor = -1;
+   } else {
+      shufflePlaylistQueueFromCurrent();
    }
    launchVideo(input, 1);
 }
@@ -1513,6 +1578,7 @@ static void applyPlaybackUiLabelScale(float scale)
    }
    for (int i = 0; i < OPTIONS_COUNT; i++) SCALE_PLAYBACK_LABEL(optionsLabels[i]);
    for (int i = 0; i < OPTIONS_DROPDOWN_MAX; i++) SCALE_PLAYBACK_LABEL(optionsValueLabels[i]);
+   SCALE_PLAYBACK_LABEL(optionsDownloadLabel);
    for (int i = 0; i < 3; i++) SCALE_PLAYBACK_LABEL(optionsCurrentValueLabels[i]);
    SCALE_PLAYBACK_LABEL(playbackSettingsTitle);
    SCALE_PLAYBACK_LABEL(playbackSubtitleStyleTitle);
@@ -1577,6 +1643,8 @@ static void initPlay(void)
       initLabelRaw(&optionsLabels[i], &uiFont, 0, 0, 520, AUTO, playbackFontSize(27), activeTheme->textPrimary, TEXT_NOWRAP, optionsNames[i]);
    for (int i = 0; i < OPTIONS_DROPDOWN_MAX; i++)
       initLabelRaw(&optionsValueLabels[i], &uiFont, 0, 0, 360, AUTO, playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabelRaw(&optionsDownloadLabel, &uiFont, 0, 0, 150, AUTO, playbackFontSize(23), activeTheme->textPrimary, TEXT_NOWRAP, "Start");
+   optionsDownloadPressedUntil = 0;
    initLabelRaw(&optionsCurrentValueLabels[0], &uiFont, 0, 0, 0, AUTO,
                 playbackFontSize(27), activeTheme->textSecondary, TEXT_NOWRAP, "");
    initLabelRaw(&optionsCurrentValueLabels[1], &uiFont, 0, 0, 400, AUTO,
@@ -2987,7 +3055,31 @@ static void handlePlaybackOptionsInput(void)
       return;
    }
 
-   if (optionsSelected == 7 && (right || cross)) {
+   if (optionsSelected == 7 && cross) {
+      if (state.isLive || requestedIsLocal) return;
+      char videoId[12];
+      if (!extractPlaybackId(requestedInput, videoId)) {
+         showToast("This video cannot be downloaded");
+         return;
+      }
+      SearchResult item;
+      memset(&item, 0, sizeof item);
+      strCopy(item.videoId, sizeof item.videoId, videoId);
+      strCopy(item.title, sizeof item.title, state.title);
+      strCopy(item.author, sizeof item.author, state.author);
+      const char *audioTrackId = "original";
+      if (state.audioPick >= 0 && state.audioPick < state.audioCount &&
+          strcmp(state.audioIds[state.audioPick], "__original_upload__") != 0)
+         audioTrackId = state.audioIds[state.audioPick];
+      const char *activeSubtitle = NULL;
+      if (subtitlesEnabled && state.subtitlePick >= 0 && state.subtitlePick < state.captionCount)
+         activeSubtitle = state.captionTracks[state.subtitlePick].languageCode;
+      enqueuePlaybackDownload(&item, audioTrackId, activeSubtitle);
+      optionsDownloadPressedUntil = getTimeUs() + 180000ULL;
+      return;
+   }
+
+   if (optionsSelected == 8 && (right || cross)) {
       openPlaybackSettings();
       return;
    }
@@ -3323,6 +3415,10 @@ static void drawPlaybackOptions(void)
       if (i == optionsSelected)
          fillGfxRoundedRectangleFixed(x + 18, nameY - 7, panelW - 36,
                                       name->tt.tex.h + 14, 7, activeTheme->rowHighlight);
+      if (i == 7 && (state.isLive || requestedIsLocal))
+         setLabelColor(name, activeTheme->textSecondary);
+      else
+         setLabelColor(name, activeTheme->textPrimary);
       drawLabelAt(name, x + 38, nameY);
 
       if (i == 0 || i == 1 || i == 3) {
@@ -3359,7 +3455,20 @@ static void drawPlaybackOptions(void)
                       getCenteredLabelY(word, toggleY, toggleH));
             drawLabel(word);
          }
-      } else if (i == 0 || i == 1 || i == 3 || i == 4 || i == 6 || i == 7) {
+      } else if (i == 7) {
+         int disabled = state.isLive || requestedIsLocal;
+         int buttonW = 150, buttonH = 34;
+         int buttonX = x + panelW - 38 - buttonW;
+         int buttonY = rowY + (rowH - buttonH) / 2;
+         uint32_t buttonColor = disabled ? activeTheme->surface : activeTheme->accent;
+         if (!disabled && getTimeUs() < optionsDownloadPressedUntil)
+            buttonColor = activeTheme->rowHighlight;
+         fillGfxRoundedRectangleFixed(buttonX, buttonY, buttonW, buttonH, 8, buttonColor);
+         setLabelColor(&optionsDownloadLabel, disabled ? activeTheme->textSecondary : activeTheme->appBg);
+         drawLabelAt(&optionsDownloadLabel,
+                     buttonX + (buttonW - optionsDownloadLabel.tt.tex.w) / 2,
+                     getCenteredLabelY(&optionsDownloadLabel, buttonY, buttonH));
+      } else if (i == 0 || i == 1 || i == 3 || i == 4 || i == 6 || i == 8) {
          int tx = x + panelW - 44;
          int ty = rowY + rowH / 2;
          drawGfxTriangle(tx - 7, ty - 4, activeTheme->textSecondary,
@@ -3415,6 +3524,8 @@ static void drawPlaybackOptions(void)
 
 static void updatePlay(void)
 {
+   updateDownloadOverlay();
+   if (isDownloadSpacePromptOpen()) return;
    if (consumeDownloadCompletion()) showToastFor("Download Complete", 3000000ULL);
 
    // During initial loading there is no adopted VideoPlayer yet. Treat Circle as an
@@ -4337,6 +4448,7 @@ static void drawPlay(void)
          drawLabelAt(&statusLabel, statusX, statusY);
    }
 
+   drawDownloadOverlay(state.screenW);
    // Restore the selected library scale before the next screen is drawn.
    setGfxSdUiScale(selectedUiScale);
 }
@@ -4407,6 +4519,7 @@ static void termPlay(void)
    for (int i = 0; i < MAX_CHAPTERS; i++) { freeLabel(&chapterLabels[i]); freeLabel(&chapterTimeLabels[i]); }
    for (int i = 0; i < OPTIONS_COUNT; i++) freeLabel(&optionsLabels[i]);
    for (int i = 0; i < OPTIONS_DROPDOWN_MAX; i++) freeLabel(&optionsValueLabels[i]);
+   freeLabel(&optionsDownloadLabel);
    for (int i = 0; i < 3; i++) freeLabel(&optionsCurrentValueLabels[i]);
    freeLabel(&playbackSettingsTitle);
    freeLabel(&playbackSubtitleStyleTitle);

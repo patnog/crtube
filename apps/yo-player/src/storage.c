@@ -1030,7 +1030,13 @@ void setSubscribed(const char *channelId, int subscribed)
    subsRevision++;
 }
 
-int isWatched(const char *videoId) { return findWatched(videoId) != NULL; }
+int isWatched(const char *videoId)
+{
+   WatchEntry *entry = findWatched(videoId);
+   if (!entry || entry->duration <= 0) return 0;
+   int completionThreshold = entry->duration > 4 ? entry->duration - 2 : entry->duration;
+   return entry->position >= completionThreshold;
+}
 
 int getWatchedPosition(const char *videoId)
 {
@@ -1058,7 +1064,7 @@ static void saveHistory(void)
 
 void markWatched(const char *videoId)
 {
-   if (!isWatched(videoId)) setWatchedPosition(videoId, 0);   // add new at position 0; keep an existing position
+   if (!findWatched(videoId)) setWatchedPosition(videoId, 0);   // add new at position 0; keep an existing position
 }
 
 void setWatchedPosition(const char *videoId, int seconds)
