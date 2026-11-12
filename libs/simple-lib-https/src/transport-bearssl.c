@@ -18,10 +18,23 @@
 
 #include <stdio.h>    // snprintf
 #include <string.h>   // strlen, strcpy, strncmp, strcmp
+#include <sys/sys_time.h> // request phase timings
 
 #define MAX_REDIRECTS 5   // googlevideo 302s fresh connections to rebalance across its rrN servers
 #define URL_MAX       2048
 #define POOL_SIZE     8   // idle keep-alive connections kept for reuse (covers the concurrent thumbnail workers)
+
+// Experimental only: set to 0 to restore HTTP/1.0 for one-shot LIVE segment requests.
+// LIVE connections are deliberately never pooled in this experiment, even if the response is reusable.
+#ifndef CRTUBE_LIVE_HTTP11_EXPERIMENT
+#define CRTUBE_LIVE_HTTP11_EXPERIMENT 1
+#endif
+
+static int isLiveSegmentUrl(const char *url)
+{
+   return url && strstr(url, "googlevideo.com") && strstr(url, "videoplayback") &&
+          (strstr(url, "/sq/") || strstr(url, "&sq="));
+}
 
 // section: connection pool - idle keep-alive connections held for reuse, keyed by host. one-shot requests
 // (thumbnails, api) hand a connection back here on close instead of tearing down its TLS handshake, and
@@ -60,38 +73,113 @@ static void checkinConn(TlsConn *conn)
 
 static int isRedirect(int status) { return status == 301 || status == 302 || status == 303 || status == 307 || status == 308; }
 
+static int containsNoCase(const char *value, const char *needle)
+{
+   if (!value || !needle || !*needle) return 0;
+   for (; *value; value++) {
+      int i = 0;
+      while (needle[i] && value[i]) {
+         char a = value[i], b = needle[i];
+         if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+         if (b >= 'A' && b <= 'Z') b = (char)(b + ('a' - 'A'));
+         if (a != b) break;
+         i++;
+      }
+      if (!needle[i]) return 1;
+   }
+   return 0;
+}
+
+static int isChunkedEncoding(const char *value)
+{
+   if (!value) return 0;
+   int length = (int)strlen(value);
+   while (length > 0 && (value[length - 1] == ' ' || value[length - 1] == '\t')) length--;
+   if (length != 7) return 0;
+   static const char expected[] = "chunked";
+   for (int i = 0; i < 7; i++) {
+      char c = value[i];
+      if (c >= 'A' && c <= 'Z') c = (char)(c + ('a' - 'A'));
+      if (c != expected[i]) return 0;
+   }
+   return 1;
+}
+
 // get a connection to `host` (reused from the pool if possible), send the request, read the response head.
 // a pooled connection the server closed while idle fails the first write - so retry once with a fresh one.
 // returns the live connection positioned at the body, or NULL.
-static TlsConn *sendReusable(const char *host, const char *path, const char *method, const char *version,
-                            int keepAlive, const char *headerBlock, const void *body, int bodyLen,
-                            int *status, uint64_t *total)
+static TlsConn *sendReusable(const char *host, const char *path, const char *method,
+                            int keepAlive, int liveHttp11, const char *headerBlock,
+                            const void *body, int bodyLen, int *status, uint64_t *total)
 {
    for (int attempt = 0; attempt < 2; attempt++) {
-      TlsConn *conn = (keepAlive && attempt == 0) ? checkoutConn(host) : NULL;   // retry always opens fresh
+      uint64_t connectStartUs = sys_time_get_system_time();
+      TlsConn *conn = (keepAlive && !liveHttp11 && attempt == 0) ? checkoutConn(host) : NULL;
       int reused = conn != NULL;
       if (!reused) {
-         logInfo("[tls] opening a new connection to %s\n", host);   // a fresh handshake, not a reused one
+         logInfo("[tls] opening a new connection to %s\n", host);
          conn = openTlsConn(host);
       }
+      uint64_t connectEndUs = sys_time_get_system_time();
       if (!conn) {
          logError("[tls-diag] connection open failed host=%s attempt=%d reused=%d\n", host, attempt, reused);
          return NULL;
       }
+      if (liveHttp11) setTlsPoolAllowed(conn, 0);
 
-      int sendRc = sendTlsRequest(conn, method, version, keepAlive, host, path, headerBlock, body, bodyLen);
+      const char *requestVersion = liveHttp11 ? "HTTP/1.1" : (keepAlive ? "HTTP/1.0" : "HTTP/1.1");
+      uint64_t sendStartUs = sys_time_get_system_time();
+      int sendRc = sendTlsRequest(conn, method, requestVersion, keepAlive, host, path, headerBlock, body, bodyLen);
+      uint64_t sendEndUs = sys_time_get_system_time();
+      uint64_t headStartUs = sendEndUs;
       int headRc = sendRc == 0 ? readTlsHead(conn, status, total) : -2;
+      uint64_t headEndUs = sys_time_get_system_time();
       if (sendRc == 0 && headRc == 0) {
          logInfo("[tls-diag] request ok host=%s conn=%p reused=%d keepAlive=%d status=%d total=%llu\n",
                  host, conn, reused, keepAlive, status ? *status : 0, (unsigned long long)(total ? *total : 0));
+         if (liveHttp11) {
+            char statusLine[128] = "", connection[64] = "", contentLength[48] = "", transferEncoding[48] = "";
+            getTlsStatusLine(conn, statusLine, sizeof statusLine);
+            if (getTlsHeader(conn, "connection", connection, sizeof connection) != 0) strcpy(connection, "-");
+            if (getTlsHeader(conn, "content-length", contentLength, sizeof contentLength) != 0) strcpy(contentLength, "-");
+            if (getTlsHeader(conn, "transfer-encoding", transferEncoding, sizeof transferEncoding) != 0) strcpy(transferEncoding, "-");
+            logInfo("[live-http11-diag] host=%s version=%s requestKeepAlive=%d connectMs=%llu sendTlsRequestMs=%llu responseHeadMs=%llu statusLine=\"%s\" connection=%s contentLength=%s transferEncoding=%s pool=disabled\n",
+                    host, requestVersion, keepAlive,
+                    (unsigned long long)((connectEndUs-connectStartUs)/1000ull),
+                    (unsigned long long)((sendEndUs-sendStartUs)/1000ull),
+                    (unsigned long long)((headEndUs-headStartUs)/1000ull),
+                    statusLine, connection, contentLength, transferEncoding);
+            // HTTP/1.1 responses without Content-Length or supported chunked framing must close the
+            // connection to delimit the body. Reject an unframed persistent response before reading it.
+            int hasLength = strcmp(contentLength, "-") != 0;
+            int hasTransferEncoding = strcmp(transferEncoding, "-") != 0;
+            int supportedChunked = hasTransferEncoding && isChunkedEncoding(transferEncoding);
+            int connectionCloses = containsNoCase(connection, "close");
+            int responseCode = status ? *status : 0;
+            if ((responseCode == 200 || responseCode == 206) &&
+                ((!hasLength && !supportedChunked && !connectionCloses) ||
+                 (hasTransferEncoding && !supportedChunked) ||
+                 (hasLength && hasTransferEncoding))) {
+               logWarn("[live-http11-framing] rejected status=%d connection=%s contentLength=%s transferEncoding=%s reason=unsupported-or-ambiguous-framing\n",
+                       status ? *status : 0, connection, contentLength, transferEncoding);
+               closeTlsConn(conn);
+               return NULL;
+            }
+         }
          return conn;
       }
 
+      if (liveHttp11)
+         logWarn("[live-http11-fail] host=%s connectMs=%llu sendTlsRequestMs=%llu responseHeadMs=%llu sendRc=%d headRc=%d bearssl=%d\n",
+                 host, (unsigned long long)((connectEndUs-connectStartUs)/1000ull),
+                 (unsigned long long)((sendEndUs-sendStartUs)/1000ull),
+                 (unsigned long long)((headEndUs-headStartUs)/1000ull),
+                 sendRc, headRc, getLastTlsError(conn));
       logError("[tls-diag] request failed host=%s conn=%p reused=%d sendRc=%d headRc=%d bearssl=%d\n",
                host, conn, reused, sendRc, headRc, getLastTlsError(conn));
       if (!reused) { closeTlsConn(conn); return NULL; }
       closeTlsConn(conn);
-      logWarn("[tls] reused %s went stale, retrying fresh\n", host);   // loop retries with a fresh connection
+      logWarn("[tls] reused %s went stale, retrying fresh\n", host);
    }
    return NULL;
 }
@@ -134,11 +222,17 @@ static void *openBearssl(const char *method, const char *url, const HttpHeader *
 
       int code = 0;
       uint64_t total = 0;
-      // Streaming deliberately stays out of the HTTP/1.0 idle pool: each query-range request has a
-      // different URL/range and is currently sent with Connection: close. Logs expose this connection
-      // churn; changing it to persistent HTTP/1.1 requires confirming Googlevideo supports reuse first.
-      TlsConn *conn = sendReusable(host, path, hop ? "GET" : method, streaming ? "HTTP/1.1" : "HTTP/1.0",
-                                   !streaming, headerBlock, hop ? NULL : body, hop ? 0 : bodyLen, &code, &total);
+      // Only Googlevideo DASH segment requests opt into the HTTP/1.1 experiment. Other LIVE/API/VOD
+      // requests retain their existing protocol and pooling behavior. Experimental LIVE sockets are
+      // closed after the response: response framing and trailers must be validated before reuse is enabled.
+      int liveHttp11 = 0;
+#if CRTUBE_LIVE_HTTP11_EXPERIMENT
+      liveHttp11 = isLiveSegmentUrl(target);
+#endif
+      int keepAlive = !streaming || liveHttp11;
+      TlsConn *conn = sendReusable(host, path, hop ? "GET" : method,
+                                   keepAlive, liveHttp11, headerBlock, hop ? NULL : body,
+                                   hop ? 0 : bodyLen, &code, &total);
       if (!conn) return NULL;
 
       char location[URL_MAX];

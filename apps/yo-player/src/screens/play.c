@@ -58,6 +58,7 @@
 #define LIVE_START_BEHIND 3
 #define LIVE_WINDOW_MARGIN 6
 #define LIVE_EDGE_SLACK_SEC 3.0f
+#define LIVE_STALL_TIMEOUT_US 20000000ULL
 #define CROSS_RESTART_HOLD_US 3000000ULL
 #define SEEK_ACCEL_1_US     1500000ULL
 #define SEEK_ACCEL_2_US     3000000ULL
@@ -73,6 +74,7 @@
 // subtitles: Triangle toggles captions on/off; language selection lives in Options.
 #define SUBTITLE_TEXT_SIZE 30
 #define MAX_AUDIO_TRACKS 128
+#define MAX_VOD_FALLBACK_ATTEMPTS 4
 
 // description overlay: SELECT toggles the description full-screen; up/down scroll it.
 #define DESCRIPTION_MARGIN_X    120
@@ -391,6 +393,17 @@ static struct {
    char             liveAudioOpen[MAX_STREAM_URL + 48];
    VideoPlayer     *liveRetiringPlayer;
    int              liveReopenThreadActive;
+   int              liveRefreshActive;
+   int              liveRefreshAttempts;
+   uint64_t         liveRefreshStableSinceUs;
+   uint64_t         liveLastFrameUs;  // last newly presented frame; detects a stalled LIVE transport
+   int              liveFailureVisible;
+   VideoPlayer     *vodRetiringPlayer;
+   int              vodRefreshActive;
+   int              vodRefreshAttempts;
+   int              vodRefreshResumePending;
+   float            vodRefreshPosition;
+   uint64_t         vodRefreshStableSinceUs;
    const uint8_t   *lastFrame;        // fps measure: a changed pointer means a newly presented frame
    int              framesThisSecond, measuredFps;
    uint64_t         fpsTickUs;
@@ -442,6 +455,8 @@ static Label statusLabel;
 static Label statLabels[STAT_LINES];
 static Label timeLeftLabel, timeRightLabel;   // seek bar: current time (left) / total (right)
 static Label liveBadgeLabel, backToLabel;
+static Label liveFailureTitleLabel, liveFailureBodyLabel;
+static ButtonHints liveFailureHints;
 static Label toastLabel;                      // brief centred toast ("Skipped ...", "Subtitles: ...")
 static Label askPromptPrefixLabel, askPromptSuffixLabel;
 static Label titleLabel;                      // video title, top-left while the HUD is visible
@@ -525,6 +540,7 @@ static int waitForInitialPlayerReady(VideoPlayer *player, unsigned timeoutMs)
 {
    uint64_t started = sys_time_get_system_time();
    while (player && !playbackCancelRequested() && !isVideoPlayerReady(player) &&
+          !isVideoPlayerFailed(player) &&
           sys_time_get_system_time() - started < (uint64_t)timeoutMs * 1000ull)
       sleepMs(50);
    return player && !playbackCancelRequested() && isVideoPlayerReady(player);
@@ -587,19 +603,19 @@ static VideoPlayer *openInitialWithFallback(const StreamInfo *info,
    }
    if (playbackCancelRequested() || !allowFallback) return NULL;
 
-   // Test the known muxed and AVC renditions first, then any other compatible MP4
-   // video formats. Keep the list bounded so one bad video cannot stall playback forever.
+   // Test the known muxed and AVC renditions first, then other compatible MP4
+   // formats. Primary plus four fallbacks is the hard initial VOD attempt budget.
    static const int preferredItags[] = { 18, 134, 135, 136, 137 };
-   const StreamFormat *attempts[12];
+   const StreamFormat *attempts[MAX_VOD_FALLBACK_ATTEMPTS];
    int count = 0;
    for (int i = 0; i < (int)(sizeof preferredItags / sizeof preferredItags[0]); i++) {
       const StreamFormat *f = findFallbackItag(info, preferredItags[i]);
       if (!f || f == video || strcmp(f->url, video->url) == 0) continue;
       int duplicate = 0;
       for (int j = 0; j < count; j++) if (strcmp(attempts[j]->url, f->url) == 0) duplicate = 1;
-      if (!duplicate && count < (int)(sizeof attempts / sizeof attempts[0])) attempts[count++] = f;
+      if (!duplicate && count < MAX_VOD_FALLBACK_ATTEMPTS) attempts[count++] = f;
    }
-   for (int i = 0; i < info->formatCount && count < (int)(sizeof attempts / sizeof attempts[0]); i++) {
+   for (int i = 0; i < info->formatCount && count < MAX_VOD_FALLBACK_ATTEMPTS; i++) {
       const StreamFormat *f = &info->formats[i];
       if (!fallbackFormatUsable(f) || f == video || strcmp(f->url, video->url) == 0) continue;
       int duplicate = 0;
@@ -1246,11 +1262,13 @@ static void worker(uint64_t arg)
    // The same ID is used by local history and by the saved position table.
    {
       char resumeId[12];
-      int resumeAt = (!state.isLive && extractPlaybackId(requestedInput, resumeId))
-                   ? getWatchedPosition(resumeId) : 0;
+      int savedResumeAt = (!state.isLive && extractPlaybackId(requestedInput, resumeId))
+                        ? getWatchedPosition(resumeId) : 0;
+      float resumeAt = state.vodRefreshResumePending ? state.vodRefreshPosition : (float)savedResumeAt;
       float duration = getVideoDurationSeconds(state.pendingPlayer);
-      if (resumeAt > 3 && (duration <= 0 || resumeAt < duration - 10))
-         seekVideoPlayer(state.pendingPlayer, (float)resumeAt);
+      if (resumeAt > 3.0f && (duration <= 0 || resumeAt < duration - 10.0f))
+         seekVideoPlayer(state.pendingPlayer, resumeAt);
+      if (state.vodRefreshResumePending) state.vodRefreshResumePending = 0;
    }
 
 done:
@@ -1259,6 +1277,210 @@ done:
    __sync_synchronize();
    state.workerDone = 1;
    exitThread();
+}
+
+static void liveRefreshWorker(uint64_t delayMs)
+{
+   VideoPlayer *old = state.liveRetiringPlayer;
+   state.liveRetiringPlayer = NULL;
+   if (old) destroyVideoPlayer(old);
+
+   // Short, cancellable backoff: leaving playback must not wait for the full delay.
+   uint64_t remaining = delayMs;
+   while (remaining > 0 && !playbackCancelRequested()) {
+      unsigned step = remaining > 50 ? 50 : (unsigned)remaining;
+      sleepMs(step);
+      remaining -= step;
+   }
+   if (playbackCancelRequested()) {
+      __sync_synchronize();
+      state.workerDone = 1;
+      exitThread();
+   }
+   // Reuse the complete resolver/open path. It fetches fresh YouTube playback data and
+   // creates a new VideoPlayer, demuxers, segment sources, decoder and audio pipeline.
+   worker(0);
+}
+
+static void vodRefreshWorker(uint64_t delayMs)
+{
+   VideoPlayer *old = state.vodRetiringPlayer;
+   state.vodRetiringPlayer = NULL;
+   if (old) destroyVideoPlayer(old);
+
+   uint64_t remaining = delayMs;
+   while (remaining > 0 && !playbackCancelRequested()) {
+      unsigned step = remaining > 50 ? 50 : (unsigned)remaining;
+      sleepMs(step);
+      remaining -= step;
+   }
+   if (playbackCancelRequested()) {
+      __sync_synchronize();
+      state.workerDone = 1;
+      exitThread();
+   }
+
+   // Re-resolve the VOD and build a completely new player/session. The resume point
+   // was captured before teardown and is applied by worker() after the new player opens.
+   worker(0);
+}
+
+static void showVodRefreshFailure(void)
+{
+   if (state.player) {
+      finishGfx();
+      destroyVideoPlayer(state.player);
+      state.player = NULL;
+   }
+   if (state.pendingPlayer) {
+      finishGfx();
+      destroyVideoPlayer(state.pendingPlayer);
+      state.pendingPlayer = NULL;
+   }
+   if (state.vodRetiringPlayer) {
+      finishGfx();
+      destroyVideoPlayer(state.vodRetiringPlayer);
+      state.vodRetiringPlayer = NULL;
+   }
+   state.vodRefreshActive = 0;
+   state.liveFailureVisible = 1;
+   state.stage = STAGE_FAILED;
+   strCopy(state.message, sizeof state.message, "Unable to renew this video playback.");
+   setLabelText(&liveFailureTitleLabel, "Playback failed");
+   setLabelText(&liveFailureBodyLabel, "The video could not be renewed after 5 recovery attempts.");
+   logError("[yt-vod-refresh] exhausted 5 recovery attempts; playback stopped\n");
+}
+
+static void scheduleVodHttpRefresh(void)
+{
+   static const unsigned delaysMs[5] = { 500, 1000, 2000, 3000, 5000 };
+   if (state.isLive || state.liveFailureVisible || state.vodRefreshActive || state.threadActive ||
+       state.resolutionSwitchThreadActive || state.audioSwitchThreadActive ||
+       state.liveReopenThreadActive || state.subThreadActive) return;
+
+   if (state.vodRefreshAttempts >= 5) {
+      showVodRefreshFailure();
+      return;
+   }
+
+   if (state.vodRefreshAttempts == 0) {
+      if (!state.player) return;
+      state.vodRefreshPosition = getVideoPositionSeconds(state.player);
+      if (state.vodRefreshPosition < 0.0f) state.vodRefreshPosition = 0.0f;
+      state.vodRefreshResumePending = 1;
+      state.pauseWhenReady = isVideoPaused(state.player);
+   }
+
+   unsigned delayMs = delaysMs[state.vodRefreshAttempts++];
+   logWarn("[yt-vod-refresh] recovery attempt %d/5 in %u ms at %.2fs\n",
+           state.vodRefreshAttempts, delayMs, state.vodRefreshPosition);
+   strCopy(state.message, sizeof state.message, "Refreshing video playback...");
+   setLabelText(&statusLabel, state.message);
+   state.stage = STAGE_LOADING;
+   state.firstFrameSeen = 0;
+   state.seeking = 0;
+   state.controlsDismissed = 1;
+   state.lastFrame = NULL;
+   state.vodRefreshStableSinceUs = 0;
+   state.vodRetiringPlayer = state.player;
+   state.player = NULL;
+   finishGfx();
+
+   free(state.subtitleTrack);
+   state.subtitleTrack = NULL;
+   free(state.captionTracks);
+   state.captionTracks = NULL;
+   state.captionCount = 0;
+   state.subtitleFetched = -1;
+   state.subtitlePick = -1;
+   lastSubtitlePick = -1;
+   state.subtitlesReady = 0;
+   state.subtitleScanFrom = 0;
+   state.workerDone = 0;
+   state.vodRefreshActive = 1;
+   state.threadActive = (spawnJoinableThread(&state.workerTid, vodRefreshWorker, delayMs,
+                         THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-vod-refresh") == 0);
+   if (!state.threadActive) {
+      state.vodRefreshActive = 0;
+      showVodRefreshFailure();
+   }
+}
+
+static void showLiveRefreshFailure(void)
+{
+   if (state.player) {
+      finishGfx();
+      destroyVideoPlayer(state.player);
+      state.player = NULL;
+   }
+   if (state.pendingPlayer) {
+      finishGfx();
+      destroyVideoPlayer(state.pendingPlayer);
+      state.pendingPlayer = NULL;
+   }
+   if (state.liveRetiringPlayer) {
+      finishGfx();
+      destroyVideoPlayer(state.liveRetiringPlayer);
+      state.liveRetiringPlayer = NULL;
+   }
+   state.liveRefreshActive = 0;
+   state.liveFailureVisible = 1;
+   state.stage = STAGE_FAILED;
+   strCopy(state.message, sizeof state.message, "Unable to reconnect to this LIVE stream.");
+   setLabelText(&liveFailureTitleLabel, "LIVE playback failed");
+   setLabelText(&liveFailureBodyLabel, "The stream could not be renewed after 5 attempts.");
+   logError("[yt-live-refresh] exhausted 5 renewal attempts; playback stopped\n");
+}
+
+static void scheduleLiveRefresh(void)
+{
+   static const unsigned delaysMs[5] = { 500, 1000, 2000, 3000, 5000 };
+   if (!state.isLive || state.liveFailureVisible || state.liveRefreshActive || state.threadActive ||
+       state.resolutionSwitchThreadActive || state.audioSwitchThreadActive ||
+       state.liveReopenThreadActive || state.subThreadActive) return;
+   if (state.liveRefreshAttempts >= 5) {
+      showLiveRefreshFailure();
+      return;
+   }
+
+   unsigned delayMs = delaysMs[state.liveRefreshAttempts];
+   state.liveRefreshAttempts++;
+   logWarn("[yt-live-refresh] renewal attempt %d/5 in %u ms\n", state.liveRefreshAttempts, delayMs);
+   strCopy(state.message, sizeof state.message, "Reconnecting to LIVE...");
+   state.stage = STAGE_LOADING;
+   state.firstFrameSeen = 0;
+   state.liveAnchored = 0;
+   state.liveReturnNoticePending = 1;
+   state.liveReturnNoticeUs = 0;
+   state.liveRefreshStableSinceUs = 0;
+   state.seeking = 0;
+   state.controlsDismissed = 1;
+   state.lastFrame = NULL;
+   state.liveLastFrameUs = 0;
+   state.liveRetiringPlayer = state.player;
+   state.player = NULL;
+   finishGfx();
+
+   // The old player is retired before resolving. Remove session-owned subtitle data so the
+   // replacement worker can build a clean set from the new extractor response.
+   free(state.subtitleTrack);
+   state.subtitleTrack = NULL;
+   free(state.captionTracks);
+   state.captionTracks = NULL;
+   state.captionCount = 0;
+   state.subtitleFetched = -1;
+   state.subtitlePick = -1;
+   lastSubtitlePick = -1;
+   state.subtitlesReady = 0;
+   state.subtitleScanFrom = 0;
+   state.workerDone = 0;
+   state.liveRefreshActive = 1;
+   state.threadActive = (spawnJoinableThread(&state.workerTid, liveRefreshWorker, delayMs,
+                         THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-live-refresh") == 0);
+   if (!state.threadActive) {
+      state.liveRefreshActive = 0;
+      showLiveRefreshFailure();
+   }
 }
 
 // a bare 11-char videoId (not a typed url) is what SponsorBlock and history key on; typed urls no-op.
@@ -1566,6 +1788,8 @@ static void applyPlaybackUiLabelScale(float scale)
    SCALE_PLAYBACK_LABEL(timeRightLabel);
    SCALE_PLAYBACK_LABEL(liveBadgeLabel);
    SCALE_PLAYBACK_LABEL(backToLabel);
+   SCALE_PLAYBACK_LABEL(liveFailureTitleLabel);
+   SCALE_PLAYBACK_LABEL(liveFailureBodyLabel);
    SCALE_PLAYBACK_LABEL(toastLabel);
    SCALE_PLAYBACK_LABEL(askPromptPrefixLabel);
    SCALE_PLAYBACK_LABEL(askPromptSuffixLabel);
@@ -1628,6 +1852,12 @@ static void initPlay(void)
    initLabel(&timeRightLabel, &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabelRaw(&liveBadgeLabel, &uiFont, 0, 0, 120, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "LIVE");
    initLabelRaw(&backToLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "Back to");
+   initLabelRaw(&liveFailureTitleLabel, &uiFont, 0, 0, 760, AUTO, playbackFontSize(30), activeTheme->textPrimary, TEXT_NOWRAP, "LIVE playback failed");
+   initLabelRaw(&liveFailureBodyLabel, &uiFont, 0, 0, 760, AUTO, playbackFontSize(22), activeTheme->textSecondary, TEXT_WRAP, "The stream could not be renewed after 5 attempts.");
+   initButtonHints(&liveFailureHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
+   addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CROSS), "Return");
+   addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CIRCLE), "Return");
+   setButtonHintsStableLayout(&liveFailureHints, 1);
    initLabelRaw(&toastLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");   // raw: shows track names
    initLabelRaw(&askPromptPrefixLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "Press");
    initLabelRaw(&askPromptSuffixLabel, &uiFont, 0, 0, 260, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "to skip sponsor");
@@ -2301,6 +2531,8 @@ static int reopenLiveAt(long playSq)
    state.liveAnchored = 0;
    state.seeking = 0;
    state.pauseWhenReady = playSq < 0 ? 0 : isVideoPaused(state.player);
+   state.lastFrame = NULL;
+   state.liveLastFrameUs = 0;
 
    logInfo("[yt] LIVE rebuild at sq=%ld edge=%ld%s\\n",
            state.liveFirstSq, edge, playSq < 0 ? " (near live edge)" : "");
@@ -3534,6 +3766,14 @@ static void updatePlay(void)
    if (isDownloadSpacePromptOpen()) return;
    if (consumeDownloadCompletion()) showToastFor("Download Complete", 3000000ULL);
 
+   if (state.liveFailureVisible) {
+      if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_CIRCLE)) {
+         popScreen();
+         return;
+      }
+      return;
+   }
+
    // During initial loading there is no adopted VideoPlayer yet. Treat Circle as an
    // interrupt before any HUD/paused-state query can inspect state.player.
    if (state.stage == STAGE_LOADING && isPadButtonPressed(PAD_BTN_CIRCLE)) {
@@ -3582,6 +3822,8 @@ static void updatePlay(void)
          state.player = state.pendingPlayer;
          state.pendingPlayer = NULL;
          state.liveReopenThreadActive = 0;
+         state.liveRefreshActive = 0;
+         state.vodRefreshActive = 0;
          state.message[0] = 0;
          setVideoPlayerAudioVolume(state.player, getVolumeMeterFraction(&volumeMeter));
          if (state.pauseWhenReady) setVideoPaused(state.player, 1);
@@ -3591,6 +3833,56 @@ static void updatePlay(void)
          state.stage = STAGE_PLAYING;
          rememberAutoplayVideo(requestedInput);
          showControls();
+      } else if (state.liveRefreshActive && !playbackCancelRequested()) {
+         state.liveRefreshActive = 0;
+         if (state.liveRefreshAttempts >= 5) showLiveRefreshFailure();
+         else scheduleLiveRefresh();
+      } else if (state.vodRefreshActive && !playbackCancelRequested()) {
+         state.vodRefreshActive = 0;
+         if (state.vodRefreshAttempts >= 5) showVodRefreshFailure();
+         else scheduleVodHttpRefresh();
+      } else if (state.liveReopenThreadActive && !playbackCancelRequested()) {
+         state.liveReopenThreadActive = 0;
+         logWarn("[yt-live-refresh] descriptor rebuild failed; falling back to a fresh YouTube resolve\n");
+         scheduleLiveRefresh();
+      }
+   }
+
+   // Any HTTP error from a LIVE segment source is a session/transport failure.
+   // Do not treat it as EOF: renew the extractor response and rebuild the complete player.
+   if (state.stage == STAGE_PLAYING && state.isLive && state.player &&
+       isVideoPlayerFailed(state.player) && getVideoPlayerLiveError(state.player) != 0) {
+      int error = getVideoPlayerLiveError(state.player);
+      if (error >= 400)
+         logWarn("[yt-live-refresh] LIVE HTTP %d; renewing playback session\n", error);
+      else
+         logWarn("[yt-live-refresh] LIVE transport failed; renewing playback session\n");
+      scheduleLiveRefresh();
+   }
+
+   // VOD transport and HTTP failures use the same bounded full-session replacement strategy.
+   // Decoder/demux failures without a source error remain separate and do not trigger network retries.
+   if (state.stage == STAGE_PLAYING && !state.isLive && state.player &&
+       isVideoPlayerFailed(state.player) && getVideoPlayerSourceError(state.player) != 0) {
+      int error = getVideoPlayerSourceError(state.player);
+      if (error >= 400)
+         logWarn("[yt-vod-refresh] VOD HTTP %d; renewing playback session\n", error);
+      else
+         logWarn("[yt-vod-refresh] VOD transport failed; renewing playback session\n");
+      scheduleVodHttpRefresh();
+   }
+
+   // A LIVE source can stop delivering frames without transitioning the player to failed.
+   // Detect that separately from HTTP errors, while respecting pause and user seek operations.
+   if (state.stage == STAGE_PLAYING && state.isLive && state.player && state.firstFrameSeen) {
+      uint64_t liveNow = sys_time_get_system_time();
+      if (isVideoPaused(state.player) || state.seeking) {
+         state.liveLastFrameUs = liveNow;
+      } else if (state.liveLastFrameUs &&
+                 liveNow - state.liveLastFrameUs >= LIVE_STALL_TIMEOUT_US) {
+         logWarn("[yt-live-refresh] no new LIVE frame for %llu ms; renewing playback session\n",
+                 (unsigned long long)(LIVE_STALL_TIMEOUT_US / 1000ULL));
+         scheduleLiveRefresh();
       }
    }
 
@@ -3922,16 +4214,40 @@ static void updatePlay(void)
 // measure the real presented frame rate: a changed frame pointer is a new frame; tally them per second.
 static void measureFps(const uint8_t *frame)
 {
+   static uint64_t diagWindowUs;
+   static uint64_t diagLastFrameUs;
+   static uint64_t diagMaxFrameGapUs;
+   static uint64_t diagCalls;
+   static uint64_t diagPointerChanges;
    uint64_t now = sys_time_get_system_time();
    int newFrame = frame && frame != state.lastFrame;
+   diagCalls++;
    if (newFrame) {
+      if (diagLastFrameUs && now - diagLastFrameUs > diagMaxFrameGapUs)
+         diagMaxFrameGapUs = now - diagLastFrameUs;
+      diagLastFrameUs = now;
+      diagPointerChanges++;
       state.framesThisSecond++;
       state.lastFrame = frame;
+      if (state.isLive && state.stage == STAGE_PLAYING) {
+         state.liveLastFrameUs = now;
+      }
    }
    if (now - state.fpsTickUs >= 1000000) {
       state.measuredFps = state.framesThisSecond;
       state.framesThisSecond = 0;
       state.fpsTickUs = now;
+   }
+   if (!diagWindowUs) diagWindowUs = now;
+   if (state.isLive && now - diagWindowUs >= 2000000ull) {
+      logInfo("[render-live-diag] spanMs=%llu calls=%llu pointerChanges=%llu measuredFps=%d lastFrameAgeMs=%llu maxFrameGapMs=%llu framePtr=%p stage=%d live=%d paused=%d seeking=%d\n",
+              (unsigned long long)((now-diagWindowUs)/1000ull), (unsigned long long)diagCalls,
+              (unsigned long long)diagPointerChanges, state.measuredFps,
+              (unsigned long long)(diagLastFrameUs && now >= diagLastFrameUs ? (now-diagLastFrameUs)/1000ull : 0),
+              (unsigned long long)(diagMaxFrameGapUs/1000ull), (void *)frame, state.stage, state.isLive,
+              state.player ? isVideoPaused(state.player) : 0, state.seeking);
+      diagWindowUs = now;
+      diagCalls = diagPointerChanges = diagMaxFrameGapUs = 0;
    }
 
    if (state.vidFps < 50 || state.fpsFallbackChecked || state.fpsFallbackAttempted ||
@@ -4393,6 +4709,24 @@ static void drawPlay(void)
             }
          }
          state.firstFrameSeen = 1;
+         if (state.liveRefreshAttempts > 0) {
+            uint64_t stableNow = sys_time_get_system_time();
+            if (!state.liveRefreshStableSinceUs) state.liveRefreshStableSinceUs = stableNow;
+            else if (stableNow - state.liveRefreshStableSinceUs >= 60000000ULL) {
+               logInfo("[yt-live-refresh] LIVE session stable for 60s; renewal counter reset\n");
+               state.liveRefreshAttempts = 0;
+               state.liveRefreshStableSinceUs = 0;
+            }
+         }
+         if (!state.isLive && state.vodRefreshAttempts > 0) {
+            uint64_t stableNow = sys_time_get_system_time();
+            if (!state.vodRefreshStableSinceUs) state.vodRefreshStableSinceUs = stableNow;
+            else if (stableNow - state.vodRefreshStableSinceUs >= 60000000ULL) {
+               logInfo("[yt-vod-refresh] VOD session stable for 60s; HTTP recovery counter reset\n");
+               state.vodRefreshAttempts = 0;
+               state.vodRefreshStableSinceUs = 0;
+            }
+         }
          if (state.isLive && !state.liveAnchored) {
             long actualFirst = getVideoLiveFirstSq(state.player);
             if (actualFirst >= 0) state.liveFirstSq = actualFirst;
@@ -4454,7 +4788,21 @@ static void drawPlay(void)
          drawLabelAt(&statusLabel, statusX, statusY);
    }
 
-   drawDownloadOverlay(state.screenW);
+   if (state.liveFailureVisible) {
+      int panelW = state.screenW - 80, panelH = 300;
+      if (panelW > 860) panelW = 860;
+      int panelX = (state.screenW - panelW) / 2;
+      int panelY = (state.screenH - panelH) / 2;
+      fillGfxRectangle(0, 0, state.screenW, state.screenH, 0xD0000000);
+      fillGfxRoundedRectangleFixed(panelX, panelY, panelW, panelH, 14, activeTheme->surface);
+      strokeGfxRectangle(panelX, panelY, panelW, panelH, 2, activeTheme->focusBorder);
+      drawLabelAt(&liveFailureTitleLabel, state.screenW / 2 - liveFailureTitleLabel.tt.tex.w / 2, panelY + 54);
+      drawLabelAt(&liveFailureBodyLabel, state.screenW / 2 - liveFailureBodyLabel.tt.tex.w / 2, panelY + 112);
+      liveFailureHints.y = panelY + panelH - 56;
+      drawButtonHints(&liveFailureHints, state.screenW);
+   }
+
+   if (!state.liveFailureVisible) drawDownloadOverlay(state.screenW);
    // Restore the selected library scale before the next screen is drawn.
    setGfxSdUiScale(selectedUiScale);
 }
@@ -4500,19 +4848,23 @@ static void termPlay(void)
          setWatchedPosition(historyId, savedPosition);
       }
    }
-   if (state.player || state.pendingPlayer || state.pendingResolutionPlayer || state.retiringResolutionPlayer || state.liveRetiringPlayer)
+   if (state.player || state.pendingPlayer || state.pendingResolutionPlayer || state.retiringResolutionPlayer || state.liveRetiringPlayer || state.vodRetiringPlayer)
       finishGfx();   // RSX may still be sampling a frame buffer
    if (state.player) { destroyVideoPlayer(state.player); state.player = NULL; }
    if (state.pendingPlayer) { destroyVideoPlayer(state.pendingPlayer); state.pendingPlayer = NULL; }
    if (state.pendingResolutionPlayer) { destroyVideoPlayer(state.pendingResolutionPlayer); state.pendingResolutionPlayer = NULL; }
    if (state.retiringResolutionPlayer) { destroyVideoPlayer(state.retiringResolutionPlayer); state.retiringResolutionPlayer = NULL; }
    if (state.liveRetiringPlayer) { destroyVideoPlayer(state.liveRetiringPlayer); state.liveRetiringPlayer = NULL; }
+   if (state.vodRetiringPlayer) { destroyVideoPlayer(state.vodRetiringPlayer); state.vodRetiringPlayer = NULL; }
    freeLabel(&statusLabel);
    for (int i = 0; i < STAT_LINES; i++) freeLabel(&statLabels[i]);
    freeLabel(&timeLeftLabel);
    freeLabel(&timeRightLabel);
    freeLabel(&liveBadgeLabel);
    freeLabel(&backToLabel);
+   freeLabel(&liveFailureTitleLabel);
+   freeLabel(&liveFailureBodyLabel);
+   termButtonHints(&liveFailureHints);
    freeLabel(&toastLabel);
    freeLabel(&askPromptPrefixLabel);
    freeLabel(&askPromptSuffixLabel);

@@ -33,6 +33,10 @@ int      seekVideoSource(VideoSource *source, uint64_t offset);              // 
 uint64_t getVideoSourcePosition(const VideoSource *source);
 uint64_t getVideoSourceSize(const VideoSource *source);
 long     getVideoSourceLiveFirstSq(const VideoSource *source);
+int      getVideoSourceLiveHttpError(const VideoSource *source);
+int      getVideoSourceLiveError(const VideoSource *source);
+int      getVideoSourceHttpError(const VideoSource *source);
+int      getVideoSourceError(const VideoSource *source);
 void     cancelVideoSource(VideoSource *source);   // unblock a live read waiting on the edge (before teardown)
 void     closeVideoSource(VideoSource *source);
 

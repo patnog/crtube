@@ -46,6 +46,8 @@ int sendTlsRequest(TlsConn *conn, const char *method, const char *httpVersion, i
                    const char *path, const char *extraHeaders, const void *body, int bodyLen);
 
 const char *getTlsHost(TlsConn *conn);   // the host this connection is to (pool key)
+void        setTlsPoolAllowed(TlsConn *conn, int allowed); // disable pooling for experimental requests
+int         getTlsStatusLine(TlsConn *conn, char *out, int cap); // response status line, valid after readTlsHead
 int         isTlsReusable(TlsConn *conn); // 1 if the whole body was read and the server left it open for reuse
 
 // read and parse the response head. fills *status (HTTP status code) and *totalSize (the full resource

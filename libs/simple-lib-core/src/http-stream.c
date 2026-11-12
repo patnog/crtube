@@ -29,7 +29,7 @@
 #define PREFETCH_CHUNK    (8 * 1024)   // bytes per recv step; small keeps seek-reconnect reaction snappy
 #define FORWARD_RECONNECT (1 * 1024 * 1024)
 #define SEEK_COAST_BYTES  (256 * 1024)   // a forward seek gap this small streams through faster than a reconnect
-#define PREFETCH_ERROR_RETRIES 3       // reconnects to try on a failed recv/open before latching an error
+#define PREFETCH_ERROR_RETRIES 5       // total consecutive transport failures before latching an error
 
 // a query-range host (see usesQueryRange) serves exactly six requests per address and then refuses every
 // one after it, measured on 2026-08-19: the budget does not refill with time, and a freshly resolved
@@ -43,7 +43,8 @@
 
 // prefetch-thread idle/backoff waits, in milliseconds.
 #define ERROR_IDLE_MS        20   // latched failure: idle until the reader closes the stream
-#define RECONNECT_BACKOFF_MS 100  // wait after a failed reopen before trying again
+#define RECONNECT_BACKOFF_MS 500  // initial delay after a failed reopen
+#define RECONNECT_BACKOFF_MAX_MS 5000
 #define PREFETCH_IDLE_MS     4    // buffered far enough ahead (or at eof): brief idle
 #define READER_WAIT_MS       2    // reader has nothing buffered yet: let the prefetch catch up
 
@@ -62,10 +63,12 @@ struct HttpStream {
    uint64_t         bytesPerSecond; // the media's own byte rate, 0 if unknown: paces requests on a query-range host
    int              slot;          // index in streams[], so the log can tell one stream from another
    int              refused;       // the last open was turned down by the server, not broken by the network
+   volatile int     httpError;     // last non-retryable HTTP response status (400+)
    int              emptyWindows;  // consecutive connections that ended without delivering anything
    unsigned int     rangeWindowCount; // query-range requests opened for this stream
    int              needReconnect; // reader -> prefetch: position moved off the window, reopen there
-   int              errorRetries;  // consecutive failed recv/reconnect attempts (reset on progress)
+   int              errorRetries;  // consecutive failed transport operations; reset only after a complete range window
+   int              readerRecoveryAttempts; // persistent starvation recovery budget for this stream
    volatile int     running;       // prefetch thread runs while set
    volatile int     atEof;         // stream reached its end
    volatile int     error;         // a transaction/recv failed beyond retry
@@ -182,7 +185,9 @@ static void *openConnection(HttpStream *stream, uint64_t offset, uint64_t *total
    // send it. a 403 on a query-range host means "you are too far ahead of playback", not a dead url.
    int status = 0;
    void *conn = transport->open("GET", request, headers, headerCount, NULL, 0, &status, totalSize);
-   int refused = conn && status == 403 && stream->rangeInQuery;
+   if (status >= 400) stream->httpError = status;
+   else if (status == 200 || status == 206) stream->httpError = 0;
+   int refused = status == 403 && stream->rangeInQuery;
    stream->refused = refused;
 
    if (conn && status != 200 && status != 206) {
@@ -239,6 +244,11 @@ static void prefetchThread(uint64_t arg)
 
       // the last window ended at the end of the resource: nothing left to fetch
       int windowSpent = stream->conn && ringEnd >= stream->connEnd;
+      if (windowSpent && stream->rangeInQuery) {
+         lock(&stream->stateLock);
+         stream->errorRetries = 0;
+         unlock(&stream->stateLock);
+      }
       if (windowSpent && stream->size && ringEnd >= stream->size) {
          lock(&stream->stateLock);
          if (!stream->needReconnect) stream->atEof = 1;
@@ -288,15 +298,21 @@ static void prefetchThread(uint64_t arg)
                        (unsigned long long)stream->connEnd);
             if (seeked) stream->ringStart = stream->ringEnd = offset;
             stream->needReconnect = 0;
-            stream->errorRetries = 0;
-         } else if (stream->errorRetries + 1 >= PREFETCH_ERROR_RETRIES) {
-            stream->error = 1;
          } else {
             stream->errorRetries++;
-            stream->needReconnect = 1;
+            if (stream->errorRetries >= PREFETCH_ERROR_RETRIES) {
+               stream->error = 1;
+               logError("[http] s%d terminal open failure after %d attempts at offset %llu\n",
+                        stream->slot, stream->errorRetries, (unsigned long long)offset);
+            } else {
+               stream->needReconnect = 1;
+            }
          }
+         int retryDelay = RECONNECT_BACKOFF_MS;
+         for (int retry = 1; retry < stream->errorRetries && retryDelay < RECONNECT_BACKOFF_MAX_MS; retry++)
+            retryDelay = retryDelay > RECONNECT_BACKOFF_MAX_MS / 2 ? RECONNECT_BACKOFF_MAX_MS : retryDelay * 2;
          unlock(&stream->stateLock);
-         if (!conn) sleepMs(RECONNECT_BACKOFF_MS);
+         if (!conn) sleepMs((unsigned)retryDelay);
          continue;
       }
 
@@ -319,27 +335,36 @@ static void prefetchThread(uint64_t arg)
          logWarn("[http] slow recv: %llums for a %d-byte chunk at offset %llu\n",
                  (unsigned long long)readMs, (int)chunk, (unsigned long long)ringEnd);
 
+      int recvRetryDelay = 0;
       lock(&stream->stateLock);
       if (got > 0) {
          stream->ringEnd += (uint64_t)got;
          if (stream->ringEnd - stream->ringStart > RING_SIZE) stream->ringStart = stream->ringEnd - RING_SIZE;
-         stream->errorRetries = 0;
          stream->emptyWindows = 0;
       } else if (got == -2) {
-         // stalled this turn but the connection is alive; just retry
+         // stalled this turn but the connection is alive; yield instead of spinning on a ready thread
+         recvRetryDelay = READER_WAIT_MS;
       } else if (got == -1) {
+         stream->errorRetries++;
          if (stream->errorRetries < PREFETCH_ERROR_RETRIES) {
-            stream->errorRetries++;
             stream->needReconnect = 1;
             if (stream->rangeInQuery)
-               logWarn("[http-audit] s%d range-request=%u recv-error conn=%p offset=%llu conn-end=%llu retry=%d empty-windows=%d\n",
+               logWarn("[http-audit] s%d range-request=%u recv-error conn=%p offset=%llu conn-end=%llu retry=%d/%d empty-windows=%d\n",
                        stream->slot, stream->rangeWindowCount, stream->conn,
                        (unsigned long long)ringEnd, (unsigned long long)stream->connEnd,
-                       stream->errorRetries, stream->emptyWindows);
+                       stream->errorRetries, PREFETCH_ERROR_RETRIES, stream->emptyWindows);
             else
-               logWarn("[http] recv failed, reconnect attempt %d\n", stream->errorRetries);
+               logWarn("[http] s%d recv failed, reconnect attempt %d/%d\n",
+                       stream->slot, stream->errorRetries, PREFETCH_ERROR_RETRIES);
          } else {
             stream->error = 1;
+            logError("[http] s%d terminal recv failure after %d attempts at offset %llu\n",
+                     stream->slot, stream->errorRetries, (unsigned long long)ringEnd);
+         }
+         if (!stream->error) {
+            recvRetryDelay = RECONNECT_BACKOFF_MS;
+            for (int retry = 1; retry < stream->errorRetries && recvRetryDelay < RECONNECT_BACKOFF_MAX_MS; retry++)
+               recvRetryDelay = recvRetryDelay > RECONNECT_BACKOFF_MAX_MS / 2 ? RECONNECT_BACKOFF_MAX_MS : recvRetryDelay * 2;
          }
       } else if (!stream->needReconnect) {
          // got == 0: the connection ended. with more of the resource left, carry on from where its bytes
@@ -352,11 +377,16 @@ static void prefetchThread(uint64_t arg)
                     stream->slot, stream->rangeWindowCount, stream->emptyWindows,
                     (unsigned long long)stream->ringEnd, (unsigned long long)stream->size);
             stream->connEnd = stream->ringEnd;
+         } else if (stream->size && stream->ringEnd < stream->size) {
+            stream->error = 1;
+            logError("[http] s%d incomplete resource: stopped at %llu of %llu bytes\n",
+                     stream->slot, (unsigned long long)stream->ringEnd, (unsigned long long)stream->size);
          } else {
             stream->atEof = 1;
          }
       }
       unlock(&stream->stateLock);
+      if (recvRetryDelay > 0) sleepMs((unsigned)recvRetryDelay);
    }
    exitThread();
 }
@@ -430,10 +460,11 @@ int64_t readHttpStream(HttpStream *stream, void *buffer, uint64_t length)
       if (stream->position >= stream->ringStart && stream->ringEnd > stream->position)
          available = stream->ringEnd - stream->position;
       int failed = stream->error;
-      if ((available > 0 || stream->atEof) && !failed) {
+      if (available > 0 || (stream->atEof && !failed)) {
          uint64_t served = available < length ? available : length;
          if (served > 0) copyFromRing(stream, stream->position, buffer, served);
          stream->position += served;
+         if (served > 0) stream->readerRecoveryAttempts = 0;
          unlock(&stream->stateLock);
          return (int64_t)served;
       }
@@ -446,19 +477,22 @@ int64_t readHttpStream(HttpStream *stream, void *buffer, uint64_t length)
          nextStarveLogMs += 3000;
       }
       if (starvedMs >= READER_STARVE_LIMIT_MS) {
-         if (recoveryAttempts++ >= READER_RECOVERY_ATTEMPTS) {
-            logError("[http] s%d read failed after %dms and %d reconnect windows\n",
-                     stream->slot, starvedMs, recoveryAttempts);
+         lock(&stream->stateLock);
+         stream->readerRecoveryAttempts++;
+         recoveryAttempts = stream->readerRecoveryAttempts;
+         if (recoveryAttempts >= READER_RECOVERY_ATTEMPTS) {
+            stream->error = 1;
+         } else {
+            // Ask the prefetcher for one fresh range at the reader's exact position.
+            stream->needReconnect = 1;
+            stream->atEof = 0;
+         }
+         unlock(&stream->stateLock);
+         if (recoveryAttempts >= READER_RECOVERY_ATTEMPTS) {
+            logError("[http] s%d terminal reader stall after %d recovery attempts\n",
+                     stream->slot, recoveryAttempts);
             return -1;
          }
-         lock(&stream->stateLock);
-         // Keep the prefetch thread alive. Force a fresh range connection at the reader's exact
-         // position; the next attempt may succeed after a transient TLS/socket failure.
-         stream->needReconnect = 1;
-         stream->atEof = 0;
-         stream->error = 0;
-         stream->errorRetries = 0;
-         unlock(&stream->stateLock);
          logWarn("[http] s%d stalled for %dms; requesting reconnect %d/%d at offset %llu\n",
                  stream->slot, starvedMs, recoveryAttempts, READER_RECOVERY_ATTEMPTS,
                  (unsigned long long)stream->position);
@@ -497,6 +531,12 @@ int seekHttpStream(HttpStream *stream, uint64_t offset)
 }
 
 uint64_t getHttpStreamSize(HttpStream *stream) { return stream ? stream->size : 0; }
+int getHttpStreamHttpError(HttpStream *stream) { return stream ? stream->httpError : 0; }
+int getHttpStreamError(HttpStream *stream)
+{
+   if (!stream) return 0;
+   return stream->error ? (stream->httpError >= 400 ? stream->httpError : -1) : 0;
+}
 
 void closeHttpStream(HttpStream *stream)
 {
@@ -509,7 +549,19 @@ void closeHttpStream(HttpStream *stream)
    } else {
       stream->running = 0;
    }
-   if (stream->prefetchActive) { joinThread(stream->prefetchThread); stream->prefetchActive = 0; }
+   if (stream->prefetchActive) {
+      uint64_t joinStartUs = sys_time_get_system_time();
+      int joinRc = joinThread(stream->prefetchThread);
+      uint64_t joinMs = (sys_time_get_system_time() - joinStartUs) / 1000ull;
+      if (joinRc != 0) {
+         logError("[http] s%d prefetch join failed rc=%d after %llums; retaining stream resources to avoid use-after-free\n",
+                  stream->slot, joinRc, (unsigned long long)joinMs);
+         return;
+      }
+      stream->prefetchActive = 0;
+      if (joinMs >= 2000)
+         logWarn("[http] s%d prefetch teardown waited %llums\n", stream->slot, (unsigned long long)joinMs);
+   }
    if (stream->lockReady) { destroyLock(&stream->stateLock); stream->lockReady = 0; }
    if (stream->conn) { getActiveTransport()->close(stream->conn); stream->conn = NULL; }
    free(stream->ring);

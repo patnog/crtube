@@ -113,6 +113,41 @@ struct VideoPlayer {
    // One-shot diagnostics: mark the first decoded frame, ready slot and frame handed to the renderer.
    int diagFirstFrameReady;
    int diagFirstFrameReturned;
+
+   // Rolling diagnostics. Decode/audio threads batch their private counters and publish under lock;
+   // presentation updates already happen while holding lock. The render thread samples every two seconds.
+   uint64_t diagDecodeCalls, diagDecodeCallUs, diagDecodeCallMaxUs;
+   uint64_t diagDecodeFrames, diagDecodeEmpty, diagDecodeErrors;
+   uint64_t diagAuReads, diagAuReadUs, diagAuReadMaxUs, diagAuReadErrors;
+   uint64_t diagAuFeeds, diagAuFeedUs, diagAuFeedMaxUs, diagAuFeedBlocked;
+   uint64_t diagRingWaits, diagRingWaitUs;
+   uint64_t diagRenderCalls, diagPresented, diagDroppedReady, diagNoDue, diagEmptyRing;
+   uint64_t diagClockVideoLateMaxNs, diagClockVideoAheadMaxNs;
+   uint64_t diagReadyOldestPts, diagReadyNewestPts;
+   uint64_t diagPrevDecodedPts, diagDecodedFirstPts, diagDecodedLastPts, diagDecodedPtsGapMaxNs;
+   uint64_t diagPrevAuPts, diagAuBytes, diagAuSizeMax, diagAuPtsGapMaxNs;
+   uint64_t diagPrevPresentedPts, diagPresentedFirstPts, diagPresentedLastPts, diagPresentedPtsGapMaxNs;
+   uint64_t diagAudioPcmCalls, diagAudioPcmUs, diagAudioPcmMaxUs, diagAudioPcmBlocks, diagAudioSamples;
+   uint64_t diagAudioAuReads, diagAudioAuReadUs, diagAudioAuReadMaxUs, diagAudioAuBytes;
+   uint64_t diagAudioPcmPushCalls, diagAudioPcmPushUs, diagAudioPcmPushMaxUs, diagAudioFeedWaitUs;
+   uint64_t diagAudioFeeds, diagAudioAuFeedUs, diagAudioAuFeedMaxUs;
+   int diagReadyCount, diagReadyHighWater;
+   uint64_t diagLastReportUs;
+   // Thread-local-in-practice pending buckets avoid taking the player mutex on every decoder poll.
+   uint64_t diagDecodePublishUs;
+   uint64_t diagPendingDecodeCalls, diagPendingDecodeCallUs, diagPendingDecodeCallMaxUs;
+   uint64_t diagPendingDecodeFrames, diagPendingDecodeEmpty, diagPendingDecodeErrors;
+   uint64_t diagPendingDecodedFirstPts, diagPendingDecodedLastPts, diagPendingDecodedPtsGapMaxNs;
+   uint64_t diagPendingAuBytes, diagPendingAuSizeMax, diagPendingAuPtsGapMaxNs;
+   uint64_t diagPendingAuReads, diagPendingAuReadUs, diagPendingAuReadMaxUs, diagPendingAuReadErrors;
+   uint64_t diagPendingAuFeeds, diagPendingAuFeedUs, diagPendingAuFeedMaxUs, diagPendingAuFeedBlocked;
+   uint64_t diagPendingRingWaits, diagPendingRingWaitUs;
+   uint64_t diagAudioPublishUs;
+   uint64_t diagPendingAudioPcmCalls, diagPendingAudioPcmUs, diagPendingAudioPcmMaxUs;
+   uint64_t diagPendingAudioPcmBlocks, diagPendingAudioSamples;
+   uint64_t diagPendingAudioAuReads, diagPendingAudioAuReadUs, diagPendingAudioAuReadMaxUs, diagPendingAudioAuBytes;
+   uint64_t diagPendingAudioPcmPushCalls, diagPendingAudioPcmPushUs, diagPendingAudioPcmPushMaxUs, diagPendingAudioFeedWaitUs;
+   uint64_t diagPendingAudioFeeds, diagPendingAudioAuFeedUs, diagPendingAudioAuFeedMaxUs;
 };
 
 // Keep the decoder's input rate within its measured throughput: 1080p60 is over twice the
@@ -313,6 +348,71 @@ static int claimEmptySlot(VideoPlayer *player)
    return found;
 }
 
+// Publish batched decode-thread counters at 4 Hz. This keeps diagnostics from contending with
+// the render thread on every empty decoder poll.
+static void publishVideoDiag(VideoPlayer *player, uint64_t nowUs)
+{
+   if (player->diagDecodePublishUs && nowUs - player->diagDecodePublishUs < 250000ull) return;
+   player->diagDecodePublishUs = nowUs;
+   lock(&player->lock);
+   player->diagDecodeCalls += player->diagPendingDecodeCalls;
+   player->diagDecodeCallUs += player->diagPendingDecodeCallUs;
+   if (player->diagPendingDecodeCallMaxUs > player->diagDecodeCallMaxUs) player->diagDecodeCallMaxUs = player->diagPendingDecodeCallMaxUs;
+   player->diagDecodeFrames += player->diagPendingDecodeFrames;
+   player->diagDecodeEmpty += player->diagPendingDecodeEmpty;
+   player->diagDecodeErrors += player->diagPendingDecodeErrors;
+   if (!player->diagDecodedFirstPts) player->diagDecodedFirstPts = player->diagPendingDecodedFirstPts;
+   if (player->diagPendingDecodedLastPts) player->diagDecodedLastPts = player->diagPendingDecodedLastPts;
+   if (player->diagPendingDecodedPtsGapMaxNs > player->diagDecodedPtsGapMaxNs)
+      player->diagDecodedPtsGapMaxNs = player->diagPendingDecodedPtsGapMaxNs;
+   player->diagAuBytes += player->diagPendingAuBytes;
+   if (player->diagPendingAuSizeMax > player->diagAuSizeMax) player->diagAuSizeMax = player->diagPendingAuSizeMax;
+   if (player->diagPendingAuPtsGapMaxNs > player->diagAuPtsGapMaxNs)
+      player->diagAuPtsGapMaxNs = player->diagPendingAuPtsGapMaxNs;
+   player->diagAuReads += player->diagPendingAuReads;
+   player->diagAuReadUs += player->diagPendingAuReadUs;
+   if (player->diagPendingAuReadMaxUs > player->diagAuReadMaxUs) player->diagAuReadMaxUs = player->diagPendingAuReadMaxUs;
+   player->diagAuReadErrors += player->diagPendingAuReadErrors;
+   player->diagAuFeeds += player->diagPendingAuFeeds;
+   player->diagAuFeedUs += player->diagPendingAuFeedUs;
+   if (player->diagPendingAuFeedMaxUs > player->diagAuFeedMaxUs) player->diagAuFeedMaxUs = player->diagPendingAuFeedMaxUs;
+   player->diagAuFeedBlocked += player->diagPendingAuFeedBlocked;
+   player->diagRingWaits += player->diagPendingRingWaits;
+   player->diagRingWaitUs += player->diagPendingRingWaitUs;
+   player->diagPendingDecodeCalls=player->diagPendingDecodeCallUs=player->diagPendingDecodeCallMaxUs=0;
+   player->diagPendingDecodeFrames=player->diagPendingDecodeEmpty=player->diagPendingDecodeErrors=0;
+   player->diagPendingDecodedFirstPts=player->diagPendingDecodedLastPts=player->diagPendingDecodedPtsGapMaxNs=0;
+   player->diagPendingAuBytes=player->diagPendingAuSizeMax=player->diagPendingAuPtsGapMaxNs=0;
+   player->diagPendingAuReads=player->diagPendingAuReadUs=player->diagPendingAuReadMaxUs=player->diagPendingAuReadErrors=0;
+   player->diagPendingAuFeeds=player->diagPendingAuFeedUs=player->diagPendingAuFeedMaxUs=player->diagPendingAuFeedBlocked=0;
+   player->diagPendingRingWaits=player->diagPendingRingWaitUs=0;
+   unlock(&player->lock);
+}
+
+// Time every decoder poll, including polls that return no picture. This separates decoder latency
+// from time spent waiting for transport data or for an input queue slot.
+static int diagGetFrame(VideoPlayer *player, uint8_t *yuv, int *width, int *height, uint64_t *pts)
+{
+   uint64_t start = sys_time_get_system_time();
+   int result = getFrameH264(player->decoder, yuv, width, height, pts);
+   uint64_t elapsed = sys_time_get_system_time() - start;
+   player->diagPendingDecodeCalls++;
+   player->diagPendingDecodeCallUs += elapsed;
+   if (elapsed > player->diagPendingDecodeCallMaxUs) player->diagPendingDecodeCallMaxUs = elapsed;
+   if (result == 1) {
+      player->diagPendingDecodeFrames++;
+      if (!player->diagPendingDecodedFirstPts) player->diagPendingDecodedFirstPts = *pts;
+      if (player->diagPrevDecodedPts && *pts > player->diagPrevDecodedPts &&
+          *pts - player->diagPrevDecodedPts > player->diagPendingDecodedPtsGapMaxNs)
+         player->diagPendingDecodedPtsGapMaxNs = *pts - player->diagPrevDecodedPts;
+      player->diagPendingDecodedLastPts = *pts;
+      player->diagPrevDecodedPts = *pts;
+   } else if (result == 0) player->diagPendingDecodeEmpty++;
+   else player->diagPendingDecodeErrors++;
+   publishVideoDiag(player, sys_time_get_system_time());
+   return result;
+}
+
 // decodes the next presentation-order frame into `yuv`. returns 1 with dims+pts, 0 at end of
 // stream, -1 on error. Feeds access units until the decoder emits a picture, always pulling pictures
 // while an AU is outstanding — the decoder can't consume input while its frame buffers are full.
@@ -322,7 +422,7 @@ static int decodeNextFrame(VideoPlayer *player, uint8_t *yuv, int *width, int *h
 retry_decoder:
    stalledMs = 0;
    while (stalledMs < DECODE_STALL_MS && player->running && player->seekRequestNs < 0) {
-      int got = getFrameH264(player->decoder, yuv, width, height, pts);
+      int got = diagGetFrame(player, yuv, width, height, pts);
       if (got == 1) {
          resetTeeWatchdog(player);
          return 1;
@@ -341,11 +441,26 @@ retry_decoder:
       if (!player->hasPendingAu && getAuBacklogH264(player->decoder) >= getAuBacklogLimitH264(player->decoder, AU_BUFFER_COUNT)) { sleepMs(1); stalledMs++; continue; }
 
       if (!player->hasPendingAu) {
+         uint64_t readStart = sys_time_get_system_time();
          int r = readVideoAu(&player->demuxer, &player->pendingAu);
+         uint64_t readElapsed = sys_time_get_system_time() - readStart;
+         player->diagPendingAuReads++;
+         player->diagPendingAuReadUs += readElapsed;
+         if (readElapsed > player->diagPendingAuReadMaxUs) player->diagPendingAuReadMaxUs = readElapsed;
+         if (r < 0) player->diagPendingAuReadErrors++;
+         if (r == 1) {
+            player->diagPendingAuBytes += (uint64_t)player->pendingAu.size;
+            if ((uint64_t)player->pendingAu.size > player->diagPendingAuSizeMax)
+               player->diagPendingAuSizeMax = (uint64_t)player->pendingAu.size;
+            if (player->diagPrevAuPts && player->pendingAu.pts > player->diagPrevAuPts &&
+                player->pendingAu.pts - player->diagPrevAuPts > player->diagPendingAuPtsGapMaxNs)
+               player->diagPendingAuPtsGapMaxNs = player->pendingAu.pts - player->diagPrevAuPts;
+            player->diagPrevAuPts = player->pendingAu.pts;
+         }
          if (r < 0) return -1;
          if (r == 0) {   // no more input: drain the pictures still in flight
             for (int waited = 0; waited < END_OF_STREAM_DRAIN_MS && player->running; waited++) {
-               got = getFrameH264(player->decoder, yuv, width, height, pts);
+               got = diagGetFrame(player, yuv, width, height, pts);
                if (got != 0) return got;
                sleepMs(1);
             }
@@ -360,7 +475,14 @@ retry_decoder:
          player->hasPendingAu = 1;
       }
 
+      uint64_t feedStart = sys_time_get_system_time();
       int fed = decodeAuH264(player->decoder, player->pendingAu.data, player->pendingAu.size, player->pendingAu.pts);
+      uint64_t feedElapsed = sys_time_get_system_time() - feedStart;
+      player->diagPendingAuFeeds++;
+      player->diagPendingAuFeedUs += feedElapsed;
+      if (feedElapsed > player->diagPendingAuFeedMaxUs) player->diagPendingAuFeedMaxUs = feedElapsed;
+      if (fed > 0) player->diagPendingAuFeedBlocked++;
+      publishVideoDiag(player, sys_time_get_system_time());
       if (fed < 0) {
          if (recoverTeeDecoder(player, startedAtKeyframe)) { stalledMs = 0; continue; }
          return -1;
@@ -441,17 +563,23 @@ static void performSeek(VideoPlayer *player)
    // seek repositions the audio demuxer, so respawn the thread to consume the new position - otherwise once
    // the audio stream has ended once, playback stays silent for the rest of the video no matter how you seek.
    if (!player->audioAlive && player->audioThreadActive && player->aacDecoder && getAudioSource(player)->hasAudio) {
-      joinThread(player->audioThread);        // reap the exited thread before reusing its handle
-      resetAacDecoder(player->aacDecoder);
-      flushAudioPcmFeedSlot(player->audioFeedSlot);                    // clean feed for the new position (stays paused from above)
-      player->audioAlive = 1;                 // set before spawn, mirroring startAudioPipeline's ordering
-      __sync_synchronize();
-      player->audioThreadActive = (spawnJoinableThread(&player->audioThread, audioDecodeThread,
-                                   (uint64_t)(uintptr_t)player, THREAD_PRIORITY_DEFAULT,
-                                   THREAD_STACK_SIZE_64KB, "video-audio") == 0);
-      if (!player->audioThreadActive) {
+      int joinRc = joinThread(player->audioThread); // reap before reusing its handle
+      if (joinRc != 0) {
+         logError("[video-player] exited audio thread could not be joined rc=%d; audio remains disabled\n", joinRc);
          player->audioAlive = 0;
-         logWarn("[video-player] audio thread respawn failed, staying silent\n");   // also disables later revives
+      } else {
+         player->audioThreadActive = 0;
+         resetAacDecoder(player->aacDecoder);
+         flushAudioPcmFeedSlot(player->audioFeedSlot);                    // clean feed for the new position (stays paused from above)
+         player->audioAlive = 1;                 // set before spawn, mirroring startAudioPipeline's ordering
+         __sync_synchronize();
+         player->audioThreadActive = (spawnJoinableThread(&player->audioThread, audioDecodeThread,
+                                      (uint64_t)(uintptr_t)player, THREAD_PRIORITY_DEFAULT,
+                                      THREAD_STACK_SIZE_64KB, "video-audio") == 0);
+         if (!player->audioThreadActive) {
+            player->audioAlive = 0;
+            logWarn("[video-player] audio thread respawn failed, staying silent\n");   // also disables later revives
+         }
       }
    }
 
@@ -469,7 +597,15 @@ static void decodeThread(uint64_t arg)
       if (player->seekRequestNs >= 0) { performSeek(player); startedAtKeyframe = 0; continue; }
 
       int slot = claimEmptySlot(player);
-      if (slot < 0) { sleepMs(2); continue; }   // ring full: wait for the UI to consume a frame
+      if (slot < 0) {
+         uint64_t waitStart = sys_time_get_system_time();
+         sleepMs(2);
+         uint64_t waited = sys_time_get_system_time() - waitStart;
+         player->diagPendingRingWaits++;
+         player->diagPendingRingWaitUs += waited;
+         publishVideoDiag(player, sys_time_get_system_time());
+         continue;
+      }   // ring full: wait for the UI to consume a frame
 
       int width, height; uint64_t pts;
       int got = player->decoder ? decodeNextFrame(player, player->slots[slot].yuv, &width, &height, &pts, &startedAtKeyframe) : -1;
@@ -491,6 +627,9 @@ static void decodeThread(uint64_t arg)
          player->slots[slot].width  = width;
          player->slots[slot].height = height;
          player->slots[slot].state  = SLOT_READY;
+         int readyNow = 0;
+         for (int i = 0; i < FRAME_SLOTS; i++) if (player->slots[i].state == SLOT_READY) readyNow++;
+         if (readyNow > player->diagReadyHighWater) player->diagReadyHighWater = readyNow;
          unlock(&player->lock);
          if (logFirstReady)
             logInfo("[video-diag] first decoded frame ready ptsMs=%llu size=%dx%d slot=%d\n",
@@ -553,6 +692,35 @@ static int presentationClockNs(VideoPlayer *player, uint64_t nowUs, uint64_t *cl
    return 1;
 }
 
+static void publishAudioDiag(VideoPlayer *player, uint64_t nowUs)
+{
+   if (player->diagAudioPublishUs && nowUs - player->diagAudioPublishUs < 250000ull) return;
+   player->diagAudioPublishUs = nowUs;
+   lock(&player->lock);
+   player->diagAudioPcmCalls += player->diagPendingAudioPcmCalls;
+   player->diagAudioPcmUs += player->diagPendingAudioPcmUs;
+   if (player->diagPendingAudioPcmMaxUs > player->diagAudioPcmMaxUs) player->diagAudioPcmMaxUs = player->diagPendingAudioPcmMaxUs;
+   player->diagAudioPcmBlocks += player->diagPendingAudioPcmBlocks;
+   player->diagAudioSamples += player->diagPendingAudioSamples;
+   player->diagAudioAuReads += player->diagPendingAudioAuReads;
+   player->diagAudioAuReadUs += player->diagPendingAudioAuReadUs;
+   if (player->diagPendingAudioAuReadMaxUs > player->diagAudioAuReadMaxUs) player->diagAudioAuReadMaxUs = player->diagPendingAudioAuReadMaxUs;
+   player->diagAudioAuBytes += player->diagPendingAudioAuBytes;
+   player->diagAudioPcmPushCalls += player->diagPendingAudioPcmPushCalls;
+   player->diagAudioPcmPushUs += player->diagPendingAudioPcmPushUs;
+   if (player->diagPendingAudioPcmPushMaxUs > player->diagAudioPcmPushMaxUs) player->diagAudioPcmPushMaxUs = player->diagPendingAudioPcmPushMaxUs;
+   player->diagAudioFeedWaitUs += player->diagPendingAudioFeedWaitUs;
+   player->diagAudioFeeds += player->diagPendingAudioFeeds;
+   player->diagAudioAuFeedUs += player->diagPendingAudioAuFeedUs;
+   if (player->diagPendingAudioAuFeedMaxUs > player->diagAudioAuFeedMaxUs) player->diagAudioAuFeedMaxUs = player->diagPendingAudioAuFeedMaxUs;
+   player->diagPendingAudioPcmCalls=player->diagPendingAudioPcmUs=player->diagPendingAudioPcmMaxUs=0;
+   player->diagPendingAudioPcmBlocks=player->diagPendingAudioSamples=0;
+   player->diagPendingAudioAuReads=player->diagPendingAudioAuReadUs=player->diagPendingAudioAuReadMaxUs=player->diagPendingAudioAuBytes=0;
+   player->diagPendingAudioPcmPushCalls=player->diagPendingAudioPcmPushUs=player->diagPendingAudioPcmPushMaxUs=player->diagPendingAudioFeedWaitUs=0;
+   player->diagPendingAudioFeeds=player->diagPendingAudioAuFeedUs=player->diagPendingAudioAuFeedMaxUs=0;
+   unlock(&player->lock);
+}
+
 static void audioDecodeThread(uint64_t arg)
 {
    VideoPlayer *player = (VideoPlayer *)(uintptr_t)arg;   // audioAlive is set by startAudioPipeline before we spawn
@@ -561,6 +729,7 @@ static void audioDecodeThread(uint64_t arg)
    const uint8_t *pendingFrame = 0;
 
    while (player->running && !player->audioStopRequest) {
+      publishAudioDiag(player, sys_time_get_system_time());
       // a seek is in progress: flush our pipeline and park until the decode thread releases us
       if (player->audioFlushRequest) {
          resetAacDecoder(player->aacDecoder);
@@ -582,7 +751,13 @@ static void audioDecodeThread(uint64_t arg)
 
       // drain decoded PCM into the mixer feed first — the decoder stalls while its buffers are full
       int frames, rate; uint64_t pts;
+      uint64_t pcmStart = sys_time_get_system_time();
       int got = getPcmAac(player->aacDecoder, player->pcmScratch, &frames, &rate, &pts);
+      uint64_t pcmElapsed = sys_time_get_system_time() - pcmStart;
+      player->diagPendingAudioPcmCalls++;
+      player->diagPendingAudioPcmUs += pcmElapsed;
+      if (pcmElapsed > player->diagPendingAudioPcmMaxUs) player->diagPendingAudioPcmMaxUs = pcmElapsed;
+      if (got == 1) { player->diagPendingAudioPcmBlocks++; player->diagPendingAudioSamples += (uint64_t)frames; }
       if (got < 0) break;
       if (got == 1) {
          if (!player->audioClockValid) {   // anchor the A/V clock to the first audible frame
@@ -594,6 +769,8 @@ static void audioDecodeThread(uint64_t arg)
             player->audioClockBasePts = pts;
          }
          int offset = 0;
+         uint64_t audioPushStart = sys_time_get_system_time();
+         uint64_t audioWaitUs = 0;
          // a park request must break this wait: at start-of-playback the feed is held silent until
          // the first frame presents, a pending seek blocks that present, and the park waits on us -
          // pushing on regardless deadlocked every resume-at-open (decode waits for our park, we wait
@@ -601,8 +778,17 @@ static void audioDecodeThread(uint64_t arg)
          // flush discards the whole feed anyway.
          while (offset < frames && player->running && !player->audioStopRequest && !player->audioFlushRequest) {
             offset += pushAudioPcmSlot(player->audioFeedSlot, player->pcmScratch + offset * 2, frames - offset);
-            if (offset < frames) sleepMs(4);   // feed ring full: the mixer drains ~256 frames per block
+            if (offset < frames) {
+               uint64_t waitStart = sys_time_get_system_time();
+               sleepMs(4);   // feed ring full: the mixer drains ~256 frames per block
+               audioWaitUs += sys_time_get_system_time() - waitStart;
+            }
          }
+         uint64_t audioPushElapsed = sys_time_get_system_time() - audioPushStart;
+         player->diagPendingAudioPcmPushCalls++;
+         player->diagPendingAudioPcmPushUs += audioPushElapsed;
+         if (audioPushElapsed > player->diagPendingAudioPcmPushMaxUs) player->diagPendingAudioPcmPushMaxUs = audioPushElapsed;
+         player->diagPendingAudioFeedWaitUs += audioWaitUs;
          if (offset == frames && !player->audioClockValid) { __sync_synchronize(); player->audioClockValid = 1; }
          continue;
       }
@@ -615,6 +801,7 @@ static void audioDecodeThread(uint64_t arg)
          // split streams read AAC frames directly (0 = end); a muxed track pops the queue the video
          // thread fills (0 = momentarily empty, more to come)
          int got;
+         uint64_t audioReadStart = sys_time_get_system_time();
          if (player->hasAudioDemuxer && player->hasPrimedAudioAu) {
             au = player->primedAudioAu;
             player->hasPrimedAudioAu = 0;
@@ -622,7 +809,23 @@ static void audioDecodeThread(uint64_t arg)
          } else {
             got = player->hasAudioDemuxer ? readAudioAu(source, &au) : takeAudioAu(source, &au);
          }
+         uint64_t audioReadElapsed = sys_time_get_system_time() - audioReadStart;
+         player->diagPendingAudioAuReads++;
+         player->diagPendingAudioAuReadUs += audioReadElapsed;
+         if (audioReadElapsed > player->diagPendingAudioAuReadMaxUs) player->diagPendingAudioAuReadMaxUs = audioReadElapsed;
+         if (got == 1) player->diagPendingAudioAuBytes += (uint64_t)au.size;
          if (got <= 0) {
+            if (got < 0 && getVideoDemuxerLiveError(source) != 0) {
+               int error = getVideoDemuxerLiveError(source);
+               player->failed = 1;
+               player->ended = 0;
+               logError("[video-player] audio LIVE source failed error=%d\n", error);
+            } else if (got < 0 && getVideoDemuxerSourceError(source) != 0) {
+               int error = getVideoDemuxerSourceError(source);
+               player->failed = 1;
+               player->ended = 0;
+               logError("[video-player] audio source failed error=%d\n", error);
+            }
             if (player->hasAudioDemuxer) break;   // split: end of the audio stream
             sleepMs(4); continue;                 // muxed: queue empty for now
          }
@@ -636,19 +839,33 @@ static void audioDecodeThread(uint64_t arg)
          hasPendingFrame = 1;
       }
 
+      uint64_t audioFeedStart = sys_time_get_system_time();
       int fed = decodeAuAac(player->aacDecoder, pendingFrame, pendingSize, pendingPts);
+      uint64_t audioFeedElapsed = sys_time_get_system_time() - audioFeedStart;
+      player->diagPendingAudioFeeds++;
+      player->diagPendingAudioAuFeedUs += audioFeedElapsed;
+      if (audioFeedElapsed > player->diagPendingAudioAuFeedMaxUs) player->diagPendingAudioAuFeedMaxUs = audioFeedElapsed;
       if (fed < 0) break;
       if (fed == 0) { hasPendingFrame = 0; continue; }
       sleepMs(1);   // decoder full: loop back to pull PCM
    }
+   player->diagAudioPublishUs = 0;
+   publishAudioDiag(player, sys_time_get_system_time());
    player->audioAlive = 0;   // video pacing falls back to the wall clock
    exitThread();
 }
 
 // tears down whatever part of the audio pipeline came up (also the failure path during create)
-static void releaseAudioPipeline(VideoPlayer *player)
+static int releaseAudioPipeline(VideoPlayer *player)
 {
-   if (player->audioThreadActive) { joinThread(player->audioThread); player->audioThreadActive = 0; }
+   if (player->audioThreadActive) {
+      int joinRc = joinThread(player->audioThread);
+      if (joinRc != 0) {
+         logError("[video-player] audio thread join failed rc=%d; retaining player resources\n", joinRc);
+         return -1;
+      }
+      player->audioThreadActive = 0;
+   }
    if (player->audioFeedOpen) { closeAudioPcmFeedSlot(player->audioFeedSlot); player->audioFeedOpen = 0; }
    destroyAacDecoder(player->aacDecoder);
    player->aacDecoder = 0;
@@ -656,6 +873,7 @@ static void releaseAudioPipeline(VideoPlayer *player)
    free(player->pcmScratch);
    player->pcmScratch = 0;
    player->audioFeedSlot = -1;
+   return 0;
 }
 
 // brings up the AAC decoder + mixer feed + audio thread; on any failure the video plays silent.
@@ -822,10 +1040,36 @@ void destroyVideoPlayer(VideoPlayer *player)
    player->running = 0;
    cancelVideoDemuxer(&player->demuxer);                                  // unblock a live read waiting on the edge
    if (player->hasAudioDemuxer) cancelVideoDemuxer(&player->audioDemuxer);
-   if (player->threadActive) joinThread(player->thread);
+   if (player->threadActive) {
+      int joinRc = joinThread(player->thread);
+      if (joinRc != 0) {
+         logError("[video-player] decode thread join failed rc=%d; retaining player resources\n", joinRc);
+         return;
+      }
+      player->threadActive = 0;
+   }
+   player->diagDecodePublishUs = 0;
+   publishVideoDiag(player, sys_time_get_system_time());
+   uint64_t finalAudioPlayed = player->audioFeedSlot >= 0
+      ? getAudioPcmFeedPlayedFramesSlot(player->audioFeedSlot) : 0;
+   if (releaseAudioPipeline(player) != 0) return;
+   player->diagAudioPublishUs = 0;
+   publishAudioDiag(player, sys_time_get_system_time());
    logInfo("[video-diag] player summary firstFrameReady=%d firstFrameReturned=%d\n",
            player->diagFirstFrameReady, player->diagFirstFrameReturned);
-   releaseAudioPipeline(player);
+   logInfo("[video-live-diag-final] decodePoll=%llu decoded=%llu decodeEmpty=%llu decodeErr=%llu auRead=%llu auReadErr=%llu auFeed=%llu auFeedBlocked=%llu droppedReady=%llu presented=%llu ringWait=%llu ringWaitMs=%llu decodedPts=%llu..%llu decodedGapMaxMs=%llu audioPcmBlocks=%llu audioSamples=%llu audioAuReads=%llu audioAuFeeds=%llu audioPlayed=%llu\n",
+           (unsigned long long)player->diagDecodeCalls, (unsigned long long)player->diagDecodeFrames,
+           (unsigned long long)player->diagDecodeEmpty, (unsigned long long)player->diagDecodeErrors,
+           (unsigned long long)player->diagAuReads, (unsigned long long)player->diagAuReadErrors,
+           (unsigned long long)player->diagAuFeeds, (unsigned long long)player->diagAuFeedBlocked,
+           (unsigned long long)player->diagDroppedReady, (unsigned long long)player->diagPresented,
+           (unsigned long long)player->diagRingWaits, (unsigned long long)(player->diagRingWaitUs/1000ull),
+           (unsigned long long)(player->diagDecodedFirstPts/1000000ull),
+           (unsigned long long)(player->diagDecodedLastPts/1000000ull),
+           (unsigned long long)(player->diagDecodedPtsGapMaxNs/1000000ull),
+           (unsigned long long)player->diagAudioPcmBlocks, (unsigned long long)player->diagAudioSamples,
+           (unsigned long long)player->diagAudioAuReads, (unsigned long long)player->diagAudioFeeds,
+           (unsigned long long)finalAudioPlayed);
    destroyH264Decoder(player->decoder);
    closeVideoDemuxer(&player->demuxer);
    if (player->hasAudioDemuxer) closeVideoDemuxer(&player->audioDemuxer);
@@ -857,6 +1101,7 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
    int releaseAudio = 0;   // set when pre-roll fires, to un-hold the audio feed after the lock is dropped
    int releaseAudioPaused = 0;
    lock(&player->lock);
+   player->diagRenderCalls++;
 
    // a posted seek freezes presentation: frames decoded before the flush must not advance the
    // position; the displayed frame stays up until the new position's frames arrive
@@ -910,19 +1155,50 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
 
    // pick the latest ready frame whose pts is due; drop older ready frames (skip if we fell behind)
    int best = -1; uint64_t bestPts = 0;
-   for (int i = 0; i < FRAME_SLOTS; i++)
+   int readyCountNow = 0;
+   uint64_t oldestReady = 0, newestReady = 0;
+   for (int i = 0; i < FRAME_SLOTS; i++) {
+      if (player->slots[i].state == SLOT_READY) {
+         if (!readyCountNow || player->slots[i].pts < oldestReady) oldestReady = player->slots[i].pts;
+         if (!readyCountNow || player->slots[i].pts > newestReady) newestReady = player->slots[i].pts;
+         readyCountNow++;
+      }
       if (player->slots[i].state == SLOT_READY && player->slots[i].pts <= clock &&
           (!player->seekInProgress || player->slots[i].pts >= player->seekFrameMinPts) &&
           (best < 0 || player->slots[i].pts >= bestPts)) { best = i; bestPts = player->slots[i].pts; }
+   }
+   player->diagReadyCount = readyCountNow;
+   player->diagReadyOldestPts = oldestReady;
+   player->diagReadyNewestPts = newestReady;
+   if (readyCountNow == 0) player->diagEmptyRing++;
+   else if (best < 0) player->diagNoDue++;
+   if (readyCountNow > 0) {
+      if (clock > newestReady && clock - newestReady > player->diagClockVideoLateMaxNs)
+         player->diagClockVideoLateMaxNs = clock - newestReady;
+      if (newestReady > clock && newestReady - clock > player->diagClockVideoAheadMaxNs)
+         player->diagClockVideoAheadMaxNs = newestReady - clock;
+   }
 
    if (best >= 0) {
       // The decoder has completed the seek and a frame from the new position is now being
       // presented. Until this point callers must not enqueue another chapter seek.
       player->seekInProgress = 0;
+      if (player->displayIndex != best || player->currentPts != bestPts) {
+         player->diagPresented++;
+         if (!player->diagPresentedFirstPts) player->diagPresentedFirstPts = bestPts;
+         if (player->diagPrevPresentedPts && bestPts > player->diagPrevPresentedPts &&
+             bestPts - player->diagPrevPresentedPts > player->diagPresentedPtsGapMaxNs)
+            player->diagPresentedPtsGapMaxNs = bestPts - player->diagPrevPresentedPts;
+         player->diagPresentedLastPts = bestPts;
+         player->diagPrevPresentedPts = bestPts;
+      }
       for (int i = 0; i < FRAME_SLOTS; i++) {
          if (player->slots[i].state == SLOT_RETIRING) player->slots[i].state = SLOT_EMPTY;                // GPU is done with it by now
          else if (player->slots[i].state == SLOT_DISPLAYING) player->slots[i].state = SLOT_RETIRING;      // hold one present for the frame in flight
-         else if (player->slots[i].state == SLOT_READY && player->slots[i].pts < bestPts) player->slots[i].state = SLOT_EMPTY;   // drop skipped
+         else if (player->slots[i].state == SLOT_READY && player->slots[i].pts < bestPts) {
+            player->slots[i].state = SLOT_EMPTY;
+            player->diagDroppedReady++;
+         }
       }
       player->slots[best].state = SLOT_DISPLAYING;
       player->displayIndex = best;
@@ -941,11 +1217,107 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
          logFirstReturned = 1;
       }
    }
+   uint64_t reportNow = sys_time_get_system_time();
+   int doReport = !player->diagLastReportUs || reportNow - player->diagLastReportUs >= 2000000ull;
+   uint64_t dCalls = 0, dCallUs = 0, dCallMax = 0, dFrames = 0, dEmpty = 0, dErrors = 0;
+   uint64_t aReads = 0, aReadUs = 0, aReadMax = 0, aReadErrors = 0;
+   uint64_t aFeeds = 0, aFeedUs = 0, aFeedMax = 0, aBlocked = 0, ringWaits = 0, ringWaitUs = 0;
+   uint64_t renders = 0, presented = 0, dropped = 0, noDue = 0, emptyRing = 0;
+   uint64_t lateMax = 0, aheadMax = 0, oldestMs = 0, newestMs = 0;
+   uint64_t decodedFirstMs=0, decodedLastMs=0, decodedGapMaxMs=0, auBytes=0, auSizeMax=0, auGapMaxMs=0;
+   uint64_t presentedFirstMs=0, presentedLastMs=0, presentedGapMaxMs=0;
+   uint64_t audioPcmCalls=0, audioPcmUs=0, audioPcmMaxUs=0, audioPcmBlocks=0, audioSamples=0;
+   uint64_t audioAuReads=0, audioAuReadUs=0, audioAuReadMaxUs=0, audioAuBytes=0;
+   uint64_t audioPushCalls=0, audioPushUs=0, audioPushMaxUs=0, audioFeedWaitUs=0;
+   uint64_t audioFeeds=0, audioAuFeedUs=0, audioAuFeedMaxUs=0;
+   int audioSpace=0;
+   int readyNow = 0, readyHigh = 0, audioRate = 0, audioAlive = 0, audioValid = 0;
+   uint64_t audioBaseMs = 0, audioPlayed = 0, clockMs = clock / 1000000ull;
+   int slotStates = 0;
+   if (doReport) {
+      player->diagLastReportUs = reportNow;
+      dCalls=player->diagDecodeCalls; dCallUs=player->diagDecodeCallUs; dCallMax=player->diagDecodeCallMaxUs;
+      dFrames=player->diagDecodeFrames; dEmpty=player->diagDecodeEmpty; dErrors=player->diagDecodeErrors;
+      aReads=player->diagAuReads; aReadUs=player->diagAuReadUs; aReadMax=player->diagAuReadMaxUs; aReadErrors=player->diagAuReadErrors;
+      aFeeds=player->diagAuFeeds; aFeedUs=player->diagAuFeedUs; aFeedMax=player->diagAuFeedMaxUs; aBlocked=player->diagAuFeedBlocked;
+      ringWaits=player->diagRingWaits; ringWaitUs=player->diagRingWaitUs;
+      renders=player->diagRenderCalls; presented=player->diagPresented; dropped=player->diagDroppedReady;
+      noDue=player->diagNoDue; emptyRing=player->diagEmptyRing;
+      lateMax=player->diagClockVideoLateMaxNs; aheadMax=player->diagClockVideoAheadMaxNs;
+      readyNow=readyCountNow; readyHigh=player->diagReadyHighWater;
+      decodedFirstMs=player->diagDecodedFirstPts/1000000ull; decodedLastMs=player->diagDecodedLastPts/1000000ull;
+      decodedGapMaxMs=player->diagDecodedPtsGapMaxNs/1000000ull;
+      auBytes=player->diagAuBytes; auSizeMax=player->diagAuSizeMax; auGapMaxMs=player->diagAuPtsGapMaxNs/1000000ull;
+      presentedFirstMs=player->diagPresentedFirstPts/1000000ull; presentedLastMs=player->diagPresentedLastPts/1000000ull;
+      presentedGapMaxMs=player->diagPresentedPtsGapMaxNs/1000000ull;
+      audioPcmCalls=player->diagAudioPcmCalls; audioPcmUs=player->diagAudioPcmUs;
+      audioPcmMaxUs=player->diagAudioPcmMaxUs; audioPcmBlocks=player->diagAudioPcmBlocks; audioSamples=player->diagAudioSamples;
+      audioAuReads=player->diagAudioAuReads; audioAuReadUs=player->diagAudioAuReadUs;
+      audioAuReadMaxUs=player->diagAudioAuReadMaxUs; audioAuBytes=player->diagAudioAuBytes;
+      audioPushCalls=player->diagAudioPcmPushCalls; audioPushUs=player->diagAudioPcmPushUs;
+      audioPushMaxUs=player->diagAudioPcmPushMaxUs; audioFeedWaitUs=player->diagAudioFeedWaitUs;
+      audioFeeds=player->diagAudioFeeds; audioAuFeedUs=player->diagAudioAuFeedUs;
+      audioAuFeedMaxUs=player->diagAudioAuFeedMaxUs;
+      oldestMs=oldestReady/1000000ull; newestMs=newestReady/1000000ull;
+      audioAlive=player->audioAlive; audioValid=player->audioClockValid; audioBaseMs=player->audioClockBasePts/1000000ull;
+      if (player->audioFeedSlot >= 0 && getAudioSource(player)->audioRate > 0) {
+         audioRate=getAudioSource(player)->audioRate;
+         audioPlayed=getAudioPcmFeedPlayedFramesSlot(player->audioFeedSlot);
+         audioSpace=getAudioPcmFeedSpaceSlot(player->audioFeedSlot);
+      }
+      for (int i=0;i<FRAME_SLOTS;i++) slotStates |= (player->slots[i].state & 7) << (i*3);
+      player->diagDecodeCalls=player->diagDecodeCallUs=player->diagDecodeCallMaxUs=0;
+      player->diagDecodeFrames=player->diagDecodeEmpty=player->diagDecodeErrors=0;
+      player->diagAuReads=player->diagAuReadUs=player->diagAuReadMaxUs=player->diagAuReadErrors=0;
+      player->diagAuFeeds=player->diagAuFeedUs=player->diagAuFeedMaxUs=player->diagAuFeedBlocked=0;
+      player->diagRingWaits=player->diagRingWaitUs=0;
+      player->diagRenderCalls=player->diagPresented=player->diagDroppedReady=0;
+      player->diagNoDue=player->diagEmptyRing=0;
+      player->diagClockVideoLateMaxNs=player->diagClockVideoAheadMaxNs=0;
+      player->diagDecodedFirstPts=player->diagDecodedLastPts=player->diagDecodedPtsGapMaxNs=0;
+      player->diagAuBytes=player->diagAuSizeMax=player->diagAuPtsGapMaxNs=0;
+      player->diagPresentedFirstPts=player->diagPresentedLastPts=player->diagPresentedPtsGapMaxNs=0;
+      player->diagAudioPcmCalls=player->diagAudioPcmUs=player->diagAudioPcmMaxUs=0;
+      player->diagAudioPcmBlocks=player->diagAudioSamples=0;
+      player->diagAudioAuReads=player->diagAudioAuReadUs=player->diagAudioAuReadMaxUs=player->diagAudioAuBytes=0;
+      player->diagAudioPcmPushCalls=player->diagAudioPcmPushUs=player->diagAudioPcmPushMaxUs=player->diagAudioFeedWaitUs=0;
+      player->diagAudioFeeds=player->diagAudioAuFeedUs=player->diagAudioAuFeedMaxUs=0;
+      player->diagReadyHighWater=readyNow;
+   }
+   uint64_t currentPtsMs = player->currentPts / 1000000ull;
    unlock(&player->lock);
+
+   if (doReport)
+      logInfo("[video-live-diag] spanMs=2000 render=%llu presented=%llu decoded=%llu decodePoll=%llu pollAvgUs=%llu pollMaxUs=%llu pollEmpty=%llu pollErr=%llu auRead=%llu readAvgUs=%llu readMaxUs=%llu readErr=%llu auFeed=%llu feedAvgUs=%llu feedMaxUs=%llu feedBlocked=%llu ringWait=%llu ringWaitMs=%llu ready=%d readyHigh=%d dropped=%llu noDue=%llu empty=%llu clockMs=%llu currentPtsMs=%llu readyOldMs=%llu readyNewMs=%llu decodedPts=%llu..%llu decodedGapMaxMs=%llu auBytes=%llu auMaxBytes=%llu auPtsGapMaxMs=%llu presentedPts=%llu..%llu presentedGapMaxMs=%llu clockLateMaxMs=%llu videoAheadMaxMs=%llu audioAlive=%d audioValid=%d audioRate=%d audioBaseMs=%llu audioPlayed=%llu audioSpace=%d audioPcmCalls=%llu pcmAvgUs=%llu pcmMaxUs=%llu pcmBlocks=%llu pcmSamples=%llu audioAuReads=%llu audioReadAvgUs=%llu audioReadMaxUs=%llu audioAuBytes=%llu audioAuFeeds=%llu audioAuFeedAvgUs=%llu audioAuFeedMaxUs=%llu audioPushCalls=%llu audioPushAvgUs=%llu audioPushMaxUs=%llu audioFeedWaitMs=%llu slotStates=0x%x\n",
+              (unsigned long long)renders, (unsigned long long)presented, (unsigned long long)dFrames,
+              (unsigned long long)dCalls, (unsigned long long)(dCalls ? dCallUs/dCalls : 0), (unsigned long long)dCallMax,
+              (unsigned long long)dEmpty, (unsigned long long)dErrors, (unsigned long long)aReads,
+              (unsigned long long)(aReads ? aReadUs/aReads : 0), (unsigned long long)aReadMax,
+              (unsigned long long)aReadErrors, (unsigned long long)aFeeds,
+              (unsigned long long)(aFeeds ? aFeedUs/aFeeds : 0), (unsigned long long)aFeedMax,
+              (unsigned long long)aBlocked, (unsigned long long)ringWaits, (unsigned long long)(ringWaitUs/1000ull),
+              readyNow, readyHigh, (unsigned long long)dropped, (unsigned long long)noDue,
+              (unsigned long long)emptyRing, (unsigned long long)clockMs, (unsigned long long)currentPtsMs,
+              (unsigned long long)oldestMs, (unsigned long long)newestMs,
+              (unsigned long long)decodedFirstMs, (unsigned long long)decodedLastMs,
+              (unsigned long long)decodedGapMaxMs, (unsigned long long)auBytes, (unsigned long long)auSizeMax,
+              (unsigned long long)auGapMaxMs, (unsigned long long)presentedFirstMs,
+              (unsigned long long)presentedLastMs, (unsigned long long)presentedGapMaxMs,
+              (unsigned long long)(lateMax/1000000ull), (unsigned long long)(aheadMax/1000000ull),
+              audioAlive, audioValid, audioRate, (unsigned long long)audioBaseMs,
+              (unsigned long long)audioPlayed, audioSpace, (unsigned long long)audioPcmCalls,
+              (unsigned long long)(audioPcmCalls ? audioPcmUs/audioPcmCalls : 0), (unsigned long long)audioPcmMaxUs,
+              (unsigned long long)audioPcmBlocks, (unsigned long long)audioSamples,
+              (unsigned long long)audioAuReads, (unsigned long long)(audioAuReads ? audioAuReadUs/audioAuReads : 0),
+              (unsigned long long)audioAuReadMaxUs, (unsigned long long)audioAuBytes,
+              (unsigned long long)audioFeeds, (unsigned long long)(audioFeeds ? audioAuFeedUs/audioFeeds : 0),
+              (unsigned long long)audioAuFeedMaxUs, (unsigned long long)audioPushCalls,
+              (unsigned long long)(audioPushCalls ? audioPushUs/audioPushCalls : 0),
+              (unsigned long long)audioPushMaxUs, (unsigned long long)(audioFeedWaitUs/1000ull), slotStates);
 
    if (logFirstReturned)
       logInfo("[video-diag] first frame handed to renderer ptsMs=%llu size=%dx%d slot=%d\n",
-              (unsigned long long)(player->currentPts / 1000000ull), *width, *height, idx);
+              (unsigned long long)currentPtsMs, *width, *height, idx);
 
    // release the audio held through pre-roll (mixer call must run outside player->lock)
    if (releaseAudio && player->audioFeedOpen) pauseAudioPcmFeedSlot(player->audioFeedSlot, releaseAudioPaused);
@@ -994,7 +1366,11 @@ int replaceVideoPlayerAudio(VideoPlayer *player, const char *audioPath, float po
    if (player->audioThreadActive) {
       player->audioStopRequest = 1;
       if (player->hasAudioDemuxer) cancelVideoDemuxer(&player->audioDemuxer);
-      joinThread(player->audioThread);
+      int joinRc = joinThread(player->audioThread);
+      if (joinRc != 0) {
+         logError("[video-player] audio replacement join failed rc=%d; preserving current audio pipeline\n", joinRc);
+         return -1;
+      }
       player->audioThreadActive = 0;
    }
    player->audioAlive = 0;
@@ -1032,6 +1408,42 @@ int isVideoPlayerTeeFailed(const VideoPlayer *player) {
 
 int isVideoPlayerDecoderStopUnsafe(const VideoPlayer *player) {
     return player && player->decoderStopUnsafe;
+}
+
+int isVideoPlayerFailed(const VideoPlayer *player)
+{
+   return player ? player->failed : 0;
+}
+
+int getVideoPlayerHttpError(const VideoPlayer *player)
+{
+   if (!player || !player->failed) return 0;
+   int status = getVideoDemuxerHttpError(&player->demuxer);
+   if (!status && player->hasAudioDemuxer) status = getVideoDemuxerHttpError(&player->audioDemuxer);
+   return status >= 400 ? status : 0;
+}
+
+int getVideoPlayerSourceError(const VideoPlayer *player)
+{
+   if (!player || !player->failed) return 0;
+   int error = getVideoDemuxerSourceError(&player->demuxer);
+   if (!error && player->hasAudioDemuxer)
+      error = getVideoDemuxerSourceError(&player->audioDemuxer);
+   return error;
+}
+
+int getVideoPlayerLiveHttpError(const VideoPlayer *player)
+{
+   return getVideoPlayerHttpError(player);
+}
+
+int getVideoPlayerLiveError(const VideoPlayer *player)
+{
+   if (!player) return 0;
+   int error = getVideoDemuxerLiveError(&player->demuxer);
+   if (!error && player->hasAudioDemuxer)
+      error = getVideoDemuxerLiveError(&player->audioDemuxer);
+   return error;
 }
 
 int isVideoPlayerReady(const VideoPlayer *player) {

@@ -136,6 +136,32 @@ long getVideoSourceLiveFirstSq(const VideoSource *source)
    return source && source->isOpen && source->isLive ? getLiveSourceFirstSq(source->live) : -1;
 }
 
+int getVideoSourceLiveHttpError(const VideoSource *source)
+{
+   return source && source->isOpen && source->isLive ? getLiveSourceHttpError(source->live) : 0;
+}
+
+int getVideoSourceLiveError(const VideoSource *source)
+{
+   return source && source->isOpen && source->isLive ? getLiveSourceError(source->live) : 0;
+}
+
+int getVideoSourceHttpError(const VideoSource *source)
+{
+   if (!source || !source->isOpen) return 0;
+   if (source->isLive) return getLiveSourceHttpError(source->live);
+   if (source->isHttp) return getHttpStreamHttpError(source->http);
+   return 0;
+}
+
+int getVideoSourceError(const VideoSource *source)
+{
+   if (!source || !source->isOpen) return 0;
+   if (source->isLive) return getLiveSourceError(source->live);
+   if (source->isHttp) return getHttpStreamError(source->http);
+   return 0;
+}
+
 void cancelVideoSource(VideoSource *source)
 {
    if (!source || !source->isOpen) return;

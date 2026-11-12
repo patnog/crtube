@@ -24,6 +24,8 @@ uint64_t getLiveSourcePosition(const LiveSource *source);
 
 // the segment the stream began with (once its first segment is in), else the one it is about to fetch first
 long getLiveSourceFirstSq(const LiveSource *source);
+int  getLiveSourceHttpError(const LiveSource *source); // HTTP status (400+), or 0
+int  getLiveSourceError(const LiveSource *source);     // HTTP status, -1 transport failure, or 0
 
 void cancelLiveSource(LiveSource *source);   // unblock a read waiting on the edge, so teardown can't hang
 void closeLiveSource(LiveSource *source);

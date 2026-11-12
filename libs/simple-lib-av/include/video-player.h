@@ -38,6 +38,11 @@ void         destroyVideoPlayer(VideoPlayer *player);
 const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height);
 
 int   isVideoPlayerReady(const VideoPlayer *player);
+int   isVideoPlayerFailed(const VideoPlayer *player);
+int   getVideoPlayerLiveHttpError(const VideoPlayer *player); // HTTP response status (400+), or 0
+int   getVideoPlayerLiveError(const VideoPlayer *player);     // HTTP status, -1 transport failure, or 0
+int   getVideoPlayerHttpError(const VideoPlayer *player);      // HTTP response error (400+), or 0
+int   getVideoPlayerSourceError(const VideoPlayer *player);     // HTTP status, -1 transport failure, or 0
 // True only when a TEE-backed decoder encountered a fatal decode error.
 int   isVideoPlayerTeeFailed(const VideoPlayer *player);
 // True when a decoder could not be stopped safely and its resources were quarantined.

@@ -47,6 +47,8 @@ int64_t     readHttpStream(HttpStream *stream, void *buffer, uint64_t length);  
 void        cancelHttpStream(HttpStream *stream);                               // wake a blocked reader during teardown
 int         seekHttpStream(HttpStream *stream, uint64_t offset);                // absolute seek; 0 / -1
 uint64_t    getHttpStreamSize(HttpStream *stream);                             // total size (0 if unknown)
+int         getHttpStreamHttpError(HttpStream *stream);                        // last HTTP response error (400+), or 0
+int         getHttpStreamError(HttpStream *stream);                             // HTTP status, -1 transport/stream failure, or 0
 void        closeHttpStream(HttpStream *stream);
 
 // section: setup

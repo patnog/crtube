@@ -57,6 +57,28 @@ static inline long getVideoDemuxerLiveFirstSq(const VideoDemuxer *demuxer)
    return demuxer && demuxer->isMp4 ? getVideoSourceLiveFirstSq(&demuxer->container.mp4.source) : -1;
 }
 
+static inline int getVideoDemuxerLiveHttpError(const VideoDemuxer *demuxer)
+{
+   return demuxer && demuxer->isMp4 ? getVideoSourceLiveHttpError(&demuxer->container.mp4.source) : 0;
+}
+
+static inline int getVideoDemuxerLiveError(const VideoDemuxer *demuxer)
+{
+   return demuxer && demuxer->isMp4 ? getVideoSourceLiveError(&demuxer->container.mp4.source) : 0;
+}
+
+static inline int getVideoDemuxerHttpError(const VideoDemuxer *demuxer)
+{
+   return demuxer && demuxer->isMp4 ? getVideoSourceHttpError(&demuxer->container.mp4.source) : 0;
+}
+
+static inline int getVideoDemuxerSourceError(const VideoDemuxer *demuxer)
+{
+   if (!demuxer) return 0;
+   return demuxer->isMp4 ? getVideoSourceError(&demuxer->container.mp4.source)
+                         : getVideoSourceError(&demuxer->container.mkv.source);
+}
+
 static inline void closeVideoDemuxer(VideoDemuxer *demuxer)
 {
    if (demuxer->isMp4) closeMp4Demuxer(&demuxer->container.mp4);
