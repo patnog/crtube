@@ -201,6 +201,76 @@ the directory the game content utility hands back, so downloads are written stra
 `USRDIR`. And it rejects filenames containing spaces or brackets, so the file is staged under the video id;
 the name you actually see comes from the title passed to the export.
 
+## Updates
+
+The **Updates & About** panel checks the latest published GitHub release for
+`patnog/crtube`. The check is performed by a background worker, so the interface
+remains responsive while the request is in progress.
+
+The checker requests:
+
+`https://api.github.com/repos/patnog/crtube/releases/latest`
+
+It reads the release tag, title, release notes and the asset named exactly
+`crtube.pkg`. Version tags must contain three numeric components
+(`major.minor.patch`), optionally prefixed with `v`. The installed version comes
+from the build's `CRTUBE_VERSION` definition. A release is reported as available
+only when its parsed version is newer than the installed version; otherwise the
+status is up to date. Network, HTTP, JSON or version-tag failures produce a
+failed-check state.
+
+Automatic checks can be disabled in the update panel. An update can also be
+ignored by tag; ignoring a release suppresses its notification without changing
+the installed version or deleting downloaded files. A manual check remains
+available from the panel.
+
+### Downloading an update
+
+When a release is available, the panel can download its `crtube.pkg` asset.
+The download runs on a background worker and reports byte progress. The file is
+first written as a `.part` file and is renamed to its final name only after the
+stream has completed and the received byte count matches the HTTP content
+length when one is provided. Failed or incomplete downloads are discarded.
+
+The retained download is stored at:
+
+`/dev_hdd0/tmp/crtube/update/crtube-<version>.pkg`
+
+The application also copies the completed package to:
+
+`/dev_hdd0/packages/crtube-<version>.pkg`
+
+This second copy makes the package available to an external PS3 package
+installer. **CRTube does not install or launch the PKG installer itself.**
+Install the downloaded package using the console's package-installation
+workflow or another compatible package installer.
+
+If the same release package is already present and recorded as the last
+download, the downloader reuses it and refreshes the `/dev_hdd0/packages`
+copy rather than downloading it again. The overwrite action removes the
+previously recorded update package and the currently advertised package from
+both locations before starting a fresh download.
+
+### Update implementation
+
+The update flow is isolated in `src/updater.c` and exposed through
+`include/updater.h`:
+
+- `startUpdateCheck` starts the asynchronous GitHub release check.
+- `getUpdateCheckState`, `isUpdateAvailable` and the release getters expose
+  the result to the UI.
+- `ignoreCurrentUpdate` and `disableAutomaticUpdateChecks` persist the user's
+  notification preferences through the settings layer.
+- `startUpdateDownload` and `startUpdateDownloadOverwrite` manage package
+  downloads; the download getters expose state, byte counts and the saved path.
+- `shutdownUpdater` cancels outstanding HTTP work and joins update/download
+  workers during shutdown.
+
+The checker and downloader depend on the shared HTTP, JSON, settings, thread,
+debug/logging and VFS helpers. They do not invoke webMAN or any in-app package
+installation command. The release endpoint, exact asset filename and storage
+locations are implementation constants in `src/updater.c`.
+
 ## Settings
 
 User settings live in `settings.txt` under the build's `CRTUBE_DATA_DIR` (PSL1GHT: `/dev_hdd0/tmp/crtube/`;

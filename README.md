@@ -21,6 +21,7 @@ This repository is a fork of [vortigauntlet/yo-player-signin](https://github.com
 - **Members-only identification:** Restricted videos can be identified and marked in the video grid instead of being mistaken for ordinary playable videos.
 - **Streaming playback:** H.264 video and AAC audio are streamed during playback. The app includes the TEE H.264 decoder as an experimental option for supported 1080p50/60 streams, with Sony VDEC remaining the default. If the measured average presented frame rate is too low during the first five seconds, the player can switch that video to an available 30 FPS rendition without changing global settings.
 - **Navigation and feeds:** A sidebar provides Search, Recommended, account feeds and Playlists, PS3-local lists and playlists, Trending, Live, Account, Settings and Exit. Account Playlists is a dedicated library page outside the L1/R1 category cycle; PS3-local Playlists has separate Watch Later and PS3 tabs. Trending has Gaming, Sports and Podcasts tabs; Live has Popular, Music, Gaming, Sports, Podcasts and News.
+- **Release updates:** Check the latest GitHub release, review its title and notes, ignore a release or disable automatic checks, and download the `crtube.pkg` asset in the background. The downloaded PKG is copied to `/dev_hdd0/packages` for installation through an external PS3 package installer; installation is not performed inside CRTube.
 - **Playback and settings:** Search, channel browsing, resume, customizable subtitle styling and vertical subtitle offset, chapters, SponsorBlock Skip / Ask / Keep actions per category, autoplay, regional content selection, themes, an inactivity screensaver and background downloads. Download settings include resolution, audio language/source, and primary/secondary subtitle selection. LIVE streams are identified and excluded from download queues.
 
 ## What this fork adds
@@ -46,6 +47,8 @@ The fork is based on `vortigauntlet/yo-player-signin`. In addition to the accoun
 | PSL1GHT build | An open-toolchain PSL1GHT target and build documentation alongside the Sony SDK project |
 
 The original account functionality remains optional. Without signing in, the app continues to provide its anonymous browsing and playback paths.
+
+The update checker, release metadata handling, PKG download flow, storage paths and external-installation boundary are documented in [`apps/yo-player/README.md`](apps/yo-player/README.md#updates).
 
 ## User-facing features
 
