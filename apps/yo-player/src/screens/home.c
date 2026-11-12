@@ -3,11 +3,15 @@
 #include "app-config.h"
 #include "app.h"
 #include "screens/home.h"
+
+/* Exported by the PSL1GHT process module. */
+extern void sysProcessExit(int status);
 #include "screens/search.h"
 #include "screens/play.h"
 #include "video-grid.h"
 #include "storage.h"
 #include "settings.h"
+#include "updater.h"
 #include "screens/playlist-picker.h"
 #include "extractor.h"
 #include "vfs.h"
@@ -26,6 +30,7 @@
 #include "thread.h"             // getTimeUs
 #include "font.h"
 #include "ui/label.h"
+#include "ui/scrollbar.h"
 #include "screen-manager.h"
 #include "button-repeat.h"
 #include "osk-input.h"
@@ -246,13 +251,41 @@ static int         panelConfirmHint, panelBackHint;
 // Compact settings shell. The selected value is highlighted independently of
 // its row label; font scaling never changes the panel's physical geometry.
 #define SETTINGS_PANEL_W 680
-#define SETTINGS_PANEL_H 520
+#define SETTINGS_PANEL_H 560
 #define SETTINGS_ROW_HEIGHT 38
 #define SETTINGS_ROW_TOP 56
 #define SETTINGS_ROW_STEP 43
-#define SETTINGS_ROW_COUNT 9
+#define SETTINGS_ROW_COUNT 10
 static Label settingsTitle, settingsLabels[SETTINGS_ROW_COUNT], settingsValues[SETTINGS_ROW_COUNT];
 static ButtonHints settingsHints;
+#define UPDATE_PANEL_W 680
+#define UPDATE_PANEL_H 430
+#define UPDATE_DIALOG_W 640
+#define UPDATE_DIALOG_H 360
+#define UPDATE_NOTES_W 760
+#define UPDATE_NOTES_H 600
+#define UPDATE_NOTES_MAX_LINES 256
+#define UPDATE_NOTES_VISIBLE_LINES 17
+#define UPDATE_NOTES_LINE_STEP 27
+static int updateSettingsOpen;
+static int updateSettingsSelected;
+static int updateOverwritePromptOpen;
+static int updateOverwriteChoice;
+static int updateDialogOpen;
+static int updateDialogSelected;
+static int updateDialogDismissed;
+static int updateNotesOpen;
+static int updateNotesScroll;
+static int updateNotesLineCount;
+static Label updateNotesLines[UPDATE_NOTES_VISIBLE_LINES];
+static Scrollbar updateNotesScrollbar;
+static void buildUpdateNotesLines(void);
+static char updateNotesLineText[UPDATE_NOTES_MAX_LINES][LABEL_MAX_TEXT];
+static Label updatePanelTitle, updatePanelInfo[3], updatePanelRows[6];
+static Label updateDialogTitle, updateDialogVersion, updateDialogRows[6];
+static Label updateNotesTitle;
+static ButtonHints updateHints;
+
 #define THEME_PANEL_W 860
 #define THEME_PANEL_H 620
 #define THEME_EDIT_CUSTOM_ROW THEME_PRESET_COUNT
@@ -385,6 +418,15 @@ static void refreshHomeThemeColors(void)
    setLabelColor(&panelCode, activeTheme->textPrimary);
    setLabelColor(&panelFooter, activeTheme->textSecondary);
    setLabelColor(&settingsTitle, activeTheme->textPrimary);
+   setLabelColor(&updatePanelTitle, activeTheme->textPrimary);
+   for (int i = 0; i < 3; i++) setLabelColor(&updatePanelInfo[i], activeTheme->textSecondary);
+   for (int i = 0; i < 5; i++) setLabelColor(&updatePanelRows[i], activeTheme->textPrimary);
+   setLabelColor(&updatePanelRows[5], activeTheme->textSecondary);
+   setLabelColor(&updateDialogTitle, activeTheme->textPrimary);
+   setLabelColor(&updateDialogVersion, activeTheme->textSecondary);
+   for (int i = 0; i < 6; i++) setLabelColor(&updateDialogRows[i], activeTheme->textPrimary);
+   setLabelColor(&updateNotesTitle, activeTheme->textPrimary);
+   for (int i = 0; i < UPDATE_NOTES_VISIBLE_LINES; i++) setLabelColor(&updateNotesLines[i], activeTheme->textPrimary);
    for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
       setLabelColor(&settingsLabels[i], activeTheme->textPrimary);
       setLabelColor(&settingsValues[i], activeTheme->textPrimary);
@@ -1728,6 +1770,78 @@ static void drawThemePanel(void)
 
 static void updateSettingsPanel(void)
 {
+   if (updateOverwritePromptOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
+         updateOverwritePromptOpen = 0;
+         return;
+      }
+      if (isPadButtonPressed(PAD_BTN_LEFT) || isPadButtonPressed(PAD_BTN_RIGHT))
+         updateOverwriteChoice = !updateOverwriteChoice;
+      if (isPadButtonPressed(PAD_BTN_CROSS)) {
+         logInfo("[update-ui] overwrite prompt choice=%s\n", updateOverwriteChoice == 0 ? "YES" : "NO");
+         if (updateOverwriteChoice == 0) {
+            int downloadRc = startUpdateDownloadOverwrite();
+            logInfo("[update-ui] overwrite download start rc=%d state=%d\n", downloadRc, getUpdateDownloadState());
+            if (downloadRc != 0) {
+               playlistToastShownAt = getTimeUs();
+               setLabelText(&playlistToastLabel, "Could not restart update download");
+            }
+         }
+         updateOverwritePromptOpen = 0;
+      }
+      return;
+   }
+   if (updateSettingsOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
+         updateSettingsOpen = 0;
+         return;
+      }
+      if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
+         updateSettingsSelected = (updateSettingsSelected + 1) % 5;
+      else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
+         updateSettingsSelected = (updateSettingsSelected + 4) % 5;
+      if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
+          isPadButtonPressed(PAD_BTN_RIGHT)) {
+         if (updateSettingsSelected == 0) {
+            int enabled = getAutomaticUpdateChecks();
+            if (isPadButtonPressed(PAD_BTN_LEFT)) enabled = 0;
+            else if (isPadButtonPressed(PAD_BTN_RIGHT)) enabled = 1;
+            else enabled = !enabled;
+            setAutomaticUpdateChecks(enabled);
+         } else if (updateSettingsSelected == 1 && !isPadButtonPressed(PAD_BTN_LEFT) &&
+                    !isPadButtonPressed(PAD_BTN_RIGHT)) {
+            updateDialogDismissed = 1;
+            startUpdateCheck(1);
+         } else if (updateSettingsSelected == 2 && !isPadButtonPressed(PAD_BTN_LEFT) &&
+                    !isPadButtonPressed(PAD_BTN_RIGHT)) {
+            if (getUpdateCheckState() == UPDATE_CHECK_AVAILABLE || getUpdateCheckState() == UPDATE_CHECK_UP_TO_DATE) {
+               updateNotesOpen = 1; updateNotesScroll = 0; buildUpdateNotesLines();
+            }
+         } else if (updateSettingsSelected == 3 && !isPadButtonPressed(PAD_BTN_LEFT) &&
+                    !isPadButtonPressed(PAD_BTN_RIGHT)) {
+            int checkState = getUpdateCheckState();
+            int packageReady = isUpdateDownloaded();
+            logInfo("[update-ui] settings action=DOWNLOAD check_state=%d package_ready=%d download_state=%d\n",
+                    checkState, packageReady, getUpdateDownloadState());
+            if (checkState == UPDATE_CHECK_AVAILABLE || checkState == UPDATE_CHECK_UP_TO_DATE) {
+               if (packageReady) {
+                  updateOverwritePromptOpen = 1;
+                  updateOverwriteChoice = 0;
+                  logInfo("[update-ui] settings download opened overwrite confirmation\n");
+               } else {
+                  int downloadRc = startUpdateDownload();
+                  logInfo("[update-ui] settings download start rc=%d state=%d\n", downloadRc, getUpdateDownloadState());
+               }
+            } else {
+               logWarn("[update-ui] settings download rejected: update check state=%d\n", checkState);
+            }
+         } else if (updateSettingsSelected == 4 && !isPadButtonPressed(PAD_BTN_LEFT) &&
+                    !isPadButtonPressed(PAD_BTN_RIGHT)) {
+            updateSettingsOpen = 0;
+         }
+      }
+      return;
+   }
    if (home.themeOpen) { updateThemePanel(); return; }
    if (home.downloadSettingsOpen) { updateDownloadSettingsPanel(); return; }
    if (home.regionOpen) { updateRegionPicker(); return; }
@@ -1801,6 +1915,10 @@ static void updateSettingsPanel(void)
          home.themeCustomOpen = 0;
          home.themeConfirmOpen = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
+      } else if (home.settingsSelected == 9 && isPadButtonPressed(PAD_BTN_CROSS)) {
+         updateSettingsOpen = 1;
+         updateSettingsSelected = 0;
+         settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
       } else if (home.settingsSelected == 8 && screensaverDelta) {
          int timeout = getScreensaverTimeout();
          int option = timeout == 0 ? 0 : timeout / 30;
@@ -1860,6 +1978,267 @@ static void drawDownloadSettingsPanel(void)
    drawButtonHints(&downloadSettingsHints, home.screenW);
 }
 
+static void drawUpdateSettingsPanel(void)
+{
+   char installed[96], latest[96], stateText[96];
+   snprintf(installed, sizeof installed, "Installed: %s", getInstalledVersion());
+   snprintf(latest, sizeof latest, "Latest Available: %s", getLatestVersion());
+   UpdateCheckState state = getUpdateCheckState();
+   if (state == UPDATE_CHECK_AVAILABLE)
+      snprintf(stateText, sizeof stateText, "Status: Update available (%s)", getLatestVersion());
+   else if (state == UPDATE_CHECK_RUNNING)
+      snprintf(stateText, sizeof stateText, "Status: Checking GitHub...");
+   else if (state == UPDATE_CHECK_UP_TO_DATE)
+      snprintf(stateText, sizeof stateText, "Status: You are up to date");
+   else if (state == UPDATE_CHECK_FAILED)
+      snprintf(stateText, sizeof stateText, "Status: Could not check for updates");
+   else
+      snprintf(stateText, sizeof stateText, "Status: Not checked yet");
+   setLabelIfChanged(&updatePanelInfo[0], installed);
+   setLabelIfChanged(&updatePanelInfo[1], latest);
+   setLabelIfChanged(&updatePanelInfo[2], stateText);
+   setLabelIfChanged(&updatePanelRows[0], getAutomaticUpdateChecks() ? "Automatic checks: On" : "Automatic checks: Off");
+   setLabelIfChanged(&updatePanelRows[1], state == UPDATE_CHECK_RUNNING ? "Checking GitHub..." : "Check for updates now");
+   char releaseRow[224];
+   snprintf(releaseRow, sizeof releaseRow, "Release Notes - %s", getLatestVersion());
+   setLabelIfChanged(&updatePanelRows[2], releaseRow);
+   setLabelIfChanged(&updatePanelRows[3], getUpdateDownloadState() == 1 ?
+                     "Download started - downloading..." : "Download Update");
+   setLabelIfChanged(&updatePanelRows[4], "Back");
+   setLabelIfChanged(&updatePanelRows[5],
+      "Install from XMB: ★ Package Manager > ★ Install Package Files > PS3™ System Storage");
+
+   int w = UPDATE_PANEL_W < home.screenW - 32 ? UPDATE_PANEL_W : home.screenW - 32;
+   int h = UPDATE_PANEL_H < home.screenH - 32 ? UPDATE_PANEL_H : home.screenH - 32;
+   int x = (home.screenW - w) / 2, y = (home.screenH - h) / 2;
+   fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRoundedRectangle(x, y, w, h, 10, activeTheme->appBg);
+   fillGfxRoundedRectangle(x, y, w, 4, 2, activeTheme->accent);
+   refreshLabelScale(&updatePanelTitle);
+   drawLabelCentered(&updatePanelTitle, home.screenW / 2, y + 28);
+   for (int i = 0; i < 3; i++) {
+      Label *label = &updatePanelInfo[i];
+      refreshLabelScale(label);
+      setLabelColor(label, activeTheme->textSecondary);
+      moveLabel(label, x + 34, y + 72 + i * 28);
+      drawLabel(label);
+   }
+   for (int i = 0; i < 5; i++) {
+      Label *label = &updatePanelRows[i];
+      refreshLabelScale(label);
+      int rowY = y + 150 + i * 38;
+      if (i == updateSettingsSelected)
+         fillGfxRoundedRectangle(x + 24, rowY - 5, w - 48, 44, 7, activeTheme->rowHighlight);
+      setLabelColor(label, i == updateSettingsSelected ? activeTheme->accent : activeTheme->textPrimary);
+      moveLabel(label, x + 40, getCenteredLabelY(label, rowY, 36));
+      drawLabel(label);
+   }
+   refreshLabelScale(&updatePanelRows[5]);
+   setLabelColor(&updatePanelRows[5], activeTheme->textSecondary);
+   moveLabel(&updatePanelRows[5], x + 40, y + h - 86);
+   drawLabel(&updatePanelRows[5]);
+   if (updateOverwritePromptOpen) {
+      int pw = 520, ph = 190;
+      int px = (home.screenW - pw) / 2, py = (home.screenH - ph) / 2;
+      fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+      fillGfxRoundedRectangle(px, py, pw, ph, 10, activeTheme->appBg);
+      fillGfxRoundedRectangle(px, py, pw, 4, 2, activeTheme->accent);
+      setLabelIfChanged(&updateDialogTitle, "Update package already downloaded");
+      setLabelIfChanged(&updateDialogRows[0], "Download it again and overwrite the existing PKG?");
+      setLabelIfChanged(&updateDialogRows[1], "Yes");
+      setLabelIfChanged(&updateDialogRows[2], "No");
+      refreshLabelScale(&updateDialogTitle);
+      drawLabelCentered(&updateDialogTitle, home.screenW / 2, py + 28);
+      for (int n = 0; n < 3; n++) {
+         Label *label = &updateDialogRows[n];
+         refreshLabelScale(label);
+         setLabelColor(label, n == updateOverwriteChoice + 1 ? activeTheme->accent : activeTheme->textPrimary);
+         moveLabel(label, px + 28, py + 70 + n * 36);
+         drawLabel(label);
+      }
+   }
+   updateHints.y = y + h - 36;
+   drawButtonHints(&updateHints, home.screenW);
+
+}
+
+static void drawUpdateDialog(void)
+{
+   setLabelIfChanged(&updateDialogTitle, "A new update is available");
+   char versionInfo[128];
+   snprintf(versionInfo, sizeof versionInfo, "Installed: %s    Latest: %s",
+            getInstalledVersion(), getLatestVersion());
+   setLabelIfChanged(&updateDialogVersion, versionInfo);
+   static const char *const rows[] = {
+      "Release Notes", "Download Update", "Disable automatic checks",
+      "Do not notify about this release", "Close"
+   };
+   for (int i = 0; i < 5; i++) {
+      if (i == 1 && getUpdateDownloadState() == 1)
+         setLabelIfChanged(&updateDialogRows[i], "Downloading update...");
+      else
+         setLabelIfChanged(&updateDialogRows[i], rows[i]);
+   }
+   int w = UPDATE_DIALOG_W < home.screenW - 32 ? UPDATE_DIALOG_W : home.screenW - 32;
+   int h = UPDATE_DIALOG_H < home.screenH - 32 ? UPDATE_DIALOG_H : home.screenH - 32;
+   int x = (home.screenW - w) / 2, y = (home.screenH - h) / 2;
+   fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRoundedRectangle(x, y, w, h, 10, activeTheme->appBg);
+   fillGfxRoundedRectangle(x, y, w, 4, 2, activeTheme->accent);
+   refreshLabelScale(&updateDialogTitle);
+   drawLabelCentered(&updateDialogTitle, home.screenW / 2, y + 28);
+   refreshLabelScale(&updateDialogVersion);
+   drawLabelCentered(&updateDialogVersion, home.screenW / 2, y + 72);
+   for (int i = 0; i < 5; i++) {
+      Label *label = &updateDialogRows[i];
+      refreshLabelScale(label);
+      int rowY = y + 108 + i * 42;
+      if (i == updateDialogSelected)
+         fillGfxRoundedRectangle(x + 24, rowY - 4, w - 48, 40, 7, activeTheme->rowHighlight);
+      setLabelColor(label, i == updateDialogSelected ? activeTheme->accent : activeTheme->textPrimary);
+      moveLabel(label, x + 40, getCenteredLabelY(label, rowY, 34));
+      drawLabel(label);
+   }
+   updateHints.y = y + h - 34;
+   drawButtonHints(&updateHints, home.screenW);
+   if (updateOverwritePromptOpen) {
+      int pw = 520;
+      int ph = 190;
+      int px = (home.screenW - pw) / 2, py = (home.screenH - ph) / 2;
+      fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+      fillGfxRoundedRectangle(px, py, pw, ph, 10, activeTheme->appBg);
+      fillGfxRoundedRectangle(px, py, pw, 4, 2, activeTheme->accent);
+      setLabelIfChanged(&updateDialogTitle, "Update package already downloaded");
+      setLabelIfChanged(&updateDialogRows[0], "Download it again and overwrite the existing PKG?");
+      setLabelIfChanged(&updateDialogRows[1], "Yes");
+      setLabelIfChanged(&updateDialogRows[2], "No");
+      refreshLabelScale(&updateDialogTitle);
+      drawLabelCentered(&updateDialogTitle, home.screenW / 2, py + 28);
+      for (int n = 0; n < 3; n++) {
+         Label *label = &updateDialogRows[n];
+         refreshLabelScale(label);
+         int selectedChoice = updateOverwriteChoice;
+         setLabelColor(label, n == selectedChoice + 1 ? activeTheme->accent : activeTheme->textPrimary);
+         moveLabel(label, px + 28, py + 70 + n * 36);
+         drawLabel(label);
+      }
+   }
+}
+
+static void buildUpdateNotesLines(void)
+{
+   const char *src = getLatestReleaseNotes();
+   char line[LABEL_MAX_TEXT];
+   int used = 0;
+   int wrapLimit = 58;
+   updateNotesLineCount = 0;
+   const char *releaseTitle = getLatestReleaseTitle();
+   if (releaseTitle && releaseTitle[0]) {
+      snprintf(updateNotesLineText[updateNotesLineCount++], LABEL_MAX_TEXT,
+               "{b}%s{/b}", releaseTitle);
+   }
+   line[0] = 0;
+   while (*src && updateNotesLineCount < UPDATE_NOTES_MAX_LINES) {
+      if (*src == '\r') { src++; continue; }
+      if (*src == '\n') {
+         line[used] = 0;
+         strCopy(updateNotesLineText[updateNotesLineCount++], LABEL_MAX_TEXT, line);
+         used = 0; line[0] = 0; src++; continue;
+      }
+      if (used >= wrapLimit && (((unsigned char)*src & 0xC0) != 0x80)) {
+         int cut = used;
+         while (cut > 0 && line[cut - 1] != ' ') cut--;
+         if (cut > 0) {
+            line[cut - 1] = 0;
+            strCopy(updateNotesLineText[updateNotesLineCount++], LABEL_MAX_TEXT, line);
+            int remain = used - cut;
+            memmove(line, line + cut, (size_t)remain);
+            used = remain; line[used] = 0;
+         } else {
+            line[used] = 0;
+            strCopy(updateNotesLineText[updateNotesLineCount++], LABEL_MAX_TEXT, line);
+            used = 0; line[0] = 0;
+         }
+         if (updateNotesLineCount >= UPDATE_NOTES_MAX_LINES) break;
+      }
+      line[used++] = *src++;
+      line[used] = 0;
+   }
+   if (used && updateNotesLineCount < UPDATE_NOTES_MAX_LINES) {
+      line[used] = 0;
+      strCopy(updateNotesLineText[updateNotesLineCount++], LABEL_MAX_TEXT, line);
+   }
+   if (!getLatestReleaseNotes()[0] && updateNotesLineCount < UPDATE_NOTES_MAX_LINES) {
+      strCopy(updateNotesLineText[updateNotesLineCount++], LABEL_MAX_TEXT,
+              "No release notes were provided.");
+   }
+   if (!updateNotesLineCount) {
+      strCopy(updateNotesLineText[0], LABEL_MAX_TEXT, "No release notes were provided.");
+      updateNotesLineCount = 1;
+   }
+   /* Convert Markdown headings and bold delimiters to native renderer tags. */
+   for (int n = 0; n < updateNotesLineCount; n++) {
+      char converted[LABEL_MAX_TEXT]; int out = 0;
+      const char *q = updateNotesLineText[n];
+      int bold = 0;
+      if (q[0] == '#' && q[1] == '#') {
+         q += 2;
+         while (*q == ' ' || *q == '\t') q++;
+         converted[out++] = '{';
+         converted[out++] = 'b';
+         converted[out++] = '}';
+         bold = 1;
+      }
+      while (*q && out < LABEL_MAX_TEXT - 5) {
+         if (q[0] == '*' && q[1] == '*') {
+            memcpy(converted + out, bold ? "{/b}" : "{b}", bold ? 4 : 3);
+            out += bold ? 4 : 3;
+            bold = !bold;
+            q += 2;
+            continue;
+         }
+         converted[out++] = *q++;
+      }
+      if (bold && out < LABEL_MAX_TEXT - 4) {
+         memcpy(converted + out, "{/b}", 4);
+         out += 4;
+      }
+      converted[out] = 0;
+      strCopy(updateNotesLineText[n], LABEL_MAX_TEXT, converted);
+   }
+}
+
+static void drawUpdateNotes(void)
+{
+   setLabelIfChanged(&updateNotesTitle, getLatestReleaseTag());
+   int w = UPDATE_NOTES_W < home.screenW - 16 ? UPDATE_NOTES_W : home.screenW - 16;
+   int h = UPDATE_NOTES_H < home.screenH - 16 ? UPDATE_NOTES_H : home.screenH - 16;
+   int x = (home.screenW - w) / 2, y = (home.screenH - h) / 2;
+   int visible = UPDATE_NOTES_VISIBLE_LINES;
+   int maxScroll = updateNotesLineCount - visible;
+   if (maxScroll < 0) maxScroll = 0;
+   if (updateNotesScroll > maxScroll) updateNotesScroll = maxScroll;
+   fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRoundedRectangle(x, y, w, h, 10, activeTheme->appBg);
+   fillGfxRoundedRectangle(x, y, w, 4, 2, activeTheme->accent);
+   refreshLabelScale(&updateNotesTitle);
+   drawLabelCentered(&updateNotesTitle, home.screenW / 2, y + 22);
+   for (int i = 0; i < visible; i++) {
+      int index = updateNotesScroll + i;
+      if (index >= updateNotesLineCount) break;
+      setLabelIfChanged(&updateNotesLines[i], updateNotesLineText[index]);
+      refreshLabelScale(&updateNotesLines[i]);
+      setLabelColor(&updateNotesLines[i], activeTheme->textPrimary);
+      moveLabel(&updateNotesLines[i], x + 24, y + 58 + i * UPDATE_NOTES_LINE_STEP);
+      drawLabel(&updateNotesLines[i]);
+   }
+   initScrollbar(&updateNotesScrollbar, x + w - 18, y + 58, 8,
+                 h - 112, 6, 22, activeTheme->surface, activeTheme->accent);
+   drawScrollbar(&updateNotesScrollbar, updateNotesLineCount, visible, updateNotesScroll);
+   updateHints.y = y + h - 28;
+   drawButtonHints(&updateHints, home.screenW);
+}
+
 static void drawSettingsPanel(void)
 {
    // Avoid printf floating-point formatting here: the PS3 runtime may be built
@@ -1881,6 +2260,7 @@ static void drawSettingsPanel(void)
    if (screensaverSeconds == 0) strCopy(screensaverValue, sizeof screensaverValue, "Off");
    else snprintf(screensaverValue, sizeof screensaverValue, "%ds", screensaverSeconds);
    setLabelIfChanged(&settingsValues[8], screensaverValue);
+   setLabelIfChanged(&settingsValues[9], "");
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
    int x = (home.screenW - panelW) / 2;
@@ -1896,9 +2276,14 @@ static void drawSettingsPanel(void)
       Label *name = &settingsLabels[i];
       int rowY = y + SETTINGS_ROW_TOP + i * SETTINGS_ROW_STEP;
       refreshLabelScale(name);
-      setLabelColor(name, activeTheme->textPrimary);
+      if (i == 9 && i == home.settingsSelected)
+         fillGfxRoundedRectangle(x + 24, rowY - 2, panelW - 48,
+                                 SETTINGS_ROW_HEIGHT + 4, 7, activeTheme->rowHighlight);
+      setLabelColor(name, (i == 9 && i == home.settingsSelected) ?
+                          activeTheme->accent : activeTheme->textPrimary);
       moveLabel(name, x + 40, getCenteredLabelY(name, rowY, SETTINGS_ROW_HEIGHT));
       drawLabel(name);
+      if (i == 9) continue;
 
       if (i == 0 || i == 1) {
          // Both boolean settings use the same compact OFF/ON switch.
@@ -2347,6 +2732,13 @@ static void initHome(void)
    home.liveCategory = LIVE_POPULAR;
    home.settingsOpen = 0;
    home.settingsSelected = 0;
+   updateSettingsOpen = 0;
+   updateSettingsSelected = 0;
+   updateDialogOpen = 0;
+   updateDialogSelected = 0;
+   updateDialogDismissed = 0;
+   updateNotesOpen = 0;
+   updateNotesScroll = 0;
    home.settingsReturnToSearch = 0;
    home.settingsReturnQuery[0] = 0;
    home.themeOpen = 0;
@@ -2516,7 +2908,7 @@ static void initHome(void)
    static const char *settingNames[SETTINGS_ROW_COUNT] = {
       "Autoplay", "Enable 1080p60 (experimental)", "UI Scaling",
       "Overscan", "Content Region", "SponsorBlock", "Download settings", "Themes",
-      "Screensaver timeout"
+      "Screensaver timeout", "Updates & About"
    };
    for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
       initLabel(&settingsLabels[i], &uiFont, 0, 0, settingsTextW - 220, AUTO, 20,
@@ -2524,6 +2916,33 @@ static void initHome(void)
       initLabel(&settingsValues[i], &uiFont, 0, 0, 160, AUTO, 22,
                 activeTheme->textPrimary, TEXT_NOWRAP, "");
    }
+   initLabel(&updatePanelTitle, &uiFont, 0, 0, UPDATE_PANEL_W - 48, AUTO, 24,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Updates & About");
+   for (int i = 0; i < 3; i++)
+      initLabel(&updatePanelInfo[i], &uiFont, 0, 0, UPDATE_PANEL_W - 68, AUTO, 18,
+                activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
+   for (int i = 0; i < 5; i++)
+      initLabel(&updatePanelRows[i], &uiFont, 0, 0, UPDATE_PANEL_W - 80, AUTO, 20,
+                activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabel(&updatePanelRows[5], &uiFont, 0, 0, UPDATE_PANEL_W - 80, AUTO, 16,
+             activeTheme->textSecondary, TEXT_WRAP, "");
+   initLabel(&updateDialogTitle, &uiFont, 0, 0, UPDATE_DIALOG_W - 48, AUTO, 25,
+             activeTheme->textPrimary, TEXT_NOWRAP, "New update available");
+   initLabel(&updateDialogVersion, &uiFont, 0, 0, UPDATE_DIALOG_W - 48, AUTO, 20,
+             activeTheme->textSecondary, TEXT_NOWRAP, "");
+   for (int i = 0; i < 6; i++)
+      initLabel(&updateDialogRows[i], &uiFont, 0, 0, UPDATE_DIALOG_W - 80, AUTO, 19,
+                activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabel(&updateNotesTitle, &uiFont, 0, 0, UPDATE_NOTES_W - 48, AUTO, 24,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Release Notes");
+   for (int i = 0; i < UPDATE_NOTES_VISIBLE_LINES; i++)
+      initLabel(&updateNotesLines[i], &uiFont, 0, 0, UPDATE_NOTES_W - 64, AUTO, 23,
+                activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initButtonHints(&updateHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
+   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_DPAD_UP), "Move");
+   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Move");
+   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_CROSS), "Select");
+   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
    initLabel(&downloadSettingsTitle, &uiFont, 0, 0, DOWNLOAD_SETTINGS_PANEL_W - 48, AUTO, 24,
              activeTheme->textPrimary, TEXT_NOWRAP, "Download settings");
    static const char *downloadSettingNames[DOWNLOAD_SETTINGS_ROW_COUNT] = {
@@ -2770,6 +3189,86 @@ static void updateDownloadManagement(void)
 
 static void updateHome(void)
 {
+   static int previousUpdateDownloadState;
+   int currentUpdateDownloadState = getUpdateDownloadState();
+   if (previousUpdateDownloadState == 1 && currentUpdateDownloadState != 1) {
+      playlistToastShownAt = getTimeUs();
+      setLabelText(&playlistToastLabel, currentUpdateDownloadState == 2 ?
+                   "Update Download Complete" : "Update Download Failed");
+   }
+   previousUpdateDownloadState = currentUpdateDownloadState;
+   if (updateOverwritePromptOpen && updateDialogOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
+         logInfo("[update-ui] confirmation cancelled type=DOWNLOAD_OVERWRITE\n");
+         updateOverwritePromptOpen = 0;
+      } else {
+         if (isPadButtonPressed(PAD_BTN_LEFT) || isPadButtonPressed(PAD_BTN_RIGHT) ||
+             isPadButtonPressed(PAD_BTN_UP) || isPadButtonPressed(PAD_BTN_DOWN))
+            updateOverwriteChoice = !updateOverwriteChoice;
+         if (isPadButtonPressed(PAD_BTN_CROSS)) {
+            logInfo("[update-ui] confirmation submit type=DOWNLOAD_OVERWRITE choice=%s\n",
+                    updateOverwriteChoice == 0 ? "YES" : "NO");
+            if (updateOverwriteChoice == 0 && startUpdateDownloadOverwrite() != 0) {
+               playlistToastShownAt = getTimeUs();
+               setLabelText(&playlistToastLabel, "Could not restart update download");
+            }
+            updateOverwritePromptOpen = 0;
+         }
+      }
+      return;
+   }
+   if (updateNotesOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) updateNotesOpen = 0;
+      else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)) ||
+               isPadButtonPressed(PAD_BTN_RIGHT)) { if (updateNotesScroll < updateNotesLineCount - UPDATE_NOTES_VISIBLE_LINES) updateNotesScroll++; }
+      else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)) ||
+               isPadButtonPressed(PAD_BTN_LEFT)) { if (updateNotesScroll > 0) updateNotesScroll--; }
+      return;
+   }
+   if (updateDialogOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
+         updateDialogOpen = 0;
+         updateDialogDismissed = 1;
+      }
+      else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
+         updateDialogSelected = (updateDialogSelected + 1) % 5;
+      else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
+         updateDialogSelected = (updateDialogSelected + 4) % 5;
+      else if (isPadButtonPressed(PAD_BTN_CROSS)) {
+         if (updateDialogSelected == 0) { updateNotesOpen = 1; updateNotesScroll = 0; buildUpdateNotesLines(); }
+         else if (updateDialogSelected == 1) {
+            logInfo("[update-ui] automatic dialog action=DOWNLOAD download_state=%d\n", getUpdateDownloadState());
+            if (getUpdateDownloadState() == 1) {
+               playlistToastShownAt = getTimeUs();
+               setLabelText(&playlistToastLabel, "Update download is already running");
+            } else if (isUpdateDownloaded()) {
+               updateOverwritePromptOpen = 1;
+               updateOverwriteChoice = 0;
+               logInfo("[update-ui] automatic dialog opened overwrite confirmation\n");
+            } else {
+               int downloadRc = startUpdateDownload();
+               logInfo("[update-ui] automatic dialog download start rc=%d state=%d\n", downloadRc, getUpdateDownloadState());
+               if (downloadRc != 0) {
+                  playlistToastShownAt = getTimeUs();
+                  setLabelText(&playlistToastLabel, "Could not start update download");
+               }
+            }
+         }
+         else if (updateDialogSelected == 2) {
+            disableAutomaticUpdateChecks(); updateDialogOpen = 0; updateDialogDismissed = 1;
+         } else if (updateDialogSelected == 3) {
+            ignoreCurrentUpdate(); updateDialogOpen = 0; updateDialogDismissed = 1;
+         } else { updateDialogOpen = 0; updateDialogDismissed = 1; }
+      }
+      return;
+   }
+   if (!home.settingsOpen && !home.accountOpen && !home.exitConfirmOpen &&
+       !home.downloadManagerOpen && !home.playlistDeleteConfirmOpen &&
+       !updateDialogDismissed && shouldNotifyUpdate()) {
+      updateDialogOpen = 1;
+      updateDialogSelected = 0;
+      settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
+   }
    setPlaylistShuffleContext(homeIsPlaylistContents());
    updateDownloadOverlay();
    if (isDownloadSpacePromptOpen()) return;
@@ -3350,7 +3849,8 @@ static void drawHome(void)
    if (!home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen) drawSidebar();
    if (home.accountOpen) drawAccountPanel();
    if (home.settingsOpen) {
-      if (home.themeOpen) drawThemePanel();
+      if (updateSettingsOpen) drawUpdateSettingsPanel();
+      else if (home.themeOpen) drawThemePanel();
       else if (home.downloadSettingsOpen) drawDownloadSettingsPanel();
       else {
          drawSettingsPanel();
@@ -3358,6 +3858,8 @@ static void drawHome(void)
          else if (home.sponsorblockOpen) drawSponsorBlockPanel();
       }
    }
+   if (updateDialogOpen) drawUpdateDialog();
+   if (updateNotesOpen) drawUpdateNotes();
    if (home.exitConfirmOpen) drawExitConfirmation();
    if (playlistToastShownAt && getTimeUs() - playlistToastShownAt < 1000000ULL &&
        !home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen && !home.playlistDeleteConfirmOpen) {
@@ -3497,6 +3999,15 @@ static void termHome(void)
    freeLabel(&panelCode);
    freeLabel(&panelFooter);
    freeLabel(&settingsTitle);
+   freeLabel(&updatePanelTitle);
+   for (int i = 0; i < 3; i++) freeLabel(&updatePanelInfo[i]);
+   for (int i = 0; i < 6; i++) freeLabel(&updatePanelRows[i]);
+   freeLabel(&updateDialogTitle);
+   freeLabel(&updateDialogVersion);
+   for (int i = 0; i < 6; i++) freeLabel(&updateDialogRows[i]);
+   freeLabel(&updateNotesTitle);
+   for (int i = 0; i < UPDATE_NOTES_VISIBLE_LINES; i++) freeLabel(&updateNotesLines[i]);
+   termButtonHints(&updateHints);
    freeLabel(&themeTitle);
    for (int i = 0; i < THEME_ROW_COUNT; i++) freeLabel(&themeRowLabels[i]);
    for (int i = 0; i < 2; i++) freeLabel(&themeLegendLabels[i]);

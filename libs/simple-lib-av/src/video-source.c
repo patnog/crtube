@@ -103,7 +103,8 @@ int64_t readVideoSource(VideoSource *source, void *buffer, uint64_t length)
       if (length >= SOURCE_BUFFER_SIZE) {
          if (seekDescriptor(source, source->pos) != 0) break;
          int64_t got = readBackend(source, out, length);
-         if (got <= 0) break;
+         if (got < 0) return served ? (int64_t)served : -1;
+         if (got == 0) break;
          out += got; source->pos += got; source->filePos += got; length -= got; served += got;
          continue;
       }
@@ -111,7 +112,8 @@ int64_t readVideoSource(VideoSource *source, void *buffer, uint64_t length)
       // otherwise refill the buffer at the current position
       if (seekDescriptor(source, source->pos) != 0) break;
       int64_t got = readBackend(source, source->buffer, SOURCE_BUFFER_SIZE);
-      if (got <= 0) break;
+      if (got < 0) return served ? (int64_t)served : -1;
+      if (got == 0) break;
       source->bufferStart = source->pos;
       source->bufferLen   = (int)got;
       source->filePos     = source->pos + got;
@@ -161,7 +163,8 @@ int readVideoSourceAt(VideoSource *source, uint64_t offset, void *buffer, uint64
    uint64_t remaining = length;
    while (remaining > 0) {
       int64_t got = readVideoSource(source, out, remaining);
-      if (got <= 0) return -1;
+      if (got < 0) return -1;       // transport / filesystem error
+      if (got == 0) return -2;       // clean end of source before the requested bytes
       out       += got;
       remaining -= (uint64_t)got;
    }

@@ -19,6 +19,8 @@ static const char *DEFAULT_SETTINGS =
    "\n"
    "autoplay=on\n"
    "# on = play the next recommendation when a video ends; off = return to the library\n"
+   "automatic-update-checks=on\n"
+   "# on = check GitHub releases at startup; off = only check manually in Settings > Updates\n"
    "enable-1080p60=off\n"
    "# on = allow experimental TEE 1080p50/60 playback; off = Sony VDEC only, up to 1080p30\n"
    "subtitle-language=en\n"
@@ -109,6 +111,9 @@ static char downloadAudioLanguage[12] = "original";
 static int downloadAutoDub = 1;
 static int downloadPrimarySubtitles = 1;
 static char downloadSecondarySubtitle[12] = "off";
+static int automaticUpdateChecks = 1;
+static char ignoredUpdateTag[64];
+static char lastDownloadedUpdateVersion[64];
 
 // Languages represented by the countries in Content Region. Countries with multiple
 // common languages contribute each language once to this shared download-language list.
@@ -183,6 +188,36 @@ void loadSettings(void)
    regionUnsaved = 0;
    if (loadSettingsFile(SETTINGS_PATH, DEFAULT_SETTINGS, text, sizeof text) == 1)
       logInfo("[settings] created %s with defaults\n", SETTINGS_PATH);
+
+   const char *updateChecks = findSettingValue(text, "automatic-update-checks");
+   automaticUpdateChecks = 1;
+   if (updateChecks) {
+      if (settingValueEquals(updateChecks, "off")) automaticUpdateChecks = 0;
+      else if (!settingValueEquals(updateChecks, "on"))
+         logWarn("[settings] unknown automatic-update-checks value, using on\n");
+   } else if (rewriteSettingKey(SETTINGS_PATH, "automatic-update-checks", "on") != 0) {
+      logWarn("[settings] could not add automatic-update-checks default\n");
+   }
+   const char *downloadedVersion = findSettingValue(text, "last-downloaded-update-version");
+   lastDownloadedUpdateVersion[0] = 0;
+   if (downloadedVersion) {
+      int i = 0;
+      while (downloadedVersion[i] && downloadedVersion[i] != '\r' && downloadedVersion[i] != '\n' &&
+             downloadedVersion[i] != ' ' && i < (int)sizeof lastDownloadedUpdateVersion - 1) {
+         lastDownloadedUpdateVersion[i] = downloadedVersion[i]; i++;
+      }
+      lastDownloadedUpdateVersion[i] = 0;
+   }
+   const char *ignoredTag = findSettingValue(text, "ignored-update-tag");
+   ignoredUpdateTag[0] = 0;
+   if (ignoredTag) {
+      int i = 0;
+      while (ignoredTag[i] && ignoredTag[i] != '\r' && ignoredTag[i] != '\n' &&
+             ignoredTag[i] != ' ' && i < (int)sizeof ignoredUpdateTag - 1) {
+         ignoredUpdateTag[i] = ignoredTag[i]; i++;
+      }
+      ignoredUpdateTag[i] = 0;
+   }
 
    for (int i = 0; i < SORT_PREF_COUNT; i++) {
       const char *value = findSettingValue(text, SORT_SETTING_KEYS[i]);
@@ -684,4 +719,33 @@ int getDownloadLanguageCount(void) { return DOWNLOAD_LANGUAGE_COUNT; }
 const DownloadLanguage *getDownloadLanguageAt(int index)
 {
    return index >= 0 && index < DOWNLOAD_LANGUAGE_COUNT ? &DOWNLOAD_LANGUAGES[index] : NULL;
+}
+
+int getAutomaticUpdateChecks(void) { return automaticUpdateChecks; }
+int setAutomaticUpdateChecks(int enabled)
+{
+   enabled = enabled != 0;
+   if (rewriteSettingKey(SETTINGS_PATH, "automatic-update-checks", enabled ? "on" : "off") != 0)
+      return -1;
+   automaticUpdateChecks = enabled;
+   return 0;
+}
+const char *getIgnoredUpdateTag(void) { return ignoredUpdateTag; }
+int setIgnoredUpdateTag(const char *tag)
+{
+   if (!tag || !tag[0] || strlen(tag) >= sizeof ignoredUpdateTag ||
+       strchr(tag, '\n') || strchr(tag, '\r')) return -1;
+   if (rewriteSettingKey(SETTINGS_PATH, "ignored-update-tag", tag) != 0) return -1;
+   snprintf(ignoredUpdateTag, sizeof ignoredUpdateTag, "%s", tag);
+   return 0;
+}
+
+const char *getLastDownloadedUpdateVersion(void) { return lastDownloadedUpdateVersion; }
+int setLastDownloadedUpdateVersion(const char *version)
+{
+   if (!version || !version[0] || strlen(version) >= sizeof lastDownloadedUpdateVersion ||
+       strchr(version, '\n') || strchr(version, '\r')) return -1;
+   if (rewriteSettingKey(SETTINGS_PATH, "last-downloaded-update-version", version) != 0) return -1;
+   snprintf(lastDownloadedUpdateVersion, sizeof lastDownloadedUpdateVersion, "%s", version);
+   return 0;
 }

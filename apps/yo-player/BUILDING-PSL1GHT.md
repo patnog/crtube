@@ -120,3 +120,19 @@ GPL-2.0-or-later. A distributed binary linked with FAAD2 should therefore be
 treated as a GPLv3 combined work: preserve notices, provide the corresponding
 source and build scripts, and distribute under GPLv3-compatible terms. This is
 a practical compliance note, not legal advice.
+
+
+### Release version
+
+Set the app's semantic version in `apps/yo-player/VERSION` before preparing a
+release (for example, `1.2.3`). The PSL1GHT build regenerates `include/version.h`
+for the C version string and generates the package `PARAM.SFO` from the same value. The PS3 `APP_VER`
+field has two digits on either side of the dot. The package generator maps
+`MAJOR.MINOR.PATCH` to `MM.NN`: `MAJOR` occupies the first pair, while
+`MINOR` and `PATCH` occupy the two digits after the dot. Each component is
+independently capped for the XMB: `MAJOR` at 99, and `MINOR` and `PATCH` at
+9. For example, `1.0.10` becomes `01.09`, `1.12.15` becomes `01.99`, and
+`105.12.34` becomes `99.99`. These limits affect only `APP_VER`; the full
+semantic version remains unchanged in the application and is used for
+GitHub release comparisons. Publish the matching GitHub release tag as
+`v<version>` (for example, `v1.2.3`).

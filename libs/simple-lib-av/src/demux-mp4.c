@@ -324,15 +324,17 @@ static int loadFragmentInto(Mp4Demuxer *demuxer, Mp4Sample *samples, int maxSamp
    for (int guard = 0; guard < 16; guard++) {
       uint32_t type;
       if (demuxer->fileEnd && moofStart + 8 > demuxer->fileEnd) return 0;   // fileEnd 0 = unknown: let the read hit EOF
-      if (readMp4Box(source, moofStart, &type, &moofSize, &headerLen) != 0 || moofSize == 0) return 0;
+      int boxResult = readMp4Box(source, moofStart, &type, &moofSize, &headerLen);
+      if (boxResult == -2) return 0;       // clean EOF
+      if (boxResult != 0 || moofSize == 0) return -1;
       if (type == FOURCC('m','o','o','f')) break;
       moofStart += moofSize;
    }
-   if (moofSize < 8 || moofSize > MAX_MOOF_BYTES) return 0;
+   if (moofSize < 8 || moofSize > MAX_MOOF_BYTES) return -1;
 
    uint8_t *moof = (uint8_t *)malloc(moofSize);
-   if (!moof) return 0;
-   if (readVideoSourceAt(source, moofStart, moof, moofSize) != 0) { free(moof); return 0; }
+   if (!moof) return -1;
+   if (readVideoSourceAt(source, moofStart, moof, moofSize) != 0) { free(moof); return -1; }
 
    // traf -> tfhd (defaults + base), tfdt (decode time), trun (per-sample table)
    uint32_t trafStart, trafEnd, tfhdStart, tfhdEnd, trunStart, trunEnd, tfdtStart, tfdtEnd;
@@ -340,7 +342,7 @@ static int loadFragmentInto(Mp4Demuxer *demuxer, Mp4Sample *samples, int maxSamp
        findBoxInBuffer(moof, trafStart, trafEnd, FOURCC('t','f','h','d'), &tfhdStart, &tfhdEnd) != 0 ||
        findBoxInBuffer(moof, trafStart, trafEnd, FOURCC('t','r','u','n'), &trunStart, &trunEnd) != 0) {
       free(moof);
-      return 0;
+      return -1;
    }
 
    // tfhd: flags decide which optional fields (base offset, per-sample defaults) are present
@@ -417,10 +419,9 @@ static int loadFragmentInto(Mp4Demuxer *demuxer, Mp4Sample *samples, int maxSamp
    // the next fragment starts after this fragment's mdat
    uint64_t mdatPos = moofStart + moofSize, mdatSize = 0, mdatHeader = 0;
    uint32_t mdatType;
-   if (readMp4Box(source, mdatPos, &mdatType, &mdatSize, &mdatHeader) == 0 && mdatSize > 0)
-      demuxer->nextMoofPos = mdatPos + mdatSize;
-   else
-      demuxer->nextMoofPos = demuxer->fileEnd ? demuxer->fileEnd : ~(uint64_t)0;   // no trailing mdat: stop (past-EOF sentinel when size unknown)
+   int mdatResult = readMp4Box(source, mdatPos, &mdatType, &mdatSize, &mdatHeader);
+   if (mdatResult != 0 || mdatSize == 0 || mdatType != FOURCC('m','d','a','t')) return -1;
+   demuxer->nextMoofPos = mdatPos + mdatSize;
 
    return (int)count;
 }
@@ -446,11 +447,11 @@ static int loadNextFragment(Mp4Demuxer *demuxer)
    if (demuxer->audioOnly) {
       demuxer->audioSampleCount = loadFragmentInto(demuxer, demuxer->audioSamples, MAX_FRAG_SAMPLES, demuxer->audioTimescale, 0);
       demuxer->audioCursor = 0;
-      return demuxer->audioSampleCount > 0;
+      return demuxer->audioSampleCount > 0 ? 1 : (demuxer->audioSampleCount < 0 ? -1 : 0);
    }
    demuxer->videoSampleCount = loadFragmentInto(demuxer, demuxer->videoSamples, MAX_FRAG_SAMPLES, demuxer->videoTimescale, &demuxer->frameDurationNs);
    demuxer->videoCursor = 0;
-   return demuxer->videoSampleCount > 0;
+   return demuxer->videoSampleCount > 0 ? 1 : (demuxer->videoSampleCount < 0 ? -1 : 0);
 }
 
 int openMp4Demuxer(Mp4Demuxer *demuxer, VideoSource *source, int audioOnly)
@@ -575,43 +576,46 @@ fail:
 
 // keeps the audio queue fed up to a lead ahead of the video position (audio samples sit near the
 // matching video samples in the file, so these reads stay close to the video read position)
-static void pumpAudioSamples(Mp4Demuxer *demuxer, uint64_t videoPts)
+static int pumpAudioSamples(Mp4Demuxer *demuxer, uint64_t videoPts)
 {
    while (demuxer->hasAudio && demuxer->audioCursor < demuxer->audioSampleCount && !isAudioAuQueueFull(&demuxer->audioQueue)) {
       const Mp4Sample *sample = &demuxer->audioSamples[demuxer->audioCursor];
-      if (sample->ptsNs > videoPts + AUDIO_LEAD_NS) return;
+      if (sample->ptsNs > videoPts + AUDIO_LEAD_NS) return 0;
       if (sample->size > AUDIO_AU_MAX_BYTES) {
          if (!demuxer->oversizeAudioWarned) { logWarn("[demux-mp4] oversized audio sample skipped\n"); demuxer->oversizeAudioWarned = 1; }
       } else if (readVideoSourceAt(&demuxer->source, sample->offset, demuxer->sampleBuffer, sample->size) == 0) {
          enqueueAudioAu(&demuxer->audioQueue, demuxer->sampleBuffer, (int)sample->size, sample->ptsNs);
       } else {   // read failure (truncated file): give up on audio; a seek resets the cursor
-         logWarn("[demux-mp4] audio sample read failed, audio stops\n");
-         demuxer->audioCursor = demuxer->audioSampleCount;
-         return;
+         logWarn("[demux-mp4] audio sample read failed\n");
+         return -1;
       }
       demuxer->audioCursor++;
    }
+   return 0;
 }
 
 int readMp4VideoAu(Mp4Demuxer *demuxer, VideoAu *au)
 {
    for (;;) {
       if (demuxer->videoCursor >= demuxer->videoSampleCount) {
-         if (!demuxer->fragmented || !loadNextFragment(demuxer)) break;   // plain: real EOS. fragmented: no more fragments
+         if (!demuxer->fragmented) break;
+         int fragmentResult = loadNextFragment(demuxer);
+         if (fragmentResult < 0) return -1;
+         if (fragmentResult == 0) break;
       }
       const Mp4Sample *sample = &demuxer->videoSamples[demuxer->videoCursor];
-      pumpAudioSamples(demuxer, sample->ptsNs);
+      if (pumpAudioSamples(demuxer, sample->ptsNs) < 0) return -1;
       demuxer->videoCursor++;
 
       if (sample->size == 0 || sample->size > (uint32_t)demuxer->sampleCapacity) continue;   // corrupt entry: skip
-      if (readVideoSourceAt(&demuxer->source, sample->offset, demuxer->sampleBuffer, sample->size) != 0) return 0;   // truncated: end of stream
+      if (readVideoSourceAt(&demuxer->source, sample->offset, demuxer->sampleBuffer, sample->size) != 0) return -1;
 
       uint8_t *auBuffer = demuxer->auBuffers[demuxer->auIndex];   // alternate so the previous AU stays valid in the decoder
       if (!buildVideoAu(&demuxer->h264, demuxer->sampleBuffer, (int)sample->size, sample->keyframe, auBuffer, demuxer->auCapacity, sample->ptsNs, au)) continue;
       demuxer->auIndex = (demuxer->auIndex + 1) % AU_BUFFER_COUNT;
       return 1;
    }
-   pumpAudioSamples(demuxer, demuxer->durationNs);   // video done: let the audio tail through
+   if (pumpAudioSamples(demuxer, demuxer->durationNs) < 0) return -1;   // video done: let the audio tail through
    return 0;
 }
 
@@ -621,14 +625,17 @@ int readMp4AudioAu(Mp4Demuxer *demuxer, AudioAu *au)
 {
    for (;;) {
       if (demuxer->audioCursor >= demuxer->audioSampleCount) {
-         if (!demuxer->fragmented || !loadNextFragment(demuxer)) return 0;
+         if (!demuxer->fragmented) return 0;
+         int fragmentResult = loadNextFragment(demuxer);
+         if (fragmentResult < 0) return -1;
+         if (fragmentResult == 0) return 0;
       }
       const Mp4Sample *sample = &demuxer->audioSamples[demuxer->audioCursor++];
       if (sample->size == 0 || sample->size > AUDIO_AU_MAX_BYTES) {
          if (!demuxer->oversizeAudioWarned) { logWarn("[demux-mp4] oversized audio sample skipped\n"); demuxer->oversizeAudioWarned = 1; }
          continue;
       }
-      if (readVideoSourceAt(&demuxer->source, sample->offset, au->data, sample->size) != 0) return 0;   // truncated: end
+      if (readVideoSourceAt(&demuxer->source, sample->offset, au->data, sample->size) != 0) return -1;
       au->size = (int)sample->size;
       au->pts  = sample->ptsNs;
       return 1;

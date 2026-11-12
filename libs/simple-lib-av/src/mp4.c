@@ -10,11 +10,13 @@ void fourccToStr(uint32_t fourcc, char out[5])
 int readMp4Box(VideoSource *source, uint64_t off, uint32_t *type, uint64_t *boxSize, uint64_t *headerLen)
 {
    uint8_t head[16];
-   if (readVideoSourceAt(source, off, head, 8) != 0) return -1;
+   int readResult = readVideoSourceAt(source, off, head, 8);
+   if (readResult != 0) return readResult;
    uint64_t size = readU32BE(head);
    *type = readU32BE(head + 4);
    if (size == 1) {
-      if (readVideoSourceAt(source, off + 8, head + 8, 8) != 0) return -1;
+      readResult = readVideoSourceAt(source, off + 8, head + 8, 8);
+      if (readResult != 0) return readResult;
       size = readU64BE(head + 8);
       *headerLen = 16;
    } else {

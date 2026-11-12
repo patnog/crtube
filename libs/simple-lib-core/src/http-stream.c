@@ -19,6 +19,7 @@
 #define HTTP_URL_MAX 2048
 #define MAX_STREAMS  4
 #define READER_STARVE_LIMIT_MS 12000
+#define READER_RECOVERY_ATTEMPTS 3
 
 // the ring keeps a window of streamed bytes indexed by file offset % RING_SIZE. the prefetch thread fills
 // it forward to PREFETCH_AHEAD past the read position; the rest is history for small back-reads. A read
@@ -415,6 +416,7 @@ int64_t readHttpStream(HttpStream *stream, void *buffer, uint64_t length)
 {
    int starvedMs = 0;
    int nextStarveLogMs = 3000;
+   int recoveryAttempts = 0;
    for (;;) {
       lock(&stream->stateLock);
       if (!stream->inUse || stream->readerCancelled) { unlock(&stream->stateLock); return -1; }
@@ -444,13 +446,24 @@ int64_t readHttpStream(HttpStream *stream, void *buffer, uint64_t length)
          nextStarveLogMs += 3000;
       }
       if (starvedMs >= READER_STARVE_LIMIT_MS) {
+         if (recoveryAttempts++ >= READER_RECOVERY_ATTEMPTS) {
+            logError("[http] s%d read failed after %dms and %d reconnect windows\n",
+                     stream->slot, starvedMs, recoveryAttempts);
+            return -1;
+         }
          lock(&stream->stateLock);
-         stream->readerCancelled = 1;
-         stream->error = 1;
-         stream->running = 0;   // stop the prefetcher from reconnecting after the consumer has abandoned this stream
+         // Keep the prefetch thread alive. Force a fresh range connection at the reader's exact
+         // position; the next attempt may succeed after a transient TLS/socket failure.
+         stream->needReconnect = 1;
+         stream->atEof = 0;
+         stream->error = 0;
+         stream->errorRetries = 0;
          unlock(&stream->stateLock);
-         logError("[http] s%d read aborted after %dms without data; prefetch stopped\n", stream->slot, starvedMs);
-         return -1;
+         logWarn("[http] s%d stalled for %dms; requesting reconnect %d/%d at offset %llu\n",
+                 stream->slot, starvedMs, recoveryAttempts, READER_RECOVERY_ATTEMPTS,
+                 (unsigned long long)stream->position);
+         starvedMs = 0;
+         nextStarveLogMs = 3000;
       }
    }
 }

@@ -1,4 +1,5 @@
 .SUFFIXES:
+.DEFAULT_GOAL := all
 
 ifeq ($(strip $(PSL1GHT)),)
 $(error "Set PSL1GHT to the installed PSL1GHT directory")
@@ -19,24 +20,33 @@ INCLUDES := include ../../libs/simple-lib-app/include ../../libs/simple-lib-av/i
 
 CFILES := main.c home.c play.c search.c playlist-picker.c video-grid.c storage.c stream-select.c \
           downloads.c video-export-psl1ght.c extractor.c youtube.c sponsorblock.c \
-          subtitles.c chapters.c settings.c theme.c screensaver.c \
+          subtitles.c chapters.c settings.c updater.c theme.c screensaver.c \
           account.c account-oauth.c youtube-tv.c sidebar.c
+
+PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(firstword $(MAKEFILE_LIST)))))
 
 TITLE     := CRTube
 APPID     := CRTUBE001
 CONTENTID := UP0001-$(APPID)_00-0000000000000000
-ICON0            := $(CURDIR)/ICON0.PNG
-SFOXML           := $(CURDIR)/psl1ght/PARAM.SFO.xml
+ICON0            := $(PROJECT_DIR)/ICON0.PNG
+VERSION_FILE     := $(PROJECT_DIR)/VERSION
+VERSION_HEADER   := $(PROJECT_DIR)/include/version.h
+SFOXML           := $(PROJECT_DIR)/$(BUILD)/PARAM.SFO.xml
 PKGFILES         := $(CURDIR)/pkgfiles
 SCREENSAVER_LOGO := $(CURDIR)/res/BOUNCING_LOGO.JPG
 
-PROJECT_DIR := $(patsubst %/,%,$(dir $(abspath $(firstword $(MAKEFILE_LIST)))))
 ROOT        := $(abspath $(PROJECT_DIR)/../..)
 CORE_LIB   := $(ROOT)/libs/simple-lib-core/build/psl1ght/libsimple-lib-core.a
 HTTPS_LIB  := $(ROOT)/libs/simple-lib-https/build/psl1ght/libsimple-lib-https.a
 AV_LIB     := $(ROOT)/libs/simple-lib-av/build/psl1ght/libsimple-lib-av.a
 APP_LIB    := $(ROOT)/libs/simple-lib-app/build/psl1ght/libsimple-lib-app.a
 PORTLIBS   := $(PS3DEV)/portlibs/ppu
+
+$(VERSION_HEADER): $(VERSION_FILE) $(PROJECT_DIR)/psl1ght/generate_version_header.py
+	@python3 $(PROJECT_DIR)/psl1ght/generate_version_header.py $(VERSION_FILE) $@
+
+$(SFOXML): $(PROJECT_DIR)/psl1ght/PARAM.SFO.xml $(VERSION_FILE)
+	@python3 $(PROJECT_DIR)/psl1ght/generate_sfo.py $< $(VERSION_FILE) $@
 
 CFLAGS = -O2 -Wall -Wextra -std=gnu11 -mcpu=cell $(MACHDEP) $(INCLUDE) \
           -DPSL1GHT -DNDEBUG -include psl1ght_compat.h \
@@ -85,9 +95,9 @@ $(AV_LIB):
 $(APP_LIB):
 	@$(MAKE) --no-print-directory -C $(ROOT)/libs/simple-lib-app -f Makefile.psl1ght
 
-$(BUILD): libraries
+$(BUILD): libraries $(VERSION_HEADER)
 	@[ -d $@ ] || mkdir -p $@
-	@$(MAKE) --no-print-directory -C $@ -f $(CURDIR)/Makefile
+	@$(MAKE) --no-print-directory -C $@ -f $(CURDIR)/Makefile $(OUTPUT).elf
 
 clean:
 	@$(MAKE) --no-print-directory -C $(ROOT)/libs/simple-lib-core -f Makefile.psl1ght clean
@@ -106,7 +116,10 @@ pkg: $(BUILD)
 	@test -f $(SCREENSAVER_LOGO) || { echo "Missing screensaver logo: $(SCREENSAVER_LOGO)"; exit 1; }
 	@mkdir -p $(PKGFILES)/USRDIR
 	@cp $(SCREENSAVER_LOGO) $(PKGFILES)/USRDIR/BOUNCING_LOGO.JPG
-	@rm -f $(OUTPUT).pkg $(OUTPUT).gnpdrm.pkg $(CURDIR)/$(PKG_NAME).pkg $(CURDIR)/$(PKG_NAME).gnpdrm.pkg
+	@rm -f $(OUTPUT).self $(OUTPUT).fake.self $(OUTPUT).pkg $(OUTPUT).gnpdrm.pkg $(CURDIR)/$(PKG_NAME).pkg $(CURDIR)/$(PKG_NAME).gnpdrm.pkg
+	# Build SELF from the recursive build directory, where this project overrides
+	# PSL1GHT's generic %.self rule with the required PRX metadata processing.
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(PROJECT_DIR)/Makefile $(OUTPUT).self
 	@$(MAKE) --no-print-directory $(OUTPUT).pkg
 	@cp $(OUTPUT).pkg $(CURDIR)/$(PKG_NAME).pkg
 	@if [ -f $(OUTPUT).gnpdrm.pkg ]; then cp $(OUTPUT).gnpdrm.pkg $(CURDIR)/$(PKG_NAME).gnpdrm.pkg; fi
@@ -131,3 +144,6 @@ $(STARTFILES)/lv2-sprx.o: lv2-sprx-empty.S
 $(OUTPUT).elf: $(OFILES) $(APP_LIB) $(AV_LIB) $(HTTPS_LIB) $(CORE_LIB) | $(STARTFILES)/lv2-sprx.o
 -include $(DEPENDS)
 endif
+
+$(OUTPUT).pkg: $(SFOXML)
+$(OUTPUT).gnpdrm.pkg: $(SFOXML)

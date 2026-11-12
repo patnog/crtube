@@ -29,6 +29,7 @@
 #include "storage.h"
 #include "account.h"
 #include "settings.h"
+#include "updater.h"
 #include "video-player.h"
 #include "downloads.h"
 #include "video-export.h"
@@ -183,6 +184,7 @@ int main(int argc, char **argv)
 
    logInfo("[yt] net rc=%d\n", netRc);
    openHome();       // boot into the home screen (trending categories)
+   if (getAutomaticUpdateChecks()) startUpdateCheck(0); // non-blocking GitHub release check
    BOOT_MARK("home\n");
 
    uint64_t lastUserActivityUs = getTimeUs();
@@ -262,6 +264,7 @@ int main(int argc, char **argv)
    shutdownAccount();     // stop a sign-in poll before the http layer goes away
    shutdownDownloads();   // cancel + join any in-flight download before the http/vfs layers go away
    shutdownVideoExport();
+   shutdownUpdater();     // join the release check before shutting down HTTP
    freeConsoleGlyphs();
    termStats();
    termAudio();

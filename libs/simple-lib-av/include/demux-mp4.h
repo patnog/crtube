@@ -73,7 +73,7 @@ typedef struct {
 // audioOnly=1 opens a standalone mp4a track (no video), read with readMp4AudioAu. 0 / -1.
 int  openMp4Demuxer(Mp4Demuxer *demuxer, VideoSource *source, int audioOnly);
 int  readMp4VideoAu(Mp4Demuxer *demuxer, VideoAu *au);        // 1 = got AU, 0 = end of stream, -1 = error
-int  readMp4AudioAu(Mp4Demuxer *demuxer, AudioAu *au);        // audio-only: 1 = got AU, 0 = end of stream
+int  readMp4AudioAu(Mp4Demuxer *demuxer, AudioAu *au);        // audio-only: 1 = got AU, 0 = end, -1 = read error
 void closeMp4Demuxer(Mp4Demuxer *demuxer);
 
 // jumps to a keyframe and clears the audio queue (only call with the audio consumer parked). landAfter=0

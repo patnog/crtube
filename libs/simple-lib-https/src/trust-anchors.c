@@ -18,6 +18,27 @@ static const unsigned char TA2_RSA_E[] = {1,0,1};
 static const unsigned char TA3_DN[] = {48,79,49,11,48,9,6,3,85,4,6,19,2,85,83,49,41,48,39,6,3,85,4,10,19,32,73,110,116,101,114,110,101,116,32,83,101,99,117,114,105,116,121,32,82,101,115,101,97,114,99,104,32,71,114,111,117,112,49,21,48,19,6,3,85,4,3,19,12,73,83,82,71,32,82,111,111,116,32,88,50};
 static const unsigned char TA3_EC_Q[] = {4,205,155,213,159,128,131,10,236,9,74,243,22,74,62,92,207,119,172,222,103,5,13,29,7,182,220,22,251,90,139,20,219,226,113,96,196,186,69,149,17,137,142,234,6,223,247,42,22,28,164,185,197,197,50,224,3,224,30,130,24,56,139,215,69,216,10,106,110,230,0,119,251,2,81,125,34,216,10,110,154,91,119,223,240,250,65,236,57,220,117,202,104,7,12,31,234};
 
+
+// USERTrust ECC Certification Authority (Sectigo compatibility root)
+static const unsigned char TA4_DN[] = {
+   48, 129, 136, 49, 11, 48, 9, 6, 3, 85, 4, 6, 19, 2, 85, 83,
+   49, 19, 48, 17, 6, 3, 85, 4, 8, 19, 10, 78, 101, 119, 32, 74,
+   101, 114, 115, 101, 121, 49, 20, 48, 18, 6, 3, 85, 4, 7, 19, 11,
+   74, 101, 114, 115, 101, 121, 32, 67, 105, 116, 121, 49, 30, 48, 28, 6,
+   3, 85, 4, 10, 19, 21, 84, 104, 101, 32, 85, 83, 69, 82, 84, 82,
+   85, 83, 84, 32, 78, 101, 116, 119, 111, 114, 107, 49, 46, 48, 44, 6,
+   3, 85, 4, 3, 19, 37, 85, 83, 69, 82, 84, 114, 117, 115, 116, 32,
+   69, 67, 67, 32, 67, 101, 114, 116, 105, 102, 105, 99, 97, 116, 105, 111,
+   110, 32, 65, 117, 116, 104, 111, 114, 105, 116, 121};
+static const unsigned char TA4_EC_Q[] = {
+   4, 26, 172, 84, 90, 169, 249, 104, 35, 231, 122, 213, 36, 111, 83, 198,
+   90, 216, 75, 171, 198, 213, 182, 209, 230, 115, 113, 174, 221, 156, 214, 12,
+   97, 253, 219, 160, 137, 3, 184, 5, 20, 236, 87, 206, 238, 93, 63, 226,
+   33, 179, 206, 247, 212, 138, 121, 224, 163, 131, 126, 45, 151, 208, 97, 196,
+   241, 153, 220, 37, 145, 99, 171, 127, 48, 163, 180, 112, 226, 199, 161, 51,
+   156, 243, 191, 46, 92, 83, 177, 95, 179, 125, 50, 127, 138, 52, 227, 121,
+   121};
+
 const br_x509_trust_anchor TLS_TRUST_ANCHORS[] = {
   { { (unsigned char*)TA0_DN, sizeof TA0_DN }, BR_X509_TA_CA,
     { BR_KEYTYPE_RSA, { .rsa = { (unsigned char*)TA0_RSA_N, sizeof TA0_RSA_N, (unsigned char*)TA0_RSA_E, sizeof TA0_RSA_E } } } },
@@ -26,6 +47,8 @@ const br_x509_trust_anchor TLS_TRUST_ANCHORS[] = {
   { { (unsigned char*)TA2_DN, sizeof TA2_DN }, BR_X509_TA_CA,
     { BR_KEYTYPE_RSA, { .rsa = { (unsigned char*)TA2_RSA_N, sizeof TA2_RSA_N, (unsigned char*)TA2_RSA_E, sizeof TA2_RSA_E } } } },
   { { (unsigned char*)TA3_DN, sizeof TA3_DN }, BR_X509_TA_CA,
-    { BR_KEYTYPE_EC, { .ec = { BR_EC_secp384r1, (unsigned char*)TA3_EC_Q, sizeof TA3_EC_Q } } } }
+    { BR_KEYTYPE_EC, { .ec = { BR_EC_secp384r1, (unsigned char*)TA3_EC_Q, sizeof TA3_EC_Q } } } },
+  { { (unsigned char*)TA4_DN, sizeof TA4_DN }, BR_X509_TA_CA,
+    { BR_KEYTYPE_EC, { .ec = { BR_EC_secp384r1, (unsigned char*)TA4_EC_Q, sizeof TA4_EC_Q } } } }
 };
 const size_t TLS_TRUST_ANCHORS_COUNT = sizeof TLS_TRUST_ANCHORS / sizeof TLS_TRUST_ANCHORS[0];

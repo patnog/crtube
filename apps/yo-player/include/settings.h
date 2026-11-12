@@ -102,4 +102,13 @@ int setDownloadPrimarySubtitlesEnabled(int enabled);
 const char *getDownloadSecondarySubtitleLanguage(void); // "off" or a language code
 int setDownloadSecondarySubtitleLanguage(const char *languageCode);
 int getDownloadLanguageCount(void);
+
+// Release update preferences. The release tag ignored by the user is stored separately.
+int getAutomaticUpdateChecks(void);
+int setAutomaticUpdateChecks(int enabled);
+int setIgnoredUpdateTag(const char *tag);
+const char *getIgnoredUpdateTag(void);
 const DownloadLanguage *getDownloadLanguageAt(int index);
+
+const char *getLastDownloadedUpdateVersion(void);
+int setLastDownloadedUpdateVersion(const char *version);

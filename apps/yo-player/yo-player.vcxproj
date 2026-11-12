@@ -58,6 +58,7 @@
    <ClCompile Include="src\subtitles.c" />
    <ClCompile Include="src\chapters.c" />
    <ClCompile Include="src\settings.c" />
+   <ClCompile Include="src\updater.c" />
    <ClCompile Include="src\theme.c" />
    <ClCompile Include="src\sidebar.c" />
   </ItemGroup>
@@ -76,6 +77,8 @@
    <ClInclude Include="include\subtitles.h" />
    <ClInclude Include="include\chapters.h" />
    <ClInclude Include="include\settings.h" />
+   <ClInclude Include="include\updater.h" />
+   <ClInclude Include="include\version.h" />
    <ClInclude Include="include\theme.h" />
    <ClInclude Include="include\sidebar.h" />
   </ItemGroup>

@@ -34,7 +34,7 @@ static inline int readVideoAu(VideoDemuxer *demuxer, VideoAu *au)   // 1 = got A
    return demuxer->isMp4 ? readMp4VideoAu(&demuxer->container.mp4, au) : readMkvVideoAu(&demuxer->container.mkv, au);
 }
 
-static inline int readAudioAu(VideoDemuxer *demuxer, AudioAu *au)   // audio-only demuxer: 1 = got AU, 0 = end of stream
+static inline int readAudioAu(VideoDemuxer *demuxer, AudioAu *au)   // 1 = got AU, 0 = end of stream, -1 = read error
 {
    return demuxer->isMp4 ? readMp4AudioAu(&demuxer->container.mp4, au) : 0;
 }

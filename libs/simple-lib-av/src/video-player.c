@@ -57,7 +57,8 @@ struct VideoPlayer {
    sys_ppu_thread_t thread;
    int              threadActive;
    volatile int     running;      // decode thread runs while set
-   volatile int     ended;        // demux hit end of stream
+   volatile int     ended;        // demux confirmed end of stream and decoder drain completed
+   volatile int     failed;       // transport, demux, or decoder failure; never treated as EOF
    volatile int     teeFailed;    // TEE recovery and Sony fallback both failed
    volatile int     decoderStopUnsafe; // decoder resources could not be stopped safely
    int              forceSony;    // this player abandoned TEE; seeks must keep using Sony
@@ -92,6 +93,7 @@ struct VideoPlayer {
    // pipelines flush), then decode restarts from the nearest earlier cued keyframe
    volatile int64_t seekRequestNs;      // pending target in ns, -1 = none
    volatile int     seekInProgress;     // remains set through decode pre-roll until a post-seek frame is presented
+   volatile uint64_t seekFrameMinPts;   // first presentable PTS at/after the demuxer's seek landing point
    int              seekLandAfter;      // 1 = land on the next keyframe at/after the target (sponsor skip), not before
    volatile int     audioFlushRequest;  // decode thread -> audio thread: flush and park
    volatile int     audioFlushDone;     // audio thread -> decode thread: flushed, parked
@@ -424,6 +426,8 @@ static void performSeek(VideoPlayer *player)
    player->ended      = 0;
    player->currentPts = landedNs;
    player->basePts    = landedNs;
+   player->seekFrameMinPts = landedNs;
+   player->failed = 0;
    player->audioClockValid = 0;
    player->audioWaitStartUs = 0;         // fresh pre-roll: each seek gets the full window to wait for audio,
                                          // else a stale timer trips instantly and video starts on the wall clock
@@ -495,10 +499,13 @@ static void decodeThread(uint64_t arg)
          player->slots[slot].state = SLOT_EMPTY;
          if (got < 0 && isH264DecoderTee(player->decoder))
             player->teeFailed = 1;
-         if (player->seekRequestNs < 0) player->ended = 1;
+         if (player->seekRequestNs < 0) {
+            if (got == 0) player->ended = 1;
+            else { player->failed = 1; player->ended = 0; }
+         }
          unlock(&player->lock);
-         // idle at end of stream (or after a hard error) until a seek restarts decode
-         while (player->running && player->ended && player->seekRequestNs < 0) sleepMs(10);
+         // EOF is terminal; errors are kept distinct and cannot trigger autoplay. A later seek can retry.
+         while (player->running && (player->ended || player->failed) && player->seekRequestNs < 0) sleepMs(10);
       }
    }
    exitThread();
@@ -904,7 +911,9 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
    // pick the latest ready frame whose pts is due; drop older ready frames (skip if we fell behind)
    int best = -1; uint64_t bestPts = 0;
    for (int i = 0; i < FRAME_SLOTS; i++)
-      if (player->slots[i].state == SLOT_READY && player->slots[i].pts <= clock && (best < 0 || player->slots[i].pts >= bestPts)) { best = i; bestPts = player->slots[i].pts; }
+      if (player->slots[i].state == SLOT_READY && player->slots[i].pts <= clock &&
+          (!player->seekInProgress || player->slots[i].pts >= player->seekFrameMinPts) &&
+          (best < 0 || player->slots[i].pts >= bestPts)) { best = i; bestPts = player->slots[i].pts; }
 
    if (best >= 0) {
       // The decoder has completed the seek and a frame from the new position is now being
@@ -1091,7 +1100,7 @@ void seekVideoPlayerPast(VideoPlayer *player, float seconds) { postSeek(player, 
 
 int isVideoEnded(const VideoPlayer *player)
 {
-   if (!player || !player->ended) return 0;
+   if (!player || !player->ended || player->failed) return 0;
    for (int i = 0; i < FRAME_SLOTS; i++)
       if (player->slots[i].state == SLOT_READY || player->slots[i].state == SLOT_FILLING) return 0;
    return 1;
