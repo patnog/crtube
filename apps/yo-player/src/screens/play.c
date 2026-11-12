@@ -2135,9 +2135,14 @@ static double livePositionSq(void);
 
 static VideoPlayer *openReadyResolutionPlayer(const char *videoUrl, const char *audioUrl, float position)
 {
-   VideoPlayer *replacement = createVideoPlayerSplit(videoUrl, audioUrl && audioUrl[0] ? audioUrl : NULL,
-                                                     allocGfxVideoBuffer, freeGfxVideoBuffer);
-   if (!replacement) return NULL;
+   if (playbackCancelRequested()) return NULL;
+   VideoPlayer *replacement = createVideoPlayerSplitCancelable(
+      videoUrl, audioUrl && audioUrl[0] ? audioUrl : NULL,
+      allocGfxVideoBuffer, freeGfxVideoBuffer, &state.cancelRequested);
+   if (!replacement || playbackCancelRequested()) {
+      if (replacement) destroyVideoPlayer(replacement);
+      return NULL;
+   }
    if (audioUrl && audioUrl[0] && !isVideoPlayerUsingSeparateAudio(replacement)) {
       logWarn("[video-diag] replacement video did not open the requested separate audio source\n");
       destroyVideoPlayer(replacement);
@@ -2149,10 +2154,12 @@ static VideoPlayer *openReadyResolutionPlayer(const char *videoUrl, const char *
    // Only one VDEC instance is kept alive during a resolution change. The previous player is
    // retired before this function is called, avoiding a second decoder's SPU/work-memory demand.
    uint64_t started = sys_time_get_system_time();
-   while (!isVideoPlayerReady(replacement) &&
+   while (!playbackCancelRequested() && !isVideoPlayerReady(replacement) &&
+          !isVideoPlayerFailed(replacement) &&
           sys_time_get_system_time() - started < 15000000ull) sleepMs(50);
-   if (!isVideoPlayerReady(replacement)) {
-      logWarn("[video-diag] resolution stream did not reach decoded pre-roll\n");
+   if (playbackCancelRequested() || !isVideoPlayerReady(replacement)) {
+      if (!playbackCancelRequested())
+         logWarn("[video-diag] resolution stream did not reach decoded pre-roll\n");
       destroyVideoPlayer(replacement);
       return NULL;
    }
@@ -2774,7 +2781,14 @@ static void handlePlaybackInput(void)
    }
    if (r1State == PAD_BUTTON_STATE_RELEASED) {
       if (!r1HoldTriggered) {
-         if (state.chapters.count == 0) showToast("No chapters");
+         if (state.isLive) {
+            // A short R1 press on a DVR live stream returns to the moving live edge;
+            // chapter navigation is reserved for VOD. Discard any pending timeline scrub.
+            state.seeking = 0;
+            float behind = liveTimelineLength() - liveTimelinePosition();
+            if (!isLiveBehindAtEdge(behind)) reopenLiveAt(-1);
+            else showControls();
+         } else if (state.chapters.count == 0) showToast("No chapters");
          else {
             float position = getVideoPositionSeconds(state.player);
             int actual = 0;
@@ -4807,22 +4821,32 @@ static void drawPlay(void)
    setGfxSdUiScale(selectedUiScale);
 }
 
+static void joinPlaybackWorker(const char *name, sys_ppu_thread_t tid)
+{
+   uint64_t started = sys_time_get_system_time();
+   int rc = joinThread(tid);
+   uint64_t elapsed = sys_time_get_system_time() - started;
+   logInfo("[play-cancel] worker=%s joinMs=%llu rc=%d\n", name,
+           (unsigned long long)(elapsed / 1000ull), rc);
+}
+
 static void termPlay(void)
 {
+   uint64_t teardownStartedUs = sys_time_get_system_time();
    cropPanX = cropPanY = 0.0f;
    cropPanLastUpdateUs = 0;
    // Wake worker threads blocked in TLS connect/read before joining them. Without this, leaving during
    // a slow YouTube resolve can make the screen manager wait through several 10-second socket timeouts.
    requestPlaybackCancel();
    state.resolutionSwitchAborting = 1;
-   if (state.threadActive) { joinThread(state.workerTid); state.threadActive = 0; }
-   if (state.sbThreadActive) { joinThread(state.sbWorkerTid); state.sbThreadActive = 0; }   // usually already done
-   if (state.subThreadActive) { joinThread(state.subWorkerTid); state.subThreadActive = 0; }
-   if (state.audioSwitchThreadActive) { joinThread(state.audioSwitchTid); state.audioSwitchThreadActive = 0; }
-   if (state.resolutionSwitchThreadActive) { joinThread(state.resolutionSwitchTid); state.resolutionSwitchThreadActive = 0; }
-   if (state.chThreadActive) { joinThread(state.chWorkerTid); state.chThreadActive = 0; }
-   if (state.metadataThreadActive) { joinThread(state.metadataWorkerTid); state.metadataThreadActive = 0; }
-   if (state.nextThreadActive) { joinThread(state.nextWorkerTid); state.nextThreadActive = 0; }
+   if (state.threadActive) { joinPlaybackWorker("playback", state.workerTid); state.threadActive = 0; }
+   if (state.sbThreadActive) { joinPlaybackWorker("sponsor", state.sbWorkerTid); state.sbThreadActive = 0; }   // usually already done
+   if (state.subThreadActive) { joinPlaybackWorker("subtitles", state.subWorkerTid); state.subThreadActive = 0; }
+   if (state.audioSwitchThreadActive) { joinPlaybackWorker("audio-switch", state.audioSwitchTid); state.audioSwitchThreadActive = 0; }
+   if (state.resolutionSwitchThreadActive) { joinPlaybackWorker("resolution-switch", state.resolutionSwitchTid); state.resolutionSwitchThreadActive = 0; }
+   if (state.chThreadActive) { joinPlaybackWorker("chapters", state.chWorkerTid); state.chThreadActive = 0; }
+   if (state.metadataThreadActive) { joinPlaybackWorker("metadata", state.metadataWorkerTid); state.metadataThreadActive = 0; }
+   if (state.nextThreadActive) { joinPlaybackWorker("autoplay", state.nextWorkerTid); state.nextThreadActive = 0; }
    free(state.subtitleTrack);
    state.subtitleTrack = NULL;
    free(state.captionTracks);
@@ -4897,6 +4921,8 @@ static void termPlay(void)
    if (state.nextImageRequested) cancelImageAsync();
    if (state.nextThumbTexture.offset) { finishGfx(); freeGfxTexture(&state.nextThumbTexture); }
    closeFont(&uiFont);
+   logInfo("[play-cancel] teardownComplete totalMs=%llu\n",
+           (unsigned long long)((sys_time_get_system_time() - teardownStartedUs) / 1000ull));
    setHttpRequestsCancelled(0);
 }
 
