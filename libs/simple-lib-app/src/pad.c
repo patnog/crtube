@@ -18,6 +18,10 @@ static const struct { int word; uint16_t bit; } padControlBits[PAD_BUTTON_COUNT]
 static CellPadData portData[MAX_PORT_NUM];
 static unsigned remoteButtons[MAX_PORT_NUM];
 static uint16_t lastRemoteCode[MAX_PORT_NUM];
+static unsigned remoteSpecialButtons[MAX_PORT_NUM];
+static PadButtonState remoteSpecialStates[PAD_REMOTE_BUTTON_COUNT];
+static volatile unsigned rawRemoteSpecial;
+static unsigned prevRemoteSpecial;
 static PadButtonState buttonStates[PAD_BUTTON_COUNT];
 static Stick leftStick;
 static Stick rightStick;
@@ -69,12 +73,12 @@ static unsigned remoteCodeToButton(uint16_t code)
          return 1u << PAD_BTN_CROSS;
       case BTN_BD_RETURN:
          return 1u << PAD_BTN_CIRCLE;
-      case BTN_BD_NEXT:
       case BTN_BD_SCAN_FWD:
          return 1u << PAD_BTN_RIGHT;
-      case BTN_BD_PREV:
       case BTN_BD_SCAN_REV:
          return 1u << PAD_BTN_LEFT;
+      case BTN_BD_DISPLAY:
+         return 1u << PAD_BTN_L2;
       default:
          return 0;
    }
@@ -96,6 +100,10 @@ void initPad(void)
    ioPadInit(MAX_PORT_NUM);
    memset(portData, 0, sizeof(portData));
    memset(remoteButtons, 0, sizeof(remoteButtons));
+   memset(remoteSpecialButtons, 0, sizeof(remoteSpecialButtons));
+   memset(remoteSpecialStates, 0, sizeof(remoteSpecialStates));
+   rawRemoteSpecial = 0;
+   prevRemoteSpecial = 0;
    for (int port = 0; port < MAX_PORT_NUM; port++)
       lastRemoteCode[port] = 0xffff;
    memset(buttonStates, 0, sizeof(buttonStates));
@@ -114,12 +122,14 @@ void pollPad(void)
    uint16_t digital2 = 0;
    int haveInfo = ioPadGetInfo2(&info) == 0;
    int haveAnalogSource = 0;
+   unsigned remoteSpecial = 0;
 
    if (haveInfo) {
       for (int port = 0; port < MAX_PORT_NUM; port++) {
          if (!(info.port_status[port] & 1u)) {
             memset(&portData[port], 0, sizeof(portData[port]));
             remoteButtons[port] = 0;
+            remoteSpecialButtons[port] = 0;
             lastRemoteCode[port] = 0xffff;
             continue;
          }
@@ -132,16 +142,28 @@ void pollPad(void)
                uint16_t code = nextData.button[25]; // BTN_BDCODE / PAD_BUTTON_OFFSET_BD_CODE
                if (code == BTN_BD_RELEASE) {
                   remoteButtons[port] = 0;
+                  remoteSpecialButtons[port] = 0;
                   lastRemoteCode[port] = 0xffff;
                } else {
                   unsigned mapped = remoteCodeToButton(code);
                   remoteButtons[port] = mapped;
-                  if (!mapped && lastRemoteCode[port] != code)
+                  remoteSpecialButtons[port] = 0;
+                  if (code == BTN_BD_AUDIO) remoteSpecialButtons[port] = 1u << PAD_REMOTE_AUDIO;
+                  else if (code == BTN_BD_SUBTITLE) remoteSpecialButtons[port] = 1u << PAD_REMOTE_SUBTITLE;
+                  else if (code == BTN_BD_PREV) remoteSpecialButtons[port] = 1u << PAD_REMOTE_PREV;
+                  else if (code == BTN_BD_NEXT) remoteSpecialButtons[port] = 1u << PAD_REMOTE_NEXT;
+                  else if (code == BTN_BD_SLOW_REV) remoteSpecialButtons[port] = 1u << PAD_REMOTE_SLOW_REV;
+                  else if (code == BTN_BD_SLOW_FWD) remoteSpecialButtons[port] = 1u << PAD_REMOTE_SLOW_FWD;
+                  int special = code == BTN_BD_AUDIO || code == BTN_BD_SUBTITLE ||
+                                code == BTN_BD_PREV || code == BTN_BD_NEXT ||
+                                code == BTN_BD_SLOW_REV || code == BTN_BD_SLOW_FWD;
+                  if (!mapped && !special && lastRemoteCode[port] != code)
                      logWarn("[pad] unmapped BD Remote code=0x%04x port=%d\n", code, port);
                   lastRemoteCode[port] = code;
                }
             }
             addRemoteButtons(remoteButtons[port], &digital1, &digital2);
+            remoteSpecial |= remoteSpecialButtons[port];
          } else {
             padData nextData;
             if (ioPadGetData((uint32_t)port, &nextData) == 0 && nextData.len > 0)
@@ -181,6 +203,7 @@ void pollPad(void)
 
    rawDigital1 = digital1;
    rawDigital2 = digital2;
+   rawRemoteSpecial = remoteSpecial;
 }
 
 void updatePadEdges(void)
@@ -188,6 +211,13 @@ void updatePadEdges(void)
    uint16_t digital1 = rawDigital1, digital2 = rawDigital2;
    for (int button = 0; button < PAD_BUTTON_COUNT; button++)
       buttonStates[button] = getState(buttonHeld(button, digital1, digital2), buttonHeld(button, prev1, prev2));
+   unsigned remoteSpecial = rawRemoteSpecial;
+   for (int button = 0; button < PAD_REMOTE_BUTTON_COUNT; button++) {
+      int held = (remoteSpecial & (1u << button)) != 0;
+      int wasHeld = (prevRemoteSpecial & (1u << button)) != 0;
+      remoteSpecialStates[button] = getState(held, wasHeld);
+   }
+   prevRemoteSpecial = remoteSpecial;
    prev1 = digital1;
    prev2 = digital2;
 }
@@ -231,6 +261,17 @@ int isPadButtonDown(PadButton button)
 int isPadButtonReleased(PadButton button)
 {
    return getPadButtonState(button) == PAD_BUTTON_STATE_RELEASED;
+}
+
+PadButtonState getPadRemoteButtonState(PadRemoteButton button)
+{
+   if (button < 0 || button >= PAD_REMOTE_BUTTON_COUNT) return PAD_BUTTON_STATE_UP;
+   return remoteSpecialStates[button];
+}
+
+int isPadRemoteButtonPressed(PadRemoteButton button)
+{
+   return getPadRemoteButtonState(button) == PAD_BUTTON_STATE_PRESSED;
 }
 
 Stick getPadLeftStick(void)

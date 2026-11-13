@@ -30,6 +30,16 @@ typedef enum {
    PAD_BTN_R3
 } PadButton;
 
+typedef enum {
+   PAD_REMOTE_AUDIO,
+   PAD_REMOTE_SUBTITLE,
+   PAD_REMOTE_PREV,
+   PAD_REMOTE_NEXT,
+   PAD_REMOTE_SLOW_REV,
+   PAD_REMOTE_SLOW_FWD,
+   PAD_REMOTE_BUTTON_COUNT
+} PadRemoteButton;
+
 typedef struct {
    int x;
    int y;
@@ -50,6 +60,8 @@ int isPadButtonPressed(PadButton button);   // the frame it went down
 int isPadButtonHeld(PadButton button);      // frames after that, NOT the frame it went down
 int isPadButtonDown(PadButton button);      // down right now, however long it has been: pressed or held
 int isPadButtonReleased(PadButton button);
+PadButtonState getPadRemoteButtonState(PadRemoteButton button);
+int isPadRemoteButtonPressed(PadRemoteButton button);
 unsigned getPadDownButtons(void);           // buttons down right now as a mask (1u << PadButton), for forwarding
 Stick getPadLeftStick(void);
 Stick getPadRightStick(void);

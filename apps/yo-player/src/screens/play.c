@@ -2677,6 +2677,65 @@ static void handleLiveSeekInput(uint64_t nowUs)
    }
 }
 
+static void cycleRemoteAudioTrack(void)
+{
+   if (state.audioCount <= 1) {
+      showToast(state.audioCount == 1 ? "Only one audio track" : "No alternate audio tracks");
+      return;
+   }
+   int target = state.audioPick < 0 ? 0 : (state.audioPick + 1) % state.audioCount;
+   startAudioTrackSwitch(target);
+}
+
+static void cycleRemoteSubtitleTrack(void)
+{
+   if (state.isLive || state.captionCount <= 0) {
+      showToast("No subtitles");
+      return;
+   }
+
+   if (!subtitlesEnabled || state.subtitlePick < 0) {
+      subtitlesEnabled = 1;
+      setSubtitleTrack(0);
+      showSelectedSubtitleToast();
+      return;
+   }
+
+   if (state.subtitlePick + 1 < state.captionCount) {
+      setSubtitleTrack(state.subtitlePick + 1);
+      showSelectedSubtitleToast();
+      return;
+   }
+
+   subtitlesEnabled = 0;
+   setSubtitleTrack(-1);
+   showToast("Subtitles: OFF");
+}
+
+static void navigatePlaybackChapter(int direction)
+{
+   if (state.chapters.count == 0) {
+      showToast("No chapters");
+      return;
+   }
+
+   float position = getVideoPositionSeconds(state.player);
+   int actual = 0;
+   for (int i = 0; i < state.chapters.count; i++)
+      if (state.chapters.chapters[i].start <= position) actual = i;
+   int current = chapterNavIndexValid ? chapterNavIndex : actual;
+   int target = current + direction;
+   if (target < 0 || target >= state.chapters.count) {
+      showToast(direction < 0 ? "No previous chapter" : "No next chapter");
+      return;
+   }
+   chapterNavIndex = target;
+   chapterNavIndexValid = 1;
+   chapterNavQueued = 1;
+   state.seeking = 0;
+   showControls();
+}
+
 static void handlePlaybackInput(void)
 {
    if (state.audioSwitchThreadActive || state.resolutionSwitchThreadActive || state.liveReopenThreadActive)
@@ -2772,10 +2831,37 @@ static void handlePlaybackInput(void)
    }
 
    if (isPadButtonPressed(PAD_BTN_TRIANGLE)) toggleSubtitles();
+   if (isPadRemoteButtonPressed(PAD_REMOTE_AUDIO)) cycleRemoteAudioTrack();
+   if (isPadRemoteButtonPressed(PAD_REMOTE_SUBTITLE)) cycleRemoteSubtitleTrack();
+   if (getPadRemoteButtonState(PAD_REMOTE_SLOW_REV) == PAD_BUTTON_STATE_RELEASED)
+      navigatePlaybackChapter(-1);
+   if (getPadRemoteButtonState(PAD_REMOTE_SLOW_FWD) == PAD_BUTTON_STATE_RELEASED)
+      navigatePlaybackChapter(1);
 
-   // L1/R1 short press changes chapter; holding either for two seconds changes video.
+   // DualShock L1/R1: short press changes chapter; two-second hold changes video.
+   // BD Remote PREV/NEXT trigger the same video-navigation action immediately.
    PadButtonState l1State = getPadButtonState(PAD_BTN_L1);
    PadButtonState r1State = getPadButtonState(PAD_BTN_R1);
+   PadButtonState remotePrevState = getPadRemoteButtonState(PAD_REMOTE_PREV);
+   PadButtonState remoteNextState = getPadRemoteButtonState(PAD_REMOTE_NEXT);
+   if (remotePrevState == PAD_BUTTON_STATE_PRESSED) {
+      l1State = PAD_BUTTON_STATE_HELD;
+      l1HoldStartUs = nowUs - PLAYBACK_NAV_HOLD_US;
+      l1HoldTriggered = 0;
+   } else if (remotePrevState == PAD_BUTTON_STATE_HELD) {
+      l1State = PAD_BUTTON_STATE_HELD;
+   } else if (remotePrevState == PAD_BUTTON_STATE_RELEASED) {
+      l1State = PAD_BUTTON_STATE_RELEASED;
+   }
+   if (remoteNextState == PAD_BUTTON_STATE_PRESSED) {
+      r1State = PAD_BUTTON_STATE_HELD;
+      r1HoldStartUs = nowUs - PLAYBACK_NAV_HOLD_US;
+      r1HoldTriggered = 0;
+   } else if (remoteNextState == PAD_BUTTON_STATE_HELD) {
+      r1State = PAD_BUTTON_STATE_HELD;
+   } else if (remoteNextState == PAD_BUTTON_STATE_RELEASED) {
+      r1State = PAD_BUTTON_STATE_RELEASED;
+   }
    if (l1State == PAD_BUTTON_STATE_PRESSED) { l1HoldStartUs = nowUs; l1HoldTriggered = 0; }
    if (r1State == PAD_BUTTON_STATE_PRESSED) { r1HoldStartUs = nowUs; r1HoldTriggered = 0; }
 
