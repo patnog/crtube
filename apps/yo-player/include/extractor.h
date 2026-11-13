@@ -187,6 +187,8 @@ typedef struct Extractor {
    int (*getAccountPlaylistVideos)(const char *playlistId, const char *continuation, SearchResults *out);
    // Resolve membership restriction and current LIVE state in one player request.
    int (*getVideoStatus)(const char *videoId, int *isLive);
+   // Channel categories: 0 Videos, 1 Streams, 2 Shorts, 3 Playlists.
+   int (*getChannelCategory)(const char *channelId, int category, const char *continuation, SearchResults *out);
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.
@@ -206,6 +208,7 @@ int getLiveFeed(LiveCategory category, const char *continuation, SearchResults *
 int getChannelVideos(const char *channelId, const char *token, SearchResults *out);
 // Fetch currently-live broadcasts from a channel's Streams tab. Blocking; call on a worker thread.
 int getChannelLiveVideos(const char *channelId, SearchResults *out);
+int getChannelCategoryFeed(const char *channelId, int category, const char *continuation, SearchResults *out);
 
 // a signed-in account feed (see AccountFeed). continuation as above. 0 ok; negative on error or when
 // signed out. blocking: call from a worker thread.

@@ -1695,6 +1695,47 @@ static int getChannelLive(const char *channelId, SearchResults *out)
    return 0;
 }
 
+// Channel category feeds use YouTube's own browse tabs. Streams intentionally retain
+// archived broadcasts as VOD entries; Videos remains the default channel landing feed.
+#define CHANNEL_SHORTS_PARAMS    "EgZzaG9ydHPyBgQKAjoA"
+#define CHANNEL_PLAYLISTS_PARAMS "EghwbGF5bGlzdHPyBgQKAjoA"
+static int getChannelCategory(const char *channelId, int category, const char *continuation, SearchResults *out)
+{
+   if (!channelId || !channelId[0] || !out || category < 0 || category > 3) return -1;
+   if (category == 0) return getChannel(channelId, continuation, out);
+
+   const char *params = category == 1 ? CHANNEL_LIVE_PARAMS :
+                        category == 2 ? CHANNEL_SHORTS_PARAMS : CHANNEL_PLAYLISTS_PARAMS;
+   const char *gl = getContentRegionCode();
+   char body[MAX_CONTINUATION + 512];
+   int bodyLen = continuation
+      ? snprintf(body, sizeof body, CONTINUATION_BODY_FMT, gl, continuation)
+      : snprintf(body, sizeof body, TRENDING_BODY_FMT, gl, channelId, params);
+   if (bodyLen < 0 || bodyLen >= (int)sizeof body) {
+      memset(out, 0, sizeof *out);
+      return -1;
+   }
+   int rc = postAndParse(BROWSE_URL, body, bodyLen, out);
+   if (rc == 0 && category == 1) {
+      // Streams includes current, upcoming and archived broadcasts. Keep the full
+      // feed here; the isLive flag distinguishes broadcasts currently on air.
+      for (int i = 0; i < out->count; i++)
+         if (!out->items[i].channelId[0]) strCopy(out->items[i].channelId, sizeof out->items[i].channelId, channelId);
+      int liveCount = 0;
+      for (int i = 0; i < out->count; i++) {
+         if (!out->items[i].isLive) continue;
+         if (i != liveCount) {
+            SearchResult liveItem = out->items[i];
+            memmove(&out->items[liveCount + 1], &out->items[liveCount],
+                    (i - liveCount) * sizeof(out->items[0]));
+            out->items[liveCount] = liveItem;
+         }
+         liveCount++;
+      }
+   }
+   return rc;
+}
+
 // ---- signed-in account feeds ----
 // YouTube only accepts an OAuth bearer token from the TV client (WEB answers 400 with one), and the TV
 // client answers in its own tile layout, read by youtube-tv.c. Playback stays on the anonymous player
@@ -2284,5 +2325,5 @@ const Extractor youtubeExtractor = {
    "youtube", matches, extract, search, fetchTrending, getChannel, fetchAccountFeed,
    youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly, fetchLive,
    getChannelLive, fetchAccountPlaylists, fetchAccountPlaylistVideos,
-   youtubeGetVideoStatus
+   youtubeGetVideoStatus, getChannelCategory
 };

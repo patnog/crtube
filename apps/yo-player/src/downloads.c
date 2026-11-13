@@ -29,7 +29,7 @@
 
 #define MAX_QUEUE          16
 #define DISPLAY_TITLE_MAX  15       // maximum visible title characters, including the ellipsis
-#define OVERLAY_TEXT_SIZE  19
+#define OVERLAY_TEXT_SIZE  23
 #define DOWNLOAD_TOAST_US  1000000ULL
 #define DOWNLOAD_LIBRARY_DIR CRTUBE_DATA_DIR "/downloads"
 #define DOWNLOAD_THUMB_CAP (96 * 1024)       // matches the grid's Watch Later / duration badge

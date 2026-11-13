@@ -116,6 +116,9 @@ static const uint64_t AccountFeedRefreshIntervals[ACCOUNT_FEED_COUNT] = {
 static struct {
    VideoGrid grid;
    int       category;
+   int       restoreGridAfterWatchLater;
+   int       restoreGridSelection;
+   int       restoreGridScrollRow;
    LiveCategory liveCategory;
    uint64_t  liveLoadedUs;
    int       screenW, screenH;
@@ -270,6 +273,7 @@ static ButtonHints settingsHints;
 static int updateSettingsOpen;
 static int updateSettingsSelected;
 static int updateOverwritePromptOpen;
+static int updateOverwriteNewRelease;
 static int updateOverwriteChoice;
 static int updateDialogOpen;
 static int updateDialogSelected;
@@ -1825,9 +1829,11 @@ static void updateSettingsPanel(void)
                     checkState, packageReady, getUpdateDownloadState());
             if (checkState == UPDATE_CHECK_AVAILABLE || checkState == UPDATE_CHECK_UP_TO_DATE) {
                if (packageReady) {
+                  updateOverwriteNewRelease = strcmp(getLastDownloadedUpdateVersion(), getLatestVersion()) != 0;
                   updateOverwritePromptOpen = 1;
                   updateOverwriteChoice = 0;
-                  logInfo("[update-ui] settings download opened overwrite confirmation\n");
+                  logInfo("[update-ui] settings download confirmation new_release=%d old=%s new=%s\\n",
+                          updateOverwriteNewRelease, getLastDownloadedUpdateVersion(), getLatestVersion());
                } else {
                   int downloadRc = startUpdateDownload();
                   logInfo("[update-ui] settings download start rc=%d state=%d\n", downloadRc, getUpdateDownloadState());
@@ -2056,8 +2062,8 @@ static void drawUpdateSettingsPanel(void)
       fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
       fillGfxRoundedRectangle(px, py, pw, ph, 10, activeTheme->appBg);
       fillGfxRoundedRectangle(px, py, pw, 4, 2, activeTheme->accent);
-      setLabelIfChanged(&updateDialogTitle, "Update package already downloaded");
-      setLabelIfChanged(&updateDialogRows[0], "Download it again and overwrite the existing PKG?");
+      setLabelIfChanged(&updateDialogTitle, updateOverwriteNewRelease ? "A different release is available" : "Update package already downloaded");
+      setLabelIfChanged(&updateDialogRows[0], updateOverwriteNewRelease ? "Download the new release and delete the old PKG?" : "Download it again and overwrite the existing PKG?");
       setLabelIfChanged(&updateDialogRows[1], "Yes");
       setLabelIfChanged(&updateDialogRows[2], "No");
       refreshLabelScale(&updateDialogTitle);
@@ -2121,8 +2127,8 @@ static void drawUpdateDialog(void)
       fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
       fillGfxRoundedRectangle(px, py, pw, ph, 10, activeTheme->appBg);
       fillGfxRoundedRectangle(px, py, pw, 4, 2, activeTheme->accent);
-      setLabelIfChanged(&updateDialogTitle, "Update package already downloaded");
-      setLabelIfChanged(&updateDialogRows[0], "Download it again and overwrite the existing PKG?");
+      setLabelIfChanged(&updateDialogTitle, updateOverwriteNewRelease ? "A different release is available" : "Update package already downloaded");
+      setLabelIfChanged(&updateDialogRows[0], updateOverwriteNewRelease ? "Download the new release and delete the old PKG?" : "Download it again and overwrite the existing PKG?");
       setLabelIfChanged(&updateDialogRows[1], "Yes");
       setLabelIfChanged(&updateDialogRows[2], "No");
       refreshLabelScale(&updateDialogTitle);
@@ -3136,7 +3142,12 @@ static int handleHomeSquareAction(const SearchResult *selected)
          toggleWatchLater(&squarePendingItem);
          watchLaterRevisionSeen = getWatchLaterRevision();
          categoryCached[HOME_WATCHLATER] = 0;
-         if (home.category == HOME_WATCHLATER) loadCategory();
+         if (home.category == HOME_WATCHLATER) {
+            home.restoreGridAfterWatchLater = 1;
+            home.restoreGridSelection = home.grid.selected;
+            home.restoreGridScrollRow = home.grid.scrollRow;
+            loadCategory();
+         }
          squarePressedAt = 0;
          return 1;
       }
@@ -3721,7 +3732,20 @@ static void updateHome(void)
          playVideo(selected->videoId);
       }
    }
-   restoreHomePlaybackSelection();
+   if (home.restoreGridAfterWatchLater && home.category == HOME_WATCHLATER &&
+       gridStage(&home.grid) == GRID_READY) {
+      int count = home.grid.results.count;
+      home.grid.selected = count > 0 ? home.restoreGridSelection : 0;
+      if (home.grid.selected >= count) home.grid.selected = count > 0 ? count - 1 : 0;
+      home.grid.scrollRow = home.restoreGridScrollRow;
+      int columns = home.grid.columns > 0 ? home.grid.columns : 1;
+      int totalRows = (count + columns - 1) / columns;
+      int maxScroll = totalRows - home.grid.visibleRows;
+      if (maxScroll < 0) maxScroll = 0;
+      if (home.grid.scrollRow > maxScroll) home.grid.scrollRow = maxScroll;
+      if (home.grid.scrollRow < 0) home.grid.scrollRow = 0;
+      home.restoreGridAfterWatchLater = 0;
+   } else restoreHomePlaybackSelection();
 }
 
 static void drawDownloadManagement(void)

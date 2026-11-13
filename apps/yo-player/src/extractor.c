@@ -58,6 +58,15 @@ int getChannelLiveVideos(const char *channelId, SearchResults *out)
    return -1;
 }
 
+int getChannelCategoryFeed(const char *channelId, int category, const char *continuation, SearchResults *out)
+{
+   for (unsigned i = 0; i < sizeof registry / sizeof registry[0]; i++)
+      if (registry[i]->getChannelCategory)
+         return registry[i]->getChannelCategory(channelId, category, continuation, out);
+   if (out) memset(out, 0, sizeof *out);
+   return -1;
+}
+
 int getAccountFeed(AccountFeed feed, const char *continuation, SearchResults *out)
 {
    for (unsigned i = 0; i < sizeof registry / sizeof registry[0]; i++)

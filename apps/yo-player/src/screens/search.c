@@ -57,6 +57,9 @@ static struct {
    char      channelName[48];
    char      channelSortToken[MAX_SORT_TOKEN];
    int       channelSort;
+   int       channelCategory;
+   int       gridChannelLayout;
+   int       channelPillX[4], channelPillW[4], channelPillY, channelPillH;
    int       sort;
    int       screenW, screenH;
    int       landing;
@@ -78,6 +81,7 @@ static struct {
 static Font        uiFont;
 static Label       queryLabel, queryPromptPrefix, queryPromptSuffix;
 static Label       sortLabel, sortLabels[SORT_COUNT], statusLabel, historyTitleLabel, historyEmptyLabel;
+static Label       channelCategoryLabels[4];
 static Label       historyLabels[MAX_SEARCH_HISTORY];
 static Icon        searchIcon;
 static GfxTexture  searchCrossGlyph;
@@ -85,6 +89,7 @@ static ButtonHints hints;
 static int crossHint = -1, squareHint = -1, triangleHint = -1;
 static int selectHint = -1, downloadHint = -1, settingsHint = -1;
 static int sortHint = -1, refreshHint = -1, clearHistoryHint = -1;
+static int channelPrevHint = -1, channelNextHint = -1;
 static SearchResult squarePendingItem;
 static uint64_t squarePressedAt;
 static int playbackRestorePending;
@@ -121,7 +126,9 @@ static void updateSearchHints(void)
    if (selectHint >= 0) setButtonHintShown(&hints, selectHint, !search.landing);
    if (downloadHint >= 0) setButtonHintShown(&hints, downloadHint, !search.landing && !search.fieldFocused);
    if (settingsHint >= 0) setButtonHintShown(&hints, settingsHint, !search.landing);
-   if (sortHint >= 0) setButtonHintShown(&hints, sortHint, !search.channelId[0]);
+   if (sortHint >= 0) setButtonHintShown(&hints, sortHint, !search.landing && !search.channelId[0]);
+   if (channelPrevHint >= 0) setButtonHintShown(&hints, channelPrevHint, !search.landing && search.channelId[0]);
+   if (channelNextHint >= 0) setButtonHintShown(&hints, channelNextHint, !search.landing && search.channelId[0]);
    if (refreshHint >= 0) setButtonHintShown(&hints, refreshHint, !search.landing);
    if (clearHistoryHint >= 0) setButtonHintShown(&hints, clearHistoryHint, hasHistory);
    if (search.landing) {
@@ -179,17 +186,29 @@ static int searchFetch(const char *token, SearchResults *out, void *user)
    int rc;
    (void)user;
    if (search.channelId[0]) {
-      const char *first = search.channelSortToken[0] ? search.channelSortToken : NULL;
-      SearchResults *live = NULL;
-      int liveRc = -1;
-      if (!token) {
-         live = malloc(sizeof(*live));
-         if (live) liveRc = getChannelLiveVideos(search.channelId, live);
+      if (search.channelCategory != 0) {
+         rc = getChannelCategoryFeed(search.channelId, search.channelCategory, token, out);
+         if (rc == 0) {
+            for (int i = 0; i < out->count; i++) {
+               if (!out->items[i].channelId[0])
+                  strCopy(out->items[i].channelId, sizeof out->items[i].channelId, search.channelId);
+               if (!out->items[i].author[0] && search.channelName[0])
+                  strCopy(out->items[i].author, sizeof out->items[i].author, search.channelName);
+            }
+         }
+      } else {
+         const char *first = search.channelSortToken[0] ? search.channelSortToken : NULL;
+         SearchResults *live = NULL;
+         int liveRc = -1;
+         if (!token) {
+            live = malloc(sizeof(*live));
+            if (live) liveRc = getChannelLiveVideos(search.channelId, live);
+         }
+         rc = getChannelVideos(search.channelId, token ? token : first, out);
+         if (rc == 0 && live && liveRc == 0 && live->count > 0)
+            prependLiveChannelItems(live, out);
+         free(live);
       }
-      rc = getChannelVideos(search.channelId, token ? token : first, out);
-      if (rc == 0 && live && liveRc == 0 && live->count > 0)
-         prependLiveChannelItems(live, out);
-      free(live);
    } else {
       rc = searchVideos(search.query, search.sort, token, out);
    }
@@ -212,8 +231,29 @@ static void setHeading(void)
    updateSearchHints();
 }
 
+static void updateChannelGridLayout(void)
+{
+   int desired = search.channelId[0] != 0;
+   if (desired == search.gridChannelLayout) return;
+   stopVideoGrid(&search.grid);
+   termVideoGrid(&search.grid);
+   int homeGridTop = isGfxSdVideoOutput() ? 132 : 100;
+   int headerGridTop = HEADER_Y + search.fieldHeight + (int)(10 * search.uiScale + 0.5f);
+   search.gridTop = headerGridTop > homeGridTop ? headerGridTop : homeGridTop;
+   if (desired) search.gridTop += (int)(48 * search.uiScale + 0.5f);
+   initVideoGrid(&search.grid, &uiFont, MARGIN_X, search.gridTop,
+                 search.screenW - 2 * MARGIN_X,
+                 search.footerTopY - search.gridTop - GRID_BOTTOM_GAP);
+   setGridWatchedPredicate(&search.grid, isWatched);
+   setGridWatchedPosition(&search.grid, getWatchedPosition);
+   setGridWatchLaterPredicate(&search.grid, isWatchLater);
+   setGridPlaylistWatchLaterPredicate(&search.grid, isPlaylistWatchLater);
+   search.gridChannelLayout = desired;
+}
+
 static void reload(void)
 {
+   updateChannelGridLayout();
    search.landing = 0;
    search.fieldFocused = 0;
    search.resumeGridInput = 0;
@@ -268,6 +308,7 @@ static void initSearch(void)
    int homeGridTop = isGfxSdVideoOutput() ? 132 : 100;
    int headerGridTop = HEADER_Y + search.fieldHeight + (int)(10 * search.uiScale + 0.5f);
    search.gridTop = headerGridTop > homeGridTop ? headerGridTop : homeGridTop;
+   if (pendingIsChannel) search.gridTop += (int)(48 * search.uiScale + 0.5f);
    search.historyTitleY = search.gridTop + (int)(16 * search.uiScale + 0.5f);
    search.historyTop = search.gridTop + (int)(58 * search.uiScale + 0.5f);
    search.historyRowHeight = (int)(HISTORY_ROW_H * search.uiScale + 0.5f);
@@ -356,6 +397,18 @@ static void initSearch(void)
    initLabel(&sortLabel, &uiFont, 0, 0, AUTO, AUTO, 21,
              activeTheme->textSecondary, TEXT_NOWRAP, "");
    setLabelScaleWithUi(&sortLabel, 1);
+   static const char *const channelCategoryNames[4] = { "Videos", "LIVE", "Shorts", "Playlists" };
+   int channelPillX = MARGIN_X;
+   search.channelPillY = HEADER_Y + search.fieldHeight + (int)(8 * search.uiScale + 0.5f);
+   search.channelPillH = (int)(34 * search.uiScale + 0.5f);
+   for (int i = 0; i < 4; i++) {
+      initLabel(&channelCategoryLabels[i], &uiFont, 0, 0, AUTO, AUTO, 18,
+                activeTheme->textSecondary, TEXT_NOWRAP, channelCategoryNames[i]);
+      setLabelScaleWithUi(&channelCategoryLabels[i], 1);
+      search.channelPillX[i] = channelPillX;
+      search.channelPillW[i] = channelCategoryLabels[i].tt.tex.w + (int)(28 * search.uiScale + 0.5f);
+      channelPillX += search.channelPillW[i] + (int)(8 * search.uiScale + 0.5f);
+   }
    initLabelRaw(&statusLabel, &uiFont, MARGIN_X, 0,
                 search.screenW - 2 * MARGIN_X, AUTO, 21,
                 activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
@@ -383,6 +436,8 @@ static void initSearch(void)
    downloadHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R3), "Download");
    settingsHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_START), "Settings");
    sortHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L2), "Sort");
+   channelPrevHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L1), "");
+   channelNextHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R1), "Category");
    refreshHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R2), "Refresh");
    clearHistoryHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L3), "Clear history");
    setButtonHintsStableLayout(&hints, 1);
@@ -484,7 +539,17 @@ static void updateSearch(void)
       return;
    }
    if (isPadButtonPressed(PAD_BTN_R2)) { reload(); return; }
-   if (!search.channelId[0] && isPadButtonPressed(PAD_BTN_L2)) {
+   if (search.channelId[0] && isPadButtonPressed(PAD_BTN_R1)) {
+      search.channelCategory = (search.channelCategory + 1) % 4;
+      reload();
+      return;
+   }
+   if (search.channelId[0] && isPadButtonPressed(PAD_BTN_L1)) {
+      search.channelCategory = (search.channelCategory + 3) % 4;
+      reload();
+      return;
+   }
+   if (isPadButtonPressed(PAD_BTN_L2) && !search.channelId[0]) {
       search.sort = (SortOrder)((search.sort + 1) % SORT_COUNT);
       setSortPreference(SORT_PREF_SEARCH, (int)search.sort);
       reload();
@@ -561,16 +626,16 @@ static void updateSearch(void)
       return;
    }
    if (isPadButtonPressed(PAD_BTN_R3)) { if (!selected->isPlaylist && !selected->isLive) enqueueDownload(selected); return; }
-   if (isPadButtonPressed(PAD_BTN_TRIANGLE)) {
-      if (selected->isPlaylist) return;
-      if (search.channelId[0]) {
-         setSubscribed(search.channelId, !isSubscribed(search.channelId));
-         updateTriangleHint();
-      } else {
-         enterChannel(selected);
-      }
-      return;
-   }
+    if (isPadButtonPressed(PAD_BTN_TRIANGLE)) {
+       if (selected->isPlaylist) return;
+       if (search.channelId[0]) {
+          setSubscribed(search.channelId, !isSubscribed(search.channelId));
+          updateTriangleHint();
+       } else {
+          enterChannel(selected);
+       }
+       return;
+    }
    if (isPadButtonPressed(PAD_BTN_CROSS)) {
       if (selected->isPlaylist && selected->playlistId[0]) {
          char playlistId[64], playlistTitle[160];
@@ -618,27 +683,26 @@ static void drawSearchBar(void)
                                 fieldW - border * 2, fieldH - border * 2,
                                 radius - border, getSearchFieldColor());
 
+   if (searchIcon.tex && searchIcon.tex->w > 0 && searchIcon.tex->h > 0) {
+      int iconH = (int)(searchIcon.tex->h * search.uiScale + 0.5f);
+      int iconW = (int)(searchIcon.tex->w * search.uiScale + 0.5f);
+      int iconX = fieldX + (int)(16 * search.uiScale + 0.5f);
+      int iconY = fieldY + (fieldH - iconH) / 2;
+      drawGfxTextureFixedPosition(iconX + (int)(searchIcon.offsetX * search.uiScale),
+                                  iconY + (int)(searchIcon.offsetY * search.uiScale),
+                                  iconW, iconH, *searchIcon.tex, 0.0f, 0.0f, 1.0f, 1.0f,
+                                  fieldFocused ? activeTheme->accent : activeTheme->textSecondary,
+                                  GFX_FILTER_LINEAR);
+   }
    if (search.channelId[0] || search.query[0]) {
-      if (searchIcon.tex && searchIcon.tex->w > 0 && searchIcon.tex->h > 0) {
-         int iconH = (int)(searchIcon.tex->h * search.uiScale + 0.5f);
-         int iconW = (int)(searchIcon.tex->w * search.uiScale + 0.5f);
-         int iconX = fieldX + (int)(16 * search.uiScale + 0.5f);
-         int iconY = fieldY + (fieldH - iconH) / 2;
-         drawGfxTextureFixedPosition(iconX + (int)(searchIcon.offsetX * search.uiScale),
-                                     iconY + (int)(searchIcon.offsetY * search.uiScale),
-                                     iconW, iconH, *searchIcon.tex, 0.0f, 0.0f, 1.0f, 1.0f,
-                                     fieldFocused ? activeTheme->accent : activeTheme->textSecondary,
-                                     GFX_FILTER_LINEAR);
-      }
       refreshLabelScale(&queryLabel);
-      moveLabel(&queryLabel,
-                fieldX + (int)(58 * search.uiScale + 0.5f),
+      moveLabel(&queryLabel, fieldX + (int)(58 * search.uiScale + 0.5f),
                 fieldY + (fieldH - queryLabel.tt.tex.h) / 2);
       drawLabel(&queryLabel);
    } else {
       refreshLabelScale(&queryPromptPrefix);
       refreshLabelScale(&queryPromptSuffix);
-      int promptX = fieldX + (int)(18 * search.uiScale + 0.5f);
+      int promptX = fieldX + (int)(58 * search.uiScale + 0.5f);
       int promptY = fieldY + (fieldH - queryPromptPrefix.tt.tex.h) / 2;
       moveLabel(&queryPromptPrefix, promptX, promptY);
       drawLabel(&queryPromptPrefix);
@@ -653,6 +717,28 @@ static void drawSearchBar(void)
       int suffixX = crossX + crossW + (int)(14 * search.uiScale + 0.5f);
       moveLabel(&queryPromptSuffix, suffixX, promptY);
       drawLabel(&queryPromptSuffix);
+   }
+}
+
+static void drawChannelCategoryPills(void)
+{
+   if (!search.channelId[0]) return;
+   int border = (int)(search.uiScale + 0.5f);
+   if (border < 1) border = 1;
+   for (int i = 0; i < 4; i++) {
+      int selected = i == search.channelCategory;
+      int x = search.channelPillX[i], y = search.channelPillY;
+      int w = search.channelPillW[i], h = search.channelPillH;
+      fillGfxRoundedRectangleFixed(x, y, w, h, h / 2,
+                                   selected ? activeTheme->accent : activeTheme->surface);
+      if (selected)
+         fillGfxRoundedRectangleFixed(x + border, y + border, w - 2 * border, h - 2 * border,
+                                      h / 2 - border, activeTheme->rowHighlight);
+      refreshLabelScale(&channelCategoryLabels[i]);
+      setLabelColor(&channelCategoryLabels[i], selected ? activeTheme->textPrimary : activeTheme->textSecondary);
+      moveLabel(&channelCategoryLabels[i], x + (w - channelCategoryLabels[i].tt.tex.w) / 2,
+                y + (h - channelCategoryLabels[i].tt.tex.h) / 2);
+      drawLabel(&channelCategoryLabels[i]);
    }
 }
 
@@ -726,6 +812,7 @@ static void drawSearch(void)
 {
    fillGfxRectangle(0, 0, search.screenW, search.screenH, activeTheme->appBg);
    drawSearchBar();
+   drawChannelCategoryPills();
 
    if (search.landing) {
       drawSearchSortPills();
@@ -803,6 +890,7 @@ static void termSearch(void)
    freeLabel(&queryPromptPrefix);
    freeLabel(&queryPromptSuffix);
    freeLabel(&sortLabel);
+   for (int i = 0; i < 4; i++) freeLabel(&channelCategoryLabels[i]);
    for (int i = 0; i < SORT_COUNT; i++) freeLabel(&sortLabels[i]);
    freeLabel(&statusLabel);
    freeLabel(&historyTitleLabel);
