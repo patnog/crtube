@@ -3888,7 +3888,9 @@ static void drawHome(void)
    } else if (gridStage(&home.grid) == GRID_READY) {
       drawVideoGrid(&home.grid);
    } else {
-      setLabelText(&statusLabel, gridStage(&home.grid) == GRID_EMPTY ? "No results" : "Loading...");
+      GridStage stage = gridStage(&home.grid);
+      setLabelText(&statusLabel, stage == GRID_ERROR ? "Unable to load content" :
+                   (stage == GRID_EMPTY ? "No results" : "Loading..."));
       drawLabel(&statusLabel);
    }
    // Draw the header after the grid so the category chips remain above any

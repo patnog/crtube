@@ -920,7 +920,7 @@ static void worker(uint64_t arg)
       if (rc == 0) applyMemberOnlyCacheRange(grid, 0, grid->results.count);
       // Publish the metadata before thumbnail work starts. drawVideoGrid() can render placeholders
       // immediately while the independent thumbnail workers fill the visible band and lookahead.
-      grid->stage = (rc == 0 && grid->results.count > 0) ? GRID_READY : GRID_EMPTY;
+      grid->stage = rc != 0 ? GRID_ERROR : (grid->results.count > 0 ? GRID_READY : GRID_EMPTY);
       __sync_synchronize();
       grid->searchParsed = 1;
       if (grid->stage == GRID_READY && !grid->backgroundPaused) {
@@ -1071,7 +1071,7 @@ static void beginFeed(VideoGrid *grid)
    if (!spawnWorker(grid)) {
       logInfo("[diag-grid] beginFeed spawnWorker failed grid=%p\n", grid);
       grid->workerDone = 1;
-      if (grid->job != JOB_CACHE) { grid->stage = GRID_EMPTY; grid->searchParsed = 1; }
+      if (grid->job != JOB_CACHE) { grid->stage = GRID_ERROR; grid->searchParsed = 1; }
    } else {
       logInfo("[diag-grid] beginFeed spawnWorker succeeded grid=%p tid=%u\n", grid, (unsigned)grid->workerTid);
    }
@@ -1507,8 +1507,8 @@ void initVideoGrid(VideoGrid *grid, Font *font, int x, int y, int width, int hei
 
    int maxTileW = (width - (grid->columns - 1) * grid->gap) / grid->columns;
    // Fit exactly two navigation rows in the available vertical area at every
-   // output resolution. The height constraint also prevents 720p layouts from
-   // growing thumbnails so tall that the second row falls below the screen.
+   // output resolution. The height constraint also prevents thumbnails from
+   // growing so tall that the second row falls below the screen.
    int maxStep = height / 2;
    int maxThumbH = maxStep - grid->tileTextH - grid->gap;
    int widthFromHeight = maxThumbH > 0 ? maxThumbH * 16 / 9 : 1;

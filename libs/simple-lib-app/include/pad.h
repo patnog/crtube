@@ -37,6 +37,7 @@ typedef enum {
    PAD_REMOTE_NEXT,
    PAD_REMOTE_SLOW_REV,
    PAD_REMOTE_SLOW_FWD,
+   PAD_REMOTE_STOP,
    PAD_REMOTE_BUTTON_COUNT
 } PadRemoteButton;
 

@@ -17,7 +17,7 @@
 #define GRID_COLS_WIDE 3
 #define GRID_THREADS  4         // bounded parallel thumbnail requests; BearSSL has a per-connection pool
 
-typedef enum { GRID_RUNNING, GRID_READY, GRID_EMPTY } GridStage;
+typedef enum { GRID_RUNNING, GRID_READY, GRID_EMPTY, GRID_ERROR } GridStage;
 
 // what the background worker is doing this spawn. LOAD/CACHE fetch page 1 (CACHE restores kept results first);
 // MORE appends the next continuation page; THUMBS fetches one item selected from the live viewport priority.

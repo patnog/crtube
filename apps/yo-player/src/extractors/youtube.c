@@ -1343,11 +1343,15 @@ static void readField(const char *block, const char *end, const char *container,
    if (pos && pos < end) jsonString(pos, end, key, out, cap);
 }
 
-// the next feed item at or after `from`. Search can return videos, playlists and newer lockups;
-// trending shelves use gridVideoRenderer. Returns the nearest item (NULL if none).
+// the next feed item at or after `from`. Supports video, playlist, Shorts and lockup renderers.
+// Returns the nearest item (NULL if none).
 static const char *nextItemBlock(const char *from)
 {
-   static const char *keys[] = { "\"videoRenderer\"", "\"gridVideoRenderer\"", "\"lockupViewModel\"", "\"playlistRenderer\":{" };
+   static const char *keys[] = {
+      "\"videoRenderer\"", "\"gridVideoRenderer\"", "\"lockupViewModel\"",
+      "\"playlistRenderer\":{", "\"gridPlaylistRenderer\":{",
+      "\"reelItemRenderer\":{", "\"shortsLockupViewModel\":{"
+   };
    const char *best = NULL;
    for (unsigned i = 0; i < sizeof keys / sizeof keys[0]; i++) {
       const char *hit = strstr(from, keys[i]);
@@ -1472,6 +1476,33 @@ static int parseLockupPlaylistItem(const char *block, const char *end, SearchRes
    return 1;
 }
 
+// Forward declaration: Shorts lockup parsing uses the channel helper defined below.
+static void readChannelId(const char *block, const char *end, char *out, int cap);
+
+// Newer channel Shorts feeds use shortsLockupViewModel instead of videoRenderer.
+static int parseShortsLockupItem(const char *block, const char *end, SearchResult *item)
+{
+   const char *endpointEnd = NULL;
+   const char *endpoint = jsonObjectForKey(block, end, "reelWatchEndpoint", &endpointEnd);
+   if (endpoint) jsonString(endpoint, endpointEnd, "videoId", item->videoId, sizeof item->videoId);
+   if (!item->videoId[0]) jsonString(block, end, "videoId", item->videoId, sizeof item->videoId);
+   if (!item->videoId[0]) return 0;
+
+   readChannelId(block, end, item->channelId, sizeof item->channelId);
+   const char *overlayEnd = NULL;
+   const char *overlay = jsonObjectForKey(block, end, "overlayMetadata", &overlayEnd);
+   if (overlay) {
+      const char *primaryEnd = NULL;
+      const char *primary = jsonObjectForKey(overlay, overlayEnd, "primaryText", &primaryEnd);
+      if (primary) jsonString(primary, primaryEnd, "content", item->title, sizeof item->title);
+      const char *secondaryEnd = NULL;
+      const char *secondary = jsonObjectForKey(overlay, overlayEnd, "secondaryText", &secondaryEnd);
+      if (secondary) jsonString(secondary, secondaryEnd, "content", item->views, sizeof item->views);
+   }
+   if (!item->title[0]) jsonString(block, end, "accessibilityText", item->title, sizeof item->title);
+   return item->title[0] != 0;
+}
+
 // copy the first "content":"..." value within [from,end) whose text ends with `suffix` (e.g. " views",
 // " ago"). lockupViewModel metadata rows are plain content strings, not keyed by field.
 static void readContentEndingWith(const char *from, const char *end, const char *suffix, char *out, int cap)
@@ -1507,6 +1538,10 @@ static int parseRendererItem(const char *block, const char *end, SearchResult *i
    readField(block, end, "\"title\"", "text", item->title, sizeof item->title);
    if (!item->title[0])   // gridVideoRenderer (trending) uses a plain simpleText title
       readField(block, end, "\"title\"", "simpleText", item->title, sizeof item->title);
+   if (!item->title[0]) readField(block, end, "\"headline\"", "text", item->title, sizeof item->title);
+   if (!item->title[0]) readField(block, end, "\"headline\"", "simpleText", item->title, sizeof item->title);
+   if (!item->title[0]) readField(block, end, "\"reelTitleText\"", "text", item->title, sizeof item->title);
+   if (!item->title[0]) readField(block, end, "\"reelTitleText\"", "simpleText", item->title, sizeof item->title);
    readField(block, end, "\"lengthText\"",        "simpleText", item->duration,  sizeof item->duration);
    readField(block, end, "\"ownerText\"",         "text",       item->author,    sizeof item->author);
    if (!item->author[0])   // trending items carry the channel in shortBylineText instead
@@ -1541,9 +1576,9 @@ static int parseLockupItem(const char *block, const char *end, SearchResult *ite
    return item->title[0] != 0;
 }
 
-// Scan WEB innertube feed items. Search can mix videoRenderer and playlistRenderer; newer surfaces
-// may use lockupViewModel. Videos and playlists are deduplicated by their respective IDs.
-static void parseVideoResults(const char *resp, int respLen, SearchResults *out)
+// Scan WEB innertube feed items. Channel tabs may use grid, reel and Shorts lockup renderers;
+// playlists and videos are deduplicated by their respective IDs.
+static void parseVideoResults(const char *resp, int respLen, SearchResults *out, int channelCategory)
 {
    const char *end = resp + respLen;
    const char *scan = resp;
@@ -1555,12 +1590,33 @@ static void parseVideoResults(const char *resp, int respLen, SearchResults *out)
 
       SearchResult *item = &out->items[out->count];
       memset(item, 0, sizeof *item);
-      int isPlaylistRenderer = strncmp(block + 1, "playlistRenderer", 15) == 0;
+      int isPlaylistRenderer = strncmp(block + 1, "playlistRenderer", 16) == 0 ||
+                               strncmp(block + 1, "gridPlaylistRenderer", 20) == 0;
       int isLockup = strncmp(block + 1, "lockupViewModel", 15) == 0;
-      int ok = isPlaylistRenderer ? parsePlaylistRenderer(block, blockEnd, item) :
-               isLockup ? (parseLockupPlaylistItem(block, blockEnd, item) ||
-                           parseLockupItem(block, blockEnd, item)) :
-               parseRendererItem(block, blockEnd, item);
+      int isShortsLockup = strncmp(block + 1, "shortsLockupViewModel", 21) == 0;
+      int isReelRenderer = strncmp(block + 1, "reelItemRenderer", 16) == 0;
+      int isVideoRenderer = strncmp(block + 1, "videoRenderer", 13) == 0 ||
+                            strncmp(block + 1, "gridVideoRenderer", 17) == 0;
+      const char *shortsStyle = strstr(block, "\"style\":\"SHORTS\"");
+      const char *shortsUrl = strstr(block, "/shorts/");
+      int isShortsVideo = isReelRenderer || isShortsLockup ||
+                          (shortsStyle && shortsStyle < blockEnd) ||
+                          (shortsUrl && shortsUrl < blockEnd);
+      int ok = 0;
+      if (channelCategory == 2) {
+         if (isShortsLockup) ok = parseShortsLockupItem(block, blockEnd, item);
+         else if (isReelRenderer || (isVideoRenderer && isShortsVideo))
+            ok = parseRendererItem(block, blockEnd, item);
+      } else if (channelCategory == 3) {
+         if (isPlaylistRenderer) ok = parsePlaylistRenderer(block, blockEnd, item);
+         else if (isLockup) ok = parseLockupPlaylistItem(block, blockEnd, item);
+      } else {
+         ok = isPlaylistRenderer ? parsePlaylistRenderer(block, blockEnd, item) :
+              isShortsLockup ? parseShortsLockupItem(block, blockEnd, item) :
+              isLockup ? (parseLockupPlaylistItem(block, blockEnd, item) ||
+                          parseLockupItem(block, blockEnd, item)) :
+              parseRendererItem(block, blockEnd, item);
+      }
       // drop members-only videos: they resolve to UNPLAYABLE for an anonymous session (no stream, no author)
       const char *membersBadge = strstr(block, "Members only");
       if (!item->isPlaylist && membersBadge && membersBadge < blockEnd) ok = 0;
@@ -1594,7 +1650,8 @@ static void parseVideoResults(const char *resp, int respLen, SearchResults *out)
 }
 
 // POST a WEB innertube endpoint with a prebuilt json body, then parse videoRenderers from the response.
-static int postAndParse(const char *url, const char *body, int bodyLen, SearchResults *out)
+static int postAndParseInternal(const char *url, const char *body, int bodyLen,
+                                SearchResults *out, int channelCategory)
 {
    memset(out, 0, sizeof *out);
    char *resp = malloc(RESP_CAP);
@@ -1615,9 +1672,20 @@ static int postAndParse(const char *url, const char *body, int bodyLen, SearchRe
    if (rc < 0)        { free(resp); return rc; }
    if (status != 200) { free(resp); return -status; }
 
-   parseVideoResults(resp, respLen, out);
+   parseVideoResults(resp, respLen, out, channelCategory);
    free(resp);
    return 0;
+}
+
+static int postAndParse(const char *url, const char *body, int bodyLen, SearchResults *out)
+{
+   return postAndParseInternal(url, body, bodyLen, out, -1);
+}
+
+static int postAndParseChannelCategory(const char *url, const char *body, int bodyLen,
+                                       SearchResults *out, int category)
+{
+   return postAndParseInternal(url, body, bodyLen, out, category);
 }
 
 static int search(const char *query, SortOrder sort, const char *continuation, SearchResults *out)
@@ -1698,7 +1766,7 @@ static int getChannelLive(const char *channelId, SearchResults *out)
 // Channel category feeds use YouTube's own browse tabs. Streams intentionally retain
 // archived broadcasts as VOD entries; Videos remains the default channel landing feed.
 #define CHANNEL_SHORTS_PARAMS    "EgZzaG9ydHPyBgQKAjoA"
-#define CHANNEL_PLAYLISTS_PARAMS "EghwbGF5bGlzdHPyBgQKAjoA"
+#define CHANNEL_PLAYLISTS_PARAMS "EglwbGF5bGlzdHPyBgQKAkIA"
 static int getChannelCategory(const char *channelId, int category, const char *continuation, SearchResults *out)
 {
    if (!channelId || !channelId[0] || !out || category < 0 || category > 3) return -1;
@@ -1715,7 +1783,7 @@ static int getChannelCategory(const char *channelId, int category, const char *c
       memset(out, 0, sizeof *out);
       return -1;
    }
-   int rc = postAndParse(BROWSE_URL, body, bodyLen, out);
+   int rc = postAndParseChannelCategory(BROWSE_URL, body, bodyLen, out, category);
    if (rc == 0 && category == 1) {
       // Streams includes current, upcoming and archived broadcasts. Keep the full
       // feed here; the isLive flag distinguishes broadcasts currently on air.
@@ -2169,7 +2237,7 @@ static int postAndParseLive(const char *url, const char *body, int bodyLen,
    }
 
    if (append) out->continuation[0] = 0;
-   parseVideoResults(resp, respLen, out);
+   parseVideoResults(resp, respLen, out, -1);
    if (replyVisitor && replyVisitorCap > 0)
       captureLiveSession(resp, resp + respLen, replyVisitor, replyVisitorCap);
    free(resp);

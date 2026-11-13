@@ -3940,6 +3940,15 @@ static void drawPlaybackOptions(void)
 
 static void updatePlay(void)
 {
+   // BD Remote STOP is a global playback exit: unlike Circle, it must not be
+   // consumed by the OSD, options, or any other playback overlay.
+   if (isPadRemoteButtonPressed(PAD_REMOTE_STOP)) {
+      logInfo("[yt] playback exit requested by user (BD Remote STOP)\n");
+      if (state.stage == STAGE_LOADING) requestPlaybackCancel();
+      popScreen();
+      return;
+   }
+
    updateDownloadOverlay();
    if (isDownloadSpacePromptOpen()) return;
    if (consumeDownloadCompletion()) showToastFor("Download Complete", 3000000ULL);

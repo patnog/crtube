@@ -78,7 +78,7 @@ static unsigned remoteCodeToButton(uint16_t code)
       case BTN_BD_SCAN_REV:
          return 1u << PAD_BTN_LEFT;
       case BTN_BD_DISPLAY:
-         return 1u << PAD_BTN_L2;
+         return 1u << PAD_BTN_START;
       default:
          return 0;
    }
@@ -154,9 +154,11 @@ void pollPad(void)
                   else if (code == BTN_BD_NEXT) remoteSpecialButtons[port] = 1u << PAD_REMOTE_NEXT;
                   else if (code == BTN_BD_SLOW_REV) remoteSpecialButtons[port] = 1u << PAD_REMOTE_SLOW_REV;
                   else if (code == BTN_BD_SLOW_FWD) remoteSpecialButtons[port] = 1u << PAD_REMOTE_SLOW_FWD;
+                  else if (code == BTN_BD_STOP) remoteSpecialButtons[port] = 1u << PAD_REMOTE_STOP;
                   int special = code == BTN_BD_AUDIO || code == BTN_BD_SUBTITLE ||
                                 code == BTN_BD_PREV || code == BTN_BD_NEXT ||
-                                code == BTN_BD_SLOW_REV || code == BTN_BD_SLOW_FWD;
+                                code == BTN_BD_SLOW_REV || code == BTN_BD_SLOW_FWD ||
+                                code == BTN_BD_STOP;
                   if (!mapped && !special && lastRemoteCode[port] != code)
                      logWarn("[pad] unmapped BD Remote code=0x%04x port=%d\n", code, port);
                   lastRemoteCode[port] = code;

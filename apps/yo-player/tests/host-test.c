@@ -14,6 +14,9 @@
 
 static int failures, checks;
 
+// youtube-tv.c uses the application's configured content region. Host tests use a stable default.
+const char *getContentRegionCode(void) { return "US"; }
+
 #define CHECK(cond) do { checks++; if (!(cond)) { failures++; printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); } } while (0)
 
 static SearchResults results;   // large: keep off the stack
