@@ -21,7 +21,7 @@ It reuses what this repo already has:
 ## Features
 
 - **Browse & search** — a sidebar with Recommended, account Subscriptions / History / Watch Later / Playlists, separate PS3-local Subscriptions / History / Watch Later / Playlists, Trending and Live. Search has Relevance / Views sort orders; channel views have Latest / Popular / Oldest. Pasting a YouTube link into search opens it directly. Trending tabs are Gaming, Sports and Podcasts; Live tabs are Popular, Music, Gaming, Sports, Podcasts and News.
-- **Playback with sound** — streamed as it plays (nothing is downloaded in full first), H.264 + AAC. Sony VDEC is the default decoder. An experimental setting can enable the integrated TEE Decoder for supported 1080p50/60 H.264 streams. During the first five seconds, the player measures presented frame rate; if it is below the internal threshold, it can switch only the current video to an available 30 FPS rendition. This fallback does not modify global settings.
+- **Playback with sound** — streamed as it plays (nothing is downloaded in full first), H.264 + AAC. Sony VDEC is the default decoder. An experimental setting can enable the integrated TEE Decoder for supported 1080p50/60 H.264 streams. A continuous monitor measures presented frame rate in eight-second windows; sustained slowdown can trigger up to three downward rendition changes, with a cooldown between switches. This per-playback adaptation does not modify global settings.
   Pause and seek with a scrub bar showing current / total time.
 - **Live streams** — plays anything with a LIVE badge (sports, news), a few seconds behind the live edge.
 - **Resume** — videos pick up from where you last stopped; already-watched videos are dimmed in the grid.
@@ -400,7 +400,7 @@ These client identifiers and YouTube endpoints are implementation details, not s
 - **Live streams** use a different delivery than normal videos (a rolling sequence of segments rather than one
   file), so they take a little longer to start and to exit, and can't be downloaded or seeked. Otherwise they
   play the same, a few seconds behind the live edge.
-- **TEE Decoder support** is experimental and limited to H.264 Main/High, 8-bit 4:2:0, progressive, CABAC, one slice per picture, up to 1920×1088. CAVLC, interlaced, multi-slice, 10-bit and 4:2:2 streams are not supported by TEE; Sony VDEC remains the fallback path where supported. Separately, if the measured average presented frame rate is too low during the first five seconds of playback, the player attempts to switch the current video to a 30 FPS rendition. This is a per-playback recovery and does not change saved quality or other global settings.
+- **TEE Decoder support** is experimental and limited to H.264 Main/High, 8-bit 4:2:0, progressive, CABAC, one slice per picture, up to 1920×1088. CAVLC, interlaced, multi-slice, 10-bit and 4:2:2 streams are not supported by TEE; Sony VDEC remains the fallback path where supported. Separately, continuous presented-frame-rate monitoring can step down to a 30 FPS rendition and then lower resolutions when the current stream cannot sustain its target cadence. This is a per-playback recovery and does not change saved quality or other global settings.
 - The Subscriptions feed is a merged list, so it can't page past the first batch it gathers from each channel.
 
 ## Credits and component licenses

@@ -407,8 +407,11 @@ static struct {
    const uint8_t   *lastFrame;        // fps measure: a changed pointer means a newly presented frame
    int              framesThisSecond, measuredFps;
    uint64_t         fpsTickUs;
-   uint64_t         fpsWindowStartUs, fpsWindowFrames;
-   int              fpsFallbackChecked, fpsFallbackRequested, fpsFallbackAttempted;
+   uint64_t         fpsWindowStartUs, fpsWindowFrames, fpsWindowMaxGapUs;
+   uint64_t         fpsAdaptiveLastSwitchUs;
+   int              fpsAdaptiveSwitches;
+   int              fpsAdaptiveBadWindows;
+   int              fpsFallbackRequested;
 
    // seek: the UI owns the scrub target so the bar moves instantly; the engine seek is deferred until
    // the input goes quiet (each apply costs a decoder flush + fragment reload)
@@ -2374,6 +2377,28 @@ static int findThirtyFpsProfile(void)
    return sameHeight >= 0 ? sameHeight : lower;
 }
 
+// Keep the current resolution when moving from 50/60 to 30 FPS. If the current
+// rendition is already <=30 FPS, step down in resolution instead of retrying it.
+static int findAdaptiveFallbackProfile(void)
+{
+   int currentHeight, best = -1;
+   if (state.resolutionIndex < 0 || state.resolutionIndex >= state.videoCount) return -1;
+   if (state.vidFps >= 50) {
+      int profile = findThirtyFpsProfile();
+      if (profile >= 0) return profile;
+   }
+   currentHeight = state.videoHeights[state.resolutionIndex];
+   for (int i = 0; i < state.videoCount; i++) {
+      if (i == state.resolutionIndex || !state.videoAvailable[i] || state.videoFps[i] <= 0 ||
+          state.videoFps[i] > 30 || state.videoHeights[i] >= currentHeight ||
+          strcmp(state.videoUrls[i], state.videoUrls[state.resolutionIndex]) == 0) continue;
+      if (best < 0 || state.videoHeights[i] > state.videoHeights[best] ||
+          (state.videoHeights[i] == state.videoHeights[best] && state.videoFps[i] > state.videoFps[best]))
+         best = i;
+   }
+   return best;
+}
+
 static void startAudioTrackSwitch(int target)
 {
    if (state.seeking) {
@@ -3782,6 +3807,8 @@ static void updatePlay(void)
 
    if (state.liveFailureVisible) {
       if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_CIRCLE)) {
+         if (isPadButtonPressed(PAD_BTN_CIRCLE))
+            logInfo("[yt] playback exit requested by user (CIRCLE)\n");
          popScreen();
          return;
       }
@@ -3791,6 +3818,7 @@ static void updatePlay(void)
    // During initial loading there is no adopted VideoPlayer yet. Treat Circle as an
    // interrupt before any HUD/paused-state query can inspect state.player.
    if (state.stage == STAGE_LOADING && isPadButtonPressed(PAD_BTN_CIRCLE)) {
+      logInfo("[yt] playback exit requested by user (CIRCLE)\n");
       requestPlaybackCancel();
       popScreen();
       return;
@@ -3815,6 +3843,7 @@ static void updatePlay(void)
             state.hudShownUs = 0;
             hideVolumeMeter(&volumeMeter);
          } else {
+            logInfo("[yt] playback exit requested by user (CIRCLE)\n");
             popScreen();
             return;
          }
@@ -3930,22 +3959,27 @@ static void updatePlay(void)
       state.decoderStopWarningShown = 1;
    }
 
-   // If a 50/60 FPS rendition stays below roughly 83% of target over its first
-   // five seconds, switch only this playback to a 30 FPS rendition. No settings are written.
+   // Continuous per-playback quality adaptation. Each decision is based on a
+   // complete measurement window; successful switches are monotonic (never up)
+   // and separated by a cooldown to avoid oscillation.
    if (state.fpsFallbackRequested && state.stage == STAGE_PLAYING && state.player &&
        !state.resolutionSwitchThreadActive && !state.audioSwitchThreadActive &&
        !state.seeking && !isVideoPaused(state.player)) {
-      int profile = findThirtyFpsProfile();
+      int profile = state.fpsAdaptiveSwitches < 3 ? findAdaptiveFallbackProfile() : -1;
       state.fpsFallbackRequested = 0;
-      state.fpsFallbackAttempted = 1;
       if (profile >= 0) {
-         logWarn("[yt-fps-fallback] switching itag=%d %dp@30 (from itag=%d %dp@%d)\n",
-                 state.videoItags[profile], state.videoHeights[profile], state.vidItag,
-                 state.vidH, state.vidFps);
-         if (!startResolutionSwitch(profile, 3))
-            logWarn("[yt-fps-fallback] could not start 30 FPS stream switch\n");
+         logWarn("[yt-fps-adaptive] switching itag=%d %dp@%d (from itag=%d %dp@%d, switch=%d)\n",
+                 state.videoItags[profile], state.videoHeights[profile], state.videoFps[profile],
+                 state.vidItag, state.vidH, state.vidFps, state.fpsAdaptiveSwitches + 1);
+         if (startResolutionSwitch(profile, 3)) {
+            state.fpsAdaptiveSwitches++;
+            state.fpsAdaptiveLastSwitchUs = sys_time_get_system_time();
+         } else {
+            logWarn("[yt-fps-adaptive] quality switch could not start\n");
+         }
       } else {
-         logWarn("[yt-fps-fallback] no 30 FPS alternative available for this video\n");
+         state.fpsAdaptiveSwitches = 3;
+         logWarn("[yt-fps-adaptive] no lower-cost rendition available; keeping current stream\n");
       }
    }
 
@@ -4001,15 +4035,18 @@ static void updatePlay(void)
          state.firstFrameSeen = 0;
          state.lastFrame = NULL;
          state.framesThisSecond = state.measuredFps = 0;
-         state.fpsWindowStartUs = state.fpsWindowFrames = 0;
-         state.fpsFallbackChecked = 0;
+         state.fpsWindowStartUs = state.fpsWindowFrames = state.fpsWindowMaxGapUs = 0;
+         state.fpsAdaptiveBadWindows = 0;
          state.fpsFallbackRequested = 0;
+         if (!fpsFallback && !teeRecovery) state.fpsAdaptiveSwitches = 0;
+         state.fpsAdaptiveLastSwitchUs = sys_time_get_system_time();
          state.message[0] = 0;
          if (!teeRecovery) {
             if (fpsFallback) {
+               if (state.resolutionSwitchRestored) state.fpsAdaptiveSwitches = 3;
                showToast(state.resolutionSwitchRestored
-                         ? "30 FPS fallback failed; original restored"
-                         : "Low framerate; switched to 30 FPS");
+                         ? "Quality fallback failed; original restored"
+                         : "Playback quality reduced automatically");
             } else if (state.resolutionSwitchRestored) {
                showToast("Resolution unavailable; previous stream restored");
             } else {
@@ -4025,7 +4062,7 @@ static void updatePlay(void)
          state.resolutionSwitchFpsFallback = 0;
       } else {
          if (state.resolutionSwitchFpsFallback)
-            showToast("30 FPS fallback unavailable");
+            showToast("Automatic quality fallback unavailable");
          else if (!state.resolutionSwitchTeeRecovery)
             showToast("Resolution switch and recovery failed");
          state.resolutionSwitchTeeRecovery = 0;
@@ -4225,7 +4262,8 @@ static void updatePlay(void)
    else if (state.stage != STAGE_PLAYING) setLabelText(&statusLabel, state.message[0] ? state.message : "Loading...");
 }
 
-// measure the real presented frame rate: a changed frame pointer is a new frame; tally them per second.
+// Measure the real presented frame rate from changes in the frame pointer.
+// The adaptive window is repeated throughout playback, not just at startup.
 static void measureFps(const uint8_t *frame)
 {
    static uint64_t diagWindowUs;
@@ -4237,15 +4275,15 @@ static void measureFps(const uint8_t *frame)
    int newFrame = frame && frame != state.lastFrame;
    diagCalls++;
    if (newFrame) {
-      if (diagLastFrameUs && now - diagLastFrameUs > diagMaxFrameGapUs)
-         diagMaxFrameGapUs = now - diagLastFrameUs;
+      uint64_t gap = diagLastFrameUs && now >= diagLastFrameUs ? now - diagLastFrameUs : 0;
+      if (gap > diagMaxFrameGapUs) diagMaxFrameGapUs = gap;
+      if (state.fpsWindowStartUs && gap > state.fpsWindowMaxGapUs)
+         state.fpsWindowMaxGapUs = gap;
       diagLastFrameUs = now;
       diagPointerChanges++;
       state.framesThisSecond++;
       state.lastFrame = frame;
-      if (state.isLive && state.stage == STAGE_PLAYING) {
-         state.liveLastFrameUs = now;
-      }
+      if (state.isLive && state.stage == STAGE_PLAYING) state.liveLastFrameUs = now;
    }
    if (now - state.fpsTickUs >= 1000000) {
       state.measuredFps = state.framesThisSecond;
@@ -4264,30 +4302,76 @@ static void measureFps(const uint8_t *frame)
       diagCalls = diagPointerChanges = diagMaxFrameGapUs = 0;
    }
 
-   if (state.vidFps < 50 || state.fpsFallbackChecked || state.fpsFallbackAttempted ||
-       state.stage != STAGE_PLAYING || !state.player || isVideoPaused(state.player) || state.seeking) {
-      if (state.vidFps < 50 || state.fpsFallbackChecked || state.fpsFallbackAttempted) return;
-      state.fpsWindowStartUs = 0;
-      state.fpsWindowFrames = 0;
+   if (state.vidFps < 24 || state.stage != STAGE_PLAYING || !state.player ||
+       isVideoPaused(state.player) || state.seeking || state.resolutionSwitchThreadActive ||
+       state.audioSwitchThreadActive) {
+      state.fpsWindowStartUs = state.fpsWindowFrames = state.fpsWindowMaxGapUs = 0;
+      state.fpsAdaptiveBadWindows = 0;
+      state.fpsFallbackRequested = 0;
       return;
    }
    if (newFrame) {
-      if (!state.fpsWindowStartUs) state.fpsWindowStartUs = now;
+      if (!state.fpsWindowStartUs) {
+         state.fpsWindowStartUs = now;
+         state.fpsWindowFrames = 0;
+         state.fpsWindowMaxGapUs = 0;
+      }
       state.fpsWindowFrames++;
    }
-   if (state.fpsWindowStartUs && now - state.fpsWindowStartUs >= 5000000ull) {
+   if (state.fpsWindowStartUs && now - state.fpsWindowStartUs >= 8000000ull) {
       uint64_t elapsed = now - state.fpsWindowStartUs;
       int averageFps = elapsed ? (int)((state.fpsWindowFrames * 1000000ull + elapsed / 2) / elapsed) : 0;
-      state.fpsFallbackChecked = 1;
-      int minimumFps = (state.vidFps * 5 + 5) / 6;
-      if (averageFps < minimumFps) {
-         logWarn("[yt-fps-fallback] first 5s average=%d FPS target=%d minimum=%d\n",
-                 averageFps, state.vidFps, minimumFps);
+      int minimumFps = (state.vidFps * 4 + 4) / 5;
+      uint64_t maxGapUs = state.fpsWindowMaxGapUs;
+      int lowFps = averageFps < minimumFps;
+      // A single long frame gap can be caused by a transient I/O or scheduling stall.
+      // Require repeated underperformance before changing quality; only a severe,
+      // sustained-window FPS collapse is allowed to trigger an immediate fallback.
+      int degradedWindow = lowFps || (maxGapUs >= 1000000ull && averageFps * 10 < state.vidFps * 9);
+      int severeDegradation = averageFps * 5 < state.vidFps * 3;
+      if (degradedWindow) state.fpsAdaptiveBadWindows++;
+      else state.fpsAdaptiveBadWindows = 0;
+      int fallbackEligible = severeDegradation || state.fpsAdaptiveBadWindows >= 2;
+      int cooldownReady = !state.fpsAdaptiveLastSwitchUs ||
+                          (now >= state.fpsAdaptiveLastSwitchUs &&
+                           now - state.fpsAdaptiveLastSwitchUs >= 20000000ull);
+      uint64_t sinceSwitch = state.fpsAdaptiveLastSwitchUs && now >= state.fpsAdaptiveLastSwitchUs
+                           ? now - state.fpsAdaptiveLastSwitchUs : 0;
+      logInfo("[yt-fps-adaptive] spanMs=%llu averageFps=%d targetFps=%d minimumFps=%d maxGapMs=%llu lowFps=%d badWindows=%d fallbackEligible=%d switches=%d cooldownMs=%llu\n",
+              (unsigned long long)(elapsed/1000ull), averageFps, state.vidFps, minimumFps,
+              (unsigned long long)(maxGapUs/1000ull), lowFps, state.fpsAdaptiveBadWindows,
+              fallbackEligible, state.fpsAdaptiveSwitches, (unsigned long long)(sinceSwitch/1000ull));
+      if (fallbackEligible && state.fpsAdaptiveSwitches < 3 && cooldownReady)
          state.fpsFallbackRequested = 1;
-      } else {
-         logInfo("[yt-fps-fallback] first 5s average=%d FPS target=%d minimum=%d; keeping stream\n",
-                 averageFps, state.vidFps, minimumFps);
-      }
+      state.fpsWindowStartUs = now;
+      state.fpsWindowFrames = 0;
+      state.fpsWindowMaxGapUs = 0;
+   }
+}
+
+// Time the CPU-side YUV draw submission. This does not measure completion on
+// the RSX; it isolates the cost of preparing/submitting the video quad.
+static void recordVideoRenderDraw(uint64_t pullUs, uint64_t drawUs, int frameW, int frameH)
+{
+   static uint64_t windowStartUs;
+   static uint64_t pullTotalUs, pullMaxUs;
+   static uint64_t drawTotalUs, drawMaxUs;
+   static uint64_t calls;
+   uint64_t now = sys_time_get_system_time();
+   if (!windowStartUs) windowStartUs = now;
+   pullTotalUs += pullUs;
+   drawTotalUs += drawUs;
+   if (pullUs > pullMaxUs) pullMaxUs = pullUs;
+   if (drawUs > drawMaxUs) drawMaxUs = drawUs;
+   calls++;
+   if (now - windowStartUs >= 5000000ull) {
+      logInfo("[video-render-diag] spanMs=%llu calls=%llu framePullAvgUs=%llu framePullMaxUs=%llu yuvSubmitAvgUs=%llu yuvSubmitMaxUs=%llu source=%dx%d\n",
+              (unsigned long long)((now-windowStartUs)/1000ull), (unsigned long long)calls,
+              (unsigned long long)(calls ? pullTotalUs/calls : 0), (unsigned long long)pullMaxUs,
+              (unsigned long long)(calls ? drawTotalUs/calls : 0), (unsigned long long)drawMaxUs,
+              frameW, frameH);
+      windowStartUs = now;
+      pullTotalUs = pullMaxUs = drawTotalUs = drawMaxUs = calls = 0;
    }
 }
 
@@ -4708,7 +4792,9 @@ static void drawPlay(void)
    const uint8_t *frame = NULL;
    if (state.player) {
       int w, h;
+      uint64_t framePullStartUs = sys_time_get_system_time();
       frame = getVideoFrame(state.player, &w, &h);
+      uint64_t framePullUs = sys_time_get_system_time() - framePullStartUs;
       if (frame) {
          if (!state.firstFrameSeen) {
             showControls();   // bring up the HUD as playback starts; it auto-hides as usual
@@ -4759,7 +4845,9 @@ static void drawPlay(void)
          if (!state.diagFirstYuvDraw)
             logInfo("[video-diag] first drawGfxYuvFrame begin source=%dx%d target=%dx%d\n",
                     w, h, dw, dh);
+         uint64_t drawStartUs = sys_time_get_system_time();
          drawGfxYuvFrame(dx, dy, dw, dh, frame, w, h);
+         recordVideoRenderDraw(framePullUs, sys_time_get_system_time() - drawStartUs, w, h);
          if (!state.diagFirstYuvDraw) {
             state.diagFirstYuvDraw = 1;
             logInfo("[video-diag] first drawGfxYuvFrame complete\n");

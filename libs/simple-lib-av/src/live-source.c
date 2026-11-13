@@ -31,8 +31,8 @@
 #define WINDOW_BACKLOG     (1024 * 1024)        // history kept before the read position (the demuxer re-reads a box)
 #define FETCH_MARGIN       (64 * 1024)          // room beyond a segment, so a full fetch is told from a cut one
 #define TARGET_AHEAD       (8 * 1024 * 1024)    // how far ahead of the reader the prefetch keeps the window filled...
-#define MAX_SEGMENTS_AHEAD 3                    // ...in at most this many whole segments the reader has not begun
-                                                // (audio: 80 KB a segment, where 4 MB would be minutes of it)
+#define MAX_SEGMENTS_AHEAD 6                    // ...in at most this many whole segments the reader has not begun
+                                                // (up to ~12 s at 2 s/segment; byte and window limits still apply)
 #define SEGMENT_RING       16                   // where the latest segments begin, to count those ahead
 #define START_BEHIND_EDGE  3                    // initial start position behind the current live edge
 #define STARTUP_BUFFER_SEGMENTS 3                 // 3 x 2 s segments ~= 6 s; release reader only after priming
@@ -42,6 +42,7 @@
 #define MAX_FETCH_FAILURES 5                    // stop a source instead of retrying forever
 #define PREFETCH_IDLE_MS   8                    // buffered far enough ahead: brief idle
 #define READ_WAIT_MS       2                    // reader has nothing buffered yet: let the prefetch catch up
+#define SPEC_FETCH_CAP     (12 * 1024 * 1024)    // bounded staging buffer for one speculative video segment
 
 // googlevideo segment urls are signed, so any user-agent is accepted.
 static const char *SEGMENT_UA = "Mozilla/5.0 (PLAYSTATION 3; 4.9)";
@@ -82,6 +83,8 @@ struct LiveSource {
    volatile int     running;
    volatile int     cancel;
    int              isAudio;
+   uint8_t         *specBuffer;
+   int              specCapacity;
 
    // Read-side starvation and producer-side fetch telemetry. Read counters share the window lock.
    uint64_t diagReadCalls, diagReadBytes, diagWaitEvents, diagWaitUs, diagWaitMaxUs;
@@ -152,8 +155,51 @@ static int segmentsAhead(const LiveSource *source)
    return ahead;
 }
 
-// fetch the next segment straight into the window's free end (network, no lock: the reader only reads below the
-// window's end, and only this thread moves it), then strip its init and publish it (under lock). 0 ok, 1 edge,
+typedef struct {
+   char url[2200];
+   uint8_t *buffer;
+   int capacity;
+   int length;
+   int status;
+   int result;
+   long sq;
+   sys_ppu_thread_t thread;
+   uint64_t startedUs;
+   uint64_t finishedUs;
+   volatile int done;
+} LiveSpecFetch;
+
+static void liveSpecFetchThread(uint64_t arg)
+{
+   LiveSpecFetch *job = (LiveSpecFetch *)(uintptr_t)arg;
+   HttpHeader headers[] = { { "User-Agent", SEGMENT_UA }, { "Accept-Encoding", "identity" } };
+   char contentLength[24];
+   HttpHeaderCapture whole = { "content-length", contentLength, sizeof contentLength };
+   job->startedUs = sys_time_get_system_time();
+   __sync_add_and_fetch(&g_liveVideoFetches, 1);
+   job->result = fetchHttpCapturing("GET", job->url, headers, 2, NULL, 0,
+                                    (char *)job->buffer, job->capacity, &job->length,
+                                    &job->status, &whole);
+   __sync_sub_and_fetch(&g_liveVideoFetches, 1);
+   job->finishedUs = sys_time_get_system_time();
+   __sync_synchronize();
+   job->done = 1;   // last access to the stack-owned job before this worker exits
+   exitThread();
+}
+
+static int liveSpecJoin(LiveSpecFetch *job)
+{
+   if (!job) return 0;
+   int joinRc = joinThread(job->thread);
+   if (joinRc == 0) return 1;
+   logWarn("[live-prefetch-parallel] worker join failed rc=%d; waiting for worker completion\n", joinRc);
+   while (!job->done) sleepMs(10);
+   __sync_synchronize();
+   return 1;
+}
+
+// fetch the next segment into the window while optionally fetching its successor into a bounded staging buffer;
+// publish the staged successor only after the current segment, preserving sq order. 0 ok, 1 edge,
 // 2 an ended stream's last segment is in, -1 error.
 static int fetchNextSegment(LiveSource *source)
 {
@@ -174,6 +220,22 @@ static int fetchNextSegment(LiveSource *source)
    int length = 0, status = 0, rc;
    uint8_t *at;
    uint64_t fetchStartUs = sys_time_get_system_time();
+   if (!source->isAudio && source->firstDone) {
+      int wantedSpecCapacity = source->largest + FETCH_MARGIN;
+      if (wantedSpecCapacity > SPEC_FETCH_CAP) wantedSpecCapacity = SPEC_FETCH_CAP;
+      if (wantedSpecCapacity > source->specCapacity) {
+         uint8_t *bigger = (uint8_t *)realloc(source->specBuffer, (size_t)wantedSpecCapacity);
+         if (bigger) {
+            source->specBuffer = bigger;
+            source->specCapacity = wantedSpecCapacity;
+         } else if (!source->specBuffer) {
+            logWarn("[live-prefetch-parallel] staging allocation failed; using sequential fetch\n");
+         }
+      }
+   }
+   LiveSpecFetch spec;
+   int specStarted = 0;
+   memset(&spec, 0, sizeof spec);
    for (;;) {
       // room at the window's end; the read history goes first when that end is short of the biggest segment yet
       // (of half the window before the first)
@@ -182,7 +244,38 @@ static int fetchNextSegment(LiveSource *source)
       if (source->windowCap - source->windowLen < wanted) dropHistory(source);
       at = source->window + source->windowLen;
       int room = source->windowCap - source->windowLen;
+      uint64_t droppable = source->position > source->windowStart + WINDOW_BACKLOG
+                         ? source->position - WINDOW_BACKLOG - source->windowStart : 0;
+      if (droppable > (uint64_t)source->windowLen) droppable = (uint64_t)source->windowLen;
+      uint64_t roomWithHistory = (uint64_t)room + droppable;
+      uint64_t aheadNow = source->windowStart + (uint64_t)source->windowLen > source->position
+                        ? source->windowStart + (uint64_t)source->windowLen - source->position : 0;
+      int segmentsNow = segmentsAhead(source);
+      int canSpeculate = !source->isAudio && source->firstDone &&
+                         (!source->ended || source->nextSq < source->edgeSq) && source->specBuffer &&
+                         source->largest > 0 &&
+                         source->specCapacity >= (source->largest + FETCH_MARGIN > SPEC_FETCH_CAP
+                            ? SPEC_FETCH_CAP : source->largest + FETCH_MARGIN) &&
+                         aheadNow < TARGET_AHEAD && segmentsNow < MAX_SEGMENTS_AHEAD - 1 &&
+                         roomWithHistory >= 2ull * ((uint64_t)source->largest + FETCH_MARGIN);
       unlock(&source->lock);
+
+      if (!specStarted && canSpeculate) {
+         size_t specBaseLen = strlen(source->base);
+         if (specBaseLen > 0 && source->base[specBaseLen - 1] == '=')
+            snprintf(spec.url, sizeof spec.url, "%s%ld", source->base, source->nextSq + 1);
+         else
+            snprintf(spec.url, sizeof spec.url, "%ssq/%ld", source->base, source->nextSq + 1);
+         spec.buffer = source->specBuffer;
+         spec.capacity = source->specCapacity;
+         spec.sq = source->nextSq + 1;
+         if (spawnJoinableThread(&spec.thread, liveSpecFetchThread, (uint64_t)(uintptr_t)&spec,
+                                 THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "live-spec-fetch") == 0) {
+            specStarted = 1;
+            logInfo("[live-prefetch-parallel] start currentSq=%ld speculativeSq=%ld capKB=%d\n",
+                    source->nextSq, spec.sq, spec.capacity / 1024);
+         }
+      }
 
       uint64_t requestStartUs = sys_time_get_system_time();
       uint64_t previousRequestEndUs = source->lastRequestEndUs;
@@ -200,7 +293,7 @@ static int fetchNextSegment(LiveSource *source)
       source->totalRequestUs += requestEndUs - requestStartUs;
       source->totalRequestGapUs += requestGapUs;
       source->totalRequestCount++;
-      logInfo("[live-fetch-cycle] type=%s sq=%ld result=%d status=%d bytes=%d requestMs=%llu completionGapMs=%llu activeAudio=%d activeVideo=%d\\n",
+      logInfo("[live-fetch-cycle] type=%s sq=%ld result=%d status=%d bytes=%d requestMs=%llu completionGapMs=%llu activeAudio=%d activeVideo=%d\n",
               source->isAudio ? "audio" : "video", source->nextSq, rc, status, length,
               (unsigned long long)((requestEndUs-requestStartUs)/1000ull),
               (unsigned long long)(requestGapUs/1000ull), g_liveAudioFetches, g_liveVideoFetches);
@@ -210,12 +303,27 @@ static int fetchNextSegment(LiveSource *source)
       uint64_t body = (uint64_t)atol(wholeText);
       uint64_t need = (uint64_t)source->windowLen + (body > (uint64_t)length ? body : 2 * (uint64_t)length) + FETCH_MARGIN;
       if (!growWindow(source, need)) {
+         if (specStarted) liveSpecJoin(&spec);
          source->sourceError = -1;
          __sync_synchronize();
          logError("[live] sq/%ld cannot fit the rolling window (%d KB fetched, %d KB declared); stopping source\n",
                   source->nextSq, length / 1024, (int)(body / 1024));
          return -1;
       }
+   }
+   int specReady = 0;
+   if (specStarted) {
+      int specJoined = liveSpecJoin(&spec);
+      source->totalRequestUs += spec.finishedUs - spec.startedUs;
+      source->totalRequestCount++;
+      specReady = specJoined && source->running && !source->cancel &&
+                  rc == 0 && (status == 200 || status == 206) && length > 0 &&
+                  spec.result == 0 && (spec.status == 200 || spec.status == 206) &&
+                  spec.length > 0 && spec.length < spec.capacity - 1;
+      logInfo("[live-prefetch-parallel] currentSq=%ld speculativeSq=%ld currentResult=%d currentStatus=%d speculativeResult=%d speculativeStatus=%d speculativeBytes=%d speculativeMs=%llu accepted=%d\n",
+              source->nextSq, spec.sq, rc, status, spec.result, spec.status, spec.length,
+              (unsigned long long)((spec.finishedUs > spec.startedUs ? spec.finishedUs-spec.startedUs : 0)/1000ull),
+              specReady);
    }
    if (rc == 0 && (status == 204 || status == 404)) {
       source->failStreak = 0;
@@ -307,6 +415,46 @@ static int fetchNextSegment(LiveSource *source)
            (unsigned long long)(bufferedNow/1024ull), (unsigned long long)(aheadNow/1024ull),
            windowCapNow/1024, source->largest/1024);
    source->nextSq++;
+
+   // A speculative response is only published after its predecessor has been committed. It is
+   // discarded on any primary failure, HTTP edge response, truncation, or sequence mismatch.
+   if (specReady && spec.sq == source->nextSq && (!source->ended || source->nextSq <= source->edgeSq)) {
+      int specOffset = firstMoofOffset(spec.buffer, spec.length);
+      int specPayload = spec.length - specOffset;
+      lock(&source->lock);
+      dropHistory(source);
+      uint64_t specNeed = (uint64_t)source->windowLen + (uint64_t)specPayload + FETCH_MARGIN;
+      unlock(&source->lock);
+      if (specNeed > (uint64_t)source->windowCap && !growWindow(source, specNeed)) {
+         logWarn("[live-prefetch-parallel] speculative sq/%ld discarded: window growth failed\n", spec.sq);
+      } else {
+         lock(&source->lock);
+         if (source->nextSq == spec.sq && source->windowCap - source->windowLen >= specPayload) {
+            uint8_t *destination = source->window + source->windowLen;
+            if (specOffset > 0) memmove(spec.buffer, spec.buffer + specOffset, (size_t)specPayload);
+            memcpy(destination, spec.buffer, (size_t)specPayload);
+            source->segStart[source->segCount % SEGMENT_RING] = source->windowStart + (uint64_t)source->windowLen;
+            source->segSq[source->segCount % SEGMENT_RING] = spec.sq;
+            source->segCount++;
+            source->windowLen += specPayload;
+            source->largest = spec.length > source->largest ? spec.length : source->largest;
+            source->lastPublishUs = sys_time_get_system_time();
+            source->totalPublishDelayUs += source->lastPublishUs - spec.startedUs;
+            source->totalFetches++;
+            source->totalFetchBytes += (uint64_t)spec.length;
+            source->totalFetchUs += spec.finishedUs - spec.startedUs;
+            source->diagLastFetchSuccessUs = spec.finishedUs;
+            source->nextSq++;
+            logInfo("[live-prefetch-parallel] published sq=%ld bytes=%d payload=%d aheadKB=%llu\n",
+                    spec.sq, spec.length, specPayload,
+                    (unsigned long long)((source->windowStart + source->windowLen > source->position
+                       ? source->windowStart + source->windowLen - source->position : 0) / 1024ull));
+         } else {
+            logWarn("[live-prefetch-parallel] speculative sq/%ld discarded: sequence or window changed\n", spec.sq);
+         }
+         unlock(&source->lock);
+      }
+   }
    return 0;
 }
 
@@ -392,7 +540,6 @@ LiveSource *openLiveSource(const char *baseUrl, long startSq, long edgeSq, long 
    source->windowCap = audio ? WINDOW_AUDIO : WINDOW_VIDEO;
    source->window = (uint8_t *)malloc(source->windowCap);
    if (!source->window) { closeLiveSource(source); return NULL; }
-
    strCopy(source->base, sizeof source->base, baseUrl);
    long start = playSq >= 0 ? playSq : ended ? startSq : edgeSq - START_BEHIND_EDGE;
    if (ended && start > edgeSq) start = edgeSq;
@@ -615,6 +762,7 @@ void closeLiveSource(LiveSource *source)
       destroyLock(&source->lock);
       source->lockReady = 0;
    }
+   free(source->specBuffer);
    free(source->window);
    free(source);
 }
