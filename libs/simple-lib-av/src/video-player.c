@@ -971,7 +971,10 @@ VideoPlayer *createVideoPlayerSplitCancelable(const char *videoPath, const char 
                       spawnJoinableThread(&audioOpenTid, audioOpenThread, (uint64_t)(uintptr_t)&audioJob,
                                           THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "audio-open") == 0;
 
-   int videoOk = openVideoDemuxer(&player->demuxer, videoPath) == 0;
+   int videoOpenRc = openVideoDemuxer(&player->demuxer, videoPath);
+   int videoOk = videoOpenRc == 0;
+   if (!videoOk)
+      logError("[video-player-init] video demux open failed rc=%d\n", videoOpenRc);
 
    // join the audio open before ANY exit: the thread writes into the player, so it must be done
    // (and its outcome adopted) before a failed video open can tear the player down
@@ -1002,23 +1005,44 @@ VideoPlayer *createVideoPlayerSplitCancelable(const char *videoPath, const char 
    }
    if (videoPlayerCancelRequested(cancelRequested)) goto fail;
    player->decoder = createPlayerDecoder(player);
-   if (!player->decoder || videoPlayerCancelRequested(cancelRequested)) goto fail;
+   if (!player->decoder) {
+      logError("[video-player-init] decoder creation failed display=%dx%d coded=%dx%d\n",
+               player->demuxer.width, player->demuxer.height, player->allocW, player->allocH);
+      goto fail;
+   }
+   if (videoPlayerCancelRequested(cancelRequested)) goto fail;
    configureDecoderForStream(player);
    logDecoderForStream(player);
 
    // YUV 4:2:0 planar frames; cellVdecGetPicture requires 128-byte alignment, size a multiple of 128
    size_t frameBytes = ((size_t)player->allocW * player->allocH * 3 / 2 + 127) & ~(size_t)127;
+   logInfo("[video-player-init] allocating frame ring slots=%d coded=%dx%d frameBytes=%zu totalBytes=%zu\n",
+           FRAME_SLOTS, player->allocW, player->allocH, frameBytes, frameBytes * FRAME_SLOTS);
    for (int i = 0; i < FRAME_SLOTS; i++) {
       if (videoPlayerCancelRequested(cancelRequested)) goto fail;
       player->slots[i].yuv = (uint8_t *)allocFrame(frameBytes);
-      if (!player->slots[i].yuv || videoPlayerCancelRequested(cancelRequested)) goto fail;
+      logInfo("[video-player-init] frame buffer slot=%d/%d ptr=%p bytes=%zu result=%s\n",
+              i + 1, FRAME_SLOTS, player->slots[i].yuv, frameBytes,
+              player->slots[i].yuv ? "ok" : "failed");
+      if (!player->slots[i].yuv) {
+         logError("[video-player-init] frame allocation failed slot=%d/%d coded=%dx%d bytes=%zu\n",
+                  i + 1, FRAME_SLOTS, player->allocW, player->allocH, frameBytes);
+         goto fail;
+      }
+      if (videoPlayerCancelRequested(cancelRequested)) goto fail;
    }
 
    if (videoPlayerCancelRequested(cancelRequested)) goto fail;
    player->running = 1;
-   player->threadActive = (spawnJoinableThread(&player->thread, decodeThread, (uint64_t)(uintptr_t)player,
-                           THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "video-player") == 0);
-   if (!player->threadActive || videoPlayerCancelRequested(cancelRequested)) goto fail;
+   int threadRc = spawnJoinableThread(&player->thread, decodeThread, (uint64_t)(uintptr_t)player,
+                                     THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "video-player");
+   player->threadActive = threadRc == 0;
+   logInfo("[video-player-init] decode thread create rc=%d active=%d\n", threadRc, player->threadActive);
+   if (!player->threadActive || videoPlayerCancelRequested(cancelRequested)) {
+      if (!player->threadActive)
+         logError("[video-player-init] decode thread creation failed rc=%d\n", threadRc);
+      goto fail;
+   }
 
    startAudioPipeline(player);
    if (videoPlayerCancelRequested(cancelRequested)) goto fail;

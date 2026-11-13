@@ -74,7 +74,7 @@
 // subtitles: Triangle toggles captions on/off; language selection lives in Options.
 #define SUBTITLE_TEXT_SIZE 30
 #define MAX_AUDIO_TRACKS 128
-#define MAX_VOD_FALLBACK_ATTEMPTS 4
+#define MAX_INITIAL_FALLBACK_ATTEMPTS MAX_STREAM_FORMATS
 
 // description overlay: SELECT toggles the description full-screen; up/down scroll it.
 #define DESCRIPTION_MARGIN_X    120
@@ -557,22 +557,38 @@ static int fallbackFormatUsable(const StreamFormat *f)
 {
    if (!f || !f->hasVideo || f->needsCipher || !f->url[0]) return 0;
    if (strcmp(f->container, "mp4") != 0) return 0;
-   if (f->height <= 0 || f->height > 1080 || f->fps <= 0 || f->fps > 60) return 0;
-   if (f->height > 720 && f->fps > 30) return 0;
-   return 1;
+   if (f->height < 144 || f->height > 1080 || f->fps <= 0 || f->fps > 60) return 0;
+   return isPlaybackVideoFormatDecodable(f);
 }
 
-static const StreamFormat *findFallbackItag(const StreamInfo *info, int itag)
+// Lower values have higher fallback priority. The order is deliberately shared
+// by initial LIVE and VOD recovery: 1080p60, 1080p30, 720p60, 720p30,
+// 480p, 360p, 240p, then 144p.
+static int fallbackQualityRank(const StreamFormat *f)
 {
-   for (int i = 0; i < info->formatCount; i++)
-      if (info->formats[i].itag == itag && fallbackFormatUsable(&info->formats[i]))
-         return &info->formats[i];
-   return NULL;
+   if (f->height > 720) return f->fps >= 50 ? 0 : 1;
+   if (f->height > 480) return f->fps >= 50 ? 2 : 3;
+   if (f->height > 360) return 4;
+   if (f->height > 240) return 5;
+   if (f->height > 144) return 6;
+   return 7;
+}
+
+static int fallbackFormatBefore(const StreamFormat *a, const StreamFormat *b,
+                                int preferSeparateAudio)
+{
+   int rankA = fallbackQualityRank(a);
+   int rankB = fallbackQualityRank(b);
+   if (rankA != rankB) return rankA < rankB;
+   if (a->height != b->height) return a->height > b->height;
+   if (a->fps != b->fps) return a->fps > b->fps;
+   if (preferSeparateAudio && a->hasAudio != b->hasAudio) return !a->hasAudio;
+   return a->width > b->width;
 }
 
 // Try the normal resolver pick first. If it cannot produce a decoded pre-roll,
-// test muxed MP4 and progressively higher adaptive AVC candidates. The successful
-// candidate becomes the actual initial stream; the regular selector remains unchanged.
+// test every distinct compatible MP4 quality in the requested priority order.
+// This path is used for both LIVE and VOD, including segmented LIVE URLs.
 static VideoPlayer *openInitialWithFallback(const StreamInfo *info,
                                              const StreamFormat **selectedVideo,
                                              const StreamFormat **selectedAudio,
@@ -610,24 +626,35 @@ static VideoPlayer *openInitialWithFallback(const StreamInfo *info,
    }
    if (playbackCancelRequested() || !allowFallback) return NULL;
 
-   // Test the known muxed and AVC renditions first, then other compatible MP4
-   // formats. Primary plus four fallbacks is the hard initial VOD attempt budget.
-   static const int preferredItags[] = { 18, 134, 135, 136, 137 };
-   const StreamFormat *attempts[MAX_VOD_FALLBACK_ATTEMPTS];
+   const StreamFormat *attempts[MAX_INITIAL_FALLBACK_ATTEMPTS];
    int count = 0;
-   for (int i = 0; i < (int)(sizeof preferredItags / sizeof preferredItags[0]); i++) {
-      const StreamFormat *f = findFallbackItag(info, preferredItags[i]);
-      if (!f || f == video || strcmp(f->url, video->url) == 0) continue;
-      int duplicate = 0;
-      for (int j = 0; j < count; j++) if (strcmp(attempts[j]->url, f->url) == 0) duplicate = 1;
-      if (!duplicate && count < MAX_VOD_FALLBACK_ATTEMPTS) attempts[count++] = f;
-   }
-   for (int i = 0; i < info->formatCount && count < MAX_VOD_FALLBACK_ATTEMPTS; i++) {
+   for (int i = 0; i < info->formatCount && count < MAX_INITIAL_FALLBACK_ATTEMPTS; i++) {
       const StreamFormat *f = &info->formats[i];
       if (!fallbackFormatUsable(f) || f == video || strcmp(f->url, video->url) == 0) continue;
+
       int duplicate = 0;
-      for (int j = 0; j < count; j++) if (strcmp(attempts[j]->url, f->url) == 0) duplicate = 1;
-      if (!duplicate) attempts[count++] = f;
+      for (int j = 0; j < count; j++) {
+         if (attempts[j]->height == f->height && attempts[j]->fps == f->fps) {
+            // Keep one candidate per quality. Prefer video-only when a separate audio
+            // stream is available, then prefer the wider rendition within the same tier.
+            if (fallbackFormatBefore(f, attempts[j], audio != NULL)) attempts[j] = f;
+            duplicate = 1;
+            break;
+         }
+         if (strcmp(attempts[j]->url, f->url) == 0) {
+            duplicate = 1;
+            break;
+         }
+      }
+      if (duplicate) continue;
+
+      int insert = count;
+      while (insert > 0 && fallbackFormatBefore(f, attempts[insert - 1], audio != NULL)) {
+         attempts[insert] = attempts[insert - 1];
+         insert--;
+      }
+      attempts[insert] = f;
+      count++;
    }
 
    for (int i = 0; i < count; i++) {
@@ -1224,12 +1251,11 @@ static void worker(uint64_t arg)
               state.liveSegmentSec, state.liveWindowSegs);
    }
 
-   // Open the resolver's normal pick first. For VOD only, wait for a decoded pre-roll;
-   // if that rendition cannot become ready, automatically test muxed/AVC alternatives.
-   // Live playback keeps the existing non-blocking startup path because segmented live
-   // streams have different readiness and retry behaviour.
+   // Use the same decoded pre-roll validation and ordered quality recovery for
+   // segmented LIVE and VOD. A LIVE rendition that cannot initialize must not be
+   // accepted as a successful player merely because its player object was created.
    if (playbackCancelRequested()) goto done;
-   state.pendingPlayer = openInitialWithFallback(info, &video, &audio, !info->isLive && !video->isLiveSegmented);
+   state.pendingPlayer = openInitialWithFallback(info, &video, &audio, 1);
    if (playbackCancelRequested()) {
       if (state.pendingPlayer) {
          destroyVideoPlayer(state.pendingPlayer);
