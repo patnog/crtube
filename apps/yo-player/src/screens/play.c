@@ -128,10 +128,10 @@ static Label optionsCurrentValueLabels[3]; // Quality, Audio, Subs language
 
 // Playback-owned settings panel. It deliberately shares the persisted settings APIs
 // with navigation, but owns its input state, labels, layout and SponsorBlock submenu.
-#define PLAYBACK_SETTINGS_COUNT 6
+#define PLAYBACK_SETTINGS_COUNT 7
 #define PLAYBACK_SETTINGS_ROW_H 54
 #define PLAYBACK_SETTINGS_PANEL_W 650
-#define PLAYBACK_SETTINGS_PANEL_H 430
+#define PLAYBACK_SETTINGS_PANEL_H 490
 #define PLAYBACK_SUBTITLE_STYLE_COUNT 5
 #define PLAYBACK_SUBTITLE_STYLE_PANEL_H 490
 #define PLAYBACK_SPONSOR_PANEL_W 780
@@ -411,6 +411,7 @@ static struct {
    uint64_t         fpsAdaptiveLastSwitchUs;
    int              fpsAdaptiveSwitches;
    int              fpsAdaptiveBadWindows;
+   int              fpsAdaptiveLowBufferWindows;
    int              fpsFallbackRequested;
 
    // seek: the UI owns the scrub target so the bar moves instantly; the engine seek is deferred until
@@ -455,6 +456,9 @@ static struct {
 
 static Font  uiFont;
 static Label statusLabel;
+static Label loadingDotsLabel;
+static int loadingDotsMaxWidth;
+static uint64_t loadingAnimationStartedUs;
 static Label statLabels[STAT_LINES];
 static Label timeLeftLabel, timeRightLabel;   // seek bar: current time (left) / total (right)
 static Label liveBadgeLabel, backToLabel;
@@ -1773,6 +1777,7 @@ static int playbackChapterRowHeight(void)
 }
 
 static void renderDescription(void);
+static const char *getAnimatedLoadingText(void);
 
 static void applyPlaybackUiLabelScale(float scale)
 {
@@ -1782,6 +1787,10 @@ static void applyPlaybackUiLabelScale(float scale)
 
 #define SCALE_PLAYBACK_LABEL(label) setLabelFixedRenderScale(&(label), scale, 0)
    SCALE_PLAYBACK_LABEL(statusLabel);
+   SCALE_PLAYBACK_LABEL(loadingDotsLabel);
+   setLabelText(&loadingDotsLabel, "...");
+   loadingDotsMaxWidth = loadingDotsLabel.tt.tex.w;
+   setLabelText(&loadingDotsLabel, "");
    for (int i = 0; i < STAT_LINES; i++) {
       statLabels[i].size = playbackSubtitleFontSize(22);
       statLabels[i].fixedRenderScale = 0.0f;
@@ -1835,6 +1844,7 @@ static void applyPlaybackUiLabelScale(float scale)
 static void initPlay(void)
 {
    setHttpRequestsCancelled(0);
+   loadingAnimationStartedUs = 0;
    memset(&state, 0, sizeof state);
    state.askPromptShown = -1;
    state.screenW = getGfxScreenWidth();
@@ -1846,6 +1856,10 @@ static void initPlay(void)
 
    uiFont = openSystemFont(FONT_POP);
    initLabel(&statusLabel, &uiFont, 0, 0, state.screenW - 80, AUTO, playbackFontSize(28), activeTheme->textPrimary, TEXT_WRAP, "");
+   initLabelRaw(&loadingDotsLabel, &uiFont, 0, 0, 100, AUTO, playbackFontSize(28), activeTheme->textPrimary, TEXT_NOWRAP, "");
+   setLabelText(&loadingDotsLabel, "...");
+   loadingDotsMaxWidth = loadingDotsLabel.tt.tex.w;
+   setLabelText(&loadingDotsLabel, "");
    statsTextPadding = (int)(measureFontText(&uiFont, playbackSubtitleFontSize(22), "   ") + 0.5f);
    if (statsTextPadding < 3) statsTextPadding = 3;
    int statsTextMaxWidth = state.screenW - 80 - 2 * statsTextPadding;
@@ -1895,7 +1909,8 @@ static void initPlay(void)
    initLabelRaw(&playbackSettingsTitle, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 48, AUTO,
                 playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "Playback Settings");
    static const char *playbackSettingNames[PLAYBACK_SETTINGS_COUNT] = {
-      "Enable 1080p (experimental)", "UI Scaling", "Overscan", "Subtitle Style", "Subtitle Offset", "SponsorBlock"
+      "Enable 1080p (experimental)", "UI Scaling", "Overscan", "Overscan (crop to fill)",
+      "Subtitle Style", "Subtitle Offset", "SponsorBlock"
    };
    for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
       initLabelRaw(&playbackSettingsLabels[i], &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 230, AUTO,
@@ -2359,44 +2374,47 @@ static int findLowerResolutionProfile(void)
 
 // Prefer 30 FPS at the current resolution; otherwise use the highest 30 FPS
 // rendition that does not increase the current resolution.
-static int findThirtyFpsProfile(void)
-{
-   int currentHeight, sameHeight = -1, lower = -1;
-   if (state.resolutionIndex < 0 || state.resolutionIndex >= state.videoCount) return -1;
-   currentHeight = state.videoHeights[state.resolutionIndex];
-   for (int i = 0; i < state.videoCount; i++) {
-      if (i == state.resolutionIndex || !state.videoAvailable[i] || state.videoFps[i] != 30 ||
-          strcmp(state.videoUrls[i], state.videoUrls[state.resolutionIndex]) == 0 ||
-          state.videoHeights[i] > currentHeight) continue;
-      if (state.videoHeights[i] == currentHeight) {
-         if (sameHeight < 0 || state.videoHasAudio[i] < state.videoHasAudio[sameHeight]) sameHeight = i;
-      } else if (lower < 0 || state.videoHeights[i] > state.videoHeights[lower]) {
-         lower = i;
-      }
-   }
-   return sameHeight >= 0 ? sameHeight : lower;
-}
-
 // Keep the current resolution when moving from 50/60 to 30 FPS. If the current
 // rendition is already <=30 FPS, step down in resolution instead of retrying it.
 static int findAdaptiveFallbackProfile(void)
 {
-   int currentHeight, best = -1;
+   int currentHeight, sameHeight30 = -1, lower30 = -1, lowerHighFps = -1;
    if (state.resolutionIndex < 0 || state.resolutionIndex >= state.videoCount) return -1;
-   if (state.vidFps >= 50) {
-      int profile = findThirtyFpsProfile();
-      if (profile >= 0) return profile;
-   }
    currentHeight = state.videoHeights[state.resolutionIndex];
-   for (int i = 0; i < state.videoCount; i++) {
-      if (i == state.resolutionIndex || !state.videoAvailable[i] || state.videoFps[i] <= 0 ||
-          state.videoFps[i] > 30 || state.videoHeights[i] >= currentHeight ||
-          strcmp(state.videoUrls[i], state.videoUrls[state.resolutionIndex]) == 0) continue;
-      if (best < 0 || state.videoHeights[i] > state.videoHeights[best] ||
-          (state.videoHeights[i] == state.videoHeights[best] && state.videoFps[i] > state.videoFps[best]))
-         best = i;
+
+   // First preserve the current resolution at 30 FPS (e.g. 1080p60 -> 1080p30).
+   if (state.vidFps >= 50) {
+      for (int i = 0; i < state.videoCount; i++) {
+         if (i == state.resolutionIndex || !state.videoAvailable[i] || state.videoFps[i] != 30 ||
+             state.videoHeights[i] != currentHeight ||
+             strcmp(state.videoUrls[i], state.videoUrls[state.resolutionIndex]) == 0) continue;
+         if (sameHeight30 < 0 || state.videoHasAudio[i] < state.videoHasAudio[sameHeight30]) sameHeight30 = i;
+      }
+      if (sameHeight30 >= 0) return sameHeight30;
    }
-   return best;
+
+   // Prefer a lower-resolution 30 FPS stream when available. If the only 30 FPS
+   // option is much smaller (e.g. 480p30), compare it with higher-resolution 50/60 FPS.
+   for (int i = 0; i < state.videoCount; i++) {
+      if (i == state.resolutionIndex || !state.videoAvailable[i] || state.videoFps[i] != 30 ||
+          state.videoHeights[i] >= currentHeight ||
+          strcmp(state.videoUrls[i], state.videoUrls[state.resolutionIndex]) == 0) continue;
+      if (lower30 < 0 || state.videoHeights[i] > state.videoHeights[lower30]) lower30 = i;
+   }
+   for (int i = 0; i < state.videoCount; i++) {
+      if (i == state.resolutionIndex || !state.videoAvailable[i] || state.videoFps[i] < 50 ||
+          state.videoHeights[i] >= currentHeight ||
+          strcmp(state.videoUrls[i], state.videoUrls[state.resolutionIndex]) == 0) continue;
+      if (lowerHighFps < 0 || state.videoHeights[i] > state.videoHeights[lowerHighFps] ||
+          (state.videoHeights[i] == state.videoHeights[lowerHighFps] &&
+           state.videoFps[i] > state.videoFps[lowerHighFps])) lowerHighFps = i;
+   }
+
+   if (lowerHighFps >= 0 &&
+       (lower30 < 0 || state.videoHeights[lowerHighFps] > state.videoHeights[lower30]))
+      return lowerHighFps;
+   if (lower30 >= 0) return lower30;
+   return lowerHighFps;
 }
 
 static void startAudioTrackSwitch(int target)
@@ -2673,13 +2691,6 @@ static void handlePlaybackInput(void)
    }
 
    updateCropPan();
-
-   if (isPadButtonPressed(PAD_BTN_R2)) {
-      cropToFillEnabled = !cropToFillEnabled;
-      cropPanX = cropPanY = 0.0f;
-      showToast(cropToFillEnabled ? "Crop to fill: ON" : "Crop to fill: OFF");
-   }
-
 
    if (state.isLive) {
       if (isPadButtonPressed(PAD_BTN_CROSS)) {
@@ -3169,16 +3180,20 @@ static void updatePlaybackSettings(void)
    else if (isRepeatDue(&playbackSettingsRepeat, getPadButtonState(PAD_BTN_UP)))
       playbackSettingsSelected = (playbackSettingsSelected + PLAYBACK_SETTINGS_COUNT - 1) % PLAYBACK_SETTINGS_COUNT;
 
+   if (playbackSettingsSelected != 2 && playbackSettingsSelected != 3) {
+      playbackOverscanRepeat.timer = 0;
+      playbackOverscanRepeat.repeats = 0;
+   }
    int left = isPadButtonPressed(PAD_BTN_LEFT);
    int right = isPadButtonPressed(PAD_BTN_RIGHT);
    int cross = isPadButtonPressed(PAD_BTN_CROSS);
 
    // Cross is not an adjustment control for these numeric/display settings.
    if (playbackSettingsSelected == 1 || playbackSettingsSelected == 2 ||
-       playbackSettingsSelected == 4)
+       playbackSettingsSelected == 3 || playbackSettingsSelected == 5)
       cross = 0;
 
-   if (playbackSettingsSelected == 4) {
+   if (playbackSettingsSelected == 5) {
       int offsetDelta = isRepeatDue(&playbackSubtitleOffsetRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
                         isRepeatDue(&playbackSubtitleOffsetRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
       if (offsetDelta) {
@@ -3206,11 +3221,19 @@ static void updatePlaybackSettings(void)
          int overscan = getOverscanPercent() + overscanDelta;
          if (setOverscanPercent(overscan) != 0) showToast("Could not save overscan setting");
       }
-   } else if (playbackSettingsSelected == 3 && (cross || right)) {
+   } else if (playbackSettingsSelected == 3) {
+      int cropOverscanDelta = isRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
+                              isRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
+      if (cropOverscanDelta) {
+         int cropOverscan = getCropToFillOverscanPercent() + cropOverscanDelta;
+         if (setCropToFillOverscanPercent(cropOverscan) != 0)
+            showToast("Could not save crop overscan setting");
+      }
+   } else if (playbackSettingsSelected == 4 && (cross || right)) {
       playbackSubtitleStyleOpen = 1;
       playbackSubtitleStyleSelected = 0;
       playbackSubtitleStyleRepeat.timer = playbackSubtitleStyleRepeat.repeats = 0;
-   } else if (playbackSettingsSelected == 5 && (cross || right)) {
+   } else if (playbackSettingsSelected == 6 && (cross || right)) {
       openPlaybackSponsorSettings();
    }
 }
@@ -3405,21 +3428,25 @@ static void drawPlaybackSettings(void)
    drawLabelAt(&playbackSettingsTitle,
                state.screenW / 2 - playbackSettingsTitle.tt.tex.w / 2, y + 28);
 
-   char overscanValue[16];
+   char overscanValue[16], cropOverscanValue[16];
    int overscan = getOverscanPercent();
+   int cropOverscan = getCropToFillOverscanPercent();
    if (overscan > 0) snprintf(overscanValue, sizeof overscanValue, "+%d%%", overscan);
    else snprintf(overscanValue, sizeof overscanValue, "%d%%", overscan);
+   if (cropOverscan > 0) snprintf(cropOverscanValue, sizeof cropOverscanValue, "+%d%%", cropOverscan);
+   else snprintf(cropOverscanValue, sizeof cropOverscanValue, "%d%%", cropOverscan);
    static const char *const playbackScaleNames[] = { "1.0x", "1.5x" };
    const char *scaleValue = playbackScaleNames[playbackFontScale >= 1.25f ? 1 : 0];
    if (strcmp(playbackSettingsValues[1].text, scaleValue) != 0)
       setLabelText(&playbackSettingsValues[1], scaleValue);
    setLabelText(&playbackSettingsValues[2], overscanValue);
+   setLabelText(&playbackSettingsValues[3], cropOverscanValue);
    char subtitleOffsetValue[16];
    int subtitleOffset = getSubtitleOffset();
    snprintf(subtitleOffsetValue, sizeof subtitleOffsetValue, "%d", subtitleOffset);
-   setLabelText(&playbackSettingsValues[3], "Configure");
-   setLabelText(&playbackSettingsValues[4], subtitleOffsetValue);
-   setLabelText(&playbackSettingsValues[5], "Configure");
+   setLabelText(&playbackSettingsValues[4], "Configure");
+   setLabelText(&playbackSettingsValues[5], subtitleOffsetValue);
+   setLabelText(&playbackSettingsValues[6], "Configure");
 
    int toggleW = 132;
    int toggleX = x + panelW - 40 - toggleW;
@@ -3459,7 +3486,7 @@ static void drawPlaybackSettings(void)
          setLabelColor(value, i == playbackSettingsSelected ? activeTheme->accent : activeTheme->textPrimary);
          moveLabel(value, valueX + (valueW - value->tt.tex.w) / 2, valueY);
          drawLabel(value);
-         if (i == 3 || i == 5) {
+         if (i == 4 || i == 6) {
             int tx = x + panelW - 24;
             int ty = rowY + PLAYBACK_SETTINGS_ROW_H / 2;
             drawGfxTriangle(tx - 7, ty - 4, activeTheme->textSecondary,
@@ -3824,6 +3851,14 @@ static void updatePlay(void)
       return;
    }
 
+   // R2 is a global playback shortcut: overlays own navigation, but must not
+   // suppress the Crop to Fill toggle while Options or its submenus are open.
+   if (state.stage == STAGE_PLAYING && state.player && isPadButtonPressed(PAD_BTN_R2)) {
+      cropToFillEnabled = !cropToFillEnabled;
+      cropPanX = cropPanY = 0.0f;
+      showToast(cropToFillEnabled ? "Crop to fill: ON" : "Crop to fill: OFF");
+   }
+
    // an overlay owns the pad for the whole frame it was (or just became) visible, so the button that
    // closed or opened it can't leak into playback input below (e.g. cross toggling pause on the way out)
    int overlayHadPad = state.descriptionVisible || state.chaptersVisible || optionsVisible;
@@ -4037,6 +4072,7 @@ static void updatePlay(void)
          state.framesThisSecond = state.measuredFps = 0;
          state.fpsWindowStartUs = state.fpsWindowFrames = state.fpsWindowMaxGapUs = 0;
          state.fpsAdaptiveBadWindows = 0;
+         state.fpsAdaptiveLowBufferWindows = 0;
          state.fpsFallbackRequested = 0;
          if (!fpsFallback && !teeRecovery) state.fpsAdaptiveSwitches = 0;
          state.fpsAdaptiveLastSwitchUs = sys_time_get_system_time();
@@ -4255,11 +4291,33 @@ static void updatePlay(void)
 
    // status text: the failure reason, or "Loading..." until playback. setLabelText skips unchanged
    // text, so calling it each frame only rasterises on a real change.
+   setLabelText(&loadingDotsLabel, "");
    if (state.audioSwitchThreadActive) setLabelText(&statusLabel, state.message[0] ? state.message : "Loading audio...");
-   else if (state.resolutionSwitchThreadActive)
-      setLabelText(&statusLabel, state.resolutionSwitchTeeRecovery ? "Loading..." : "Changing resolution...");
-   else if (state.stage == STAGE_FAILED) setLabelText(&statusLabel, state.message);
-   else if (state.stage != STAGE_PLAYING) setLabelText(&statusLabel, state.message[0] ? state.message : "Loading...");
+   else if (state.resolutionSwitchThreadActive) {
+      if (state.resolutionSwitchTeeRecovery) {
+         setLabelText(&statusLabel, "Loading");
+         setLabelText(&loadingDotsLabel, getAnimatedLoadingText());
+      } else {
+         setLabelText(&statusLabel, "Changing resolution...");
+      }
+   } else if (state.stage == STAGE_FAILED) setLabelText(&statusLabel, state.message);
+   else if (state.stage != STAGE_PLAYING) {
+      if (state.message[0] && strcmp(state.message, "Loading...") != 0) {
+         setLabelText(&statusLabel, state.message);
+      } else {
+         setLabelText(&statusLabel, "Loading");
+         setLabelText(&loadingDotsLabel, getAnimatedLoadingText());
+      }
+   }
+}
+
+static const char *getAnimatedLoadingText(void)
+{
+   static const char *const frames[] = { "", ".", "..", "..." };
+   uint64_t now = sys_time_get_system_time();
+   if (!loadingAnimationStartedUs) loadingAnimationStartedUs = now;
+   unsigned frame = (unsigned)(((now - loadingAnimationStartedUs) / 300000ULL) & 3ULL);
+   return frames[frame];
 }
 
 // Measure the real presented frame rate from changes in the frame pointer.
@@ -4307,6 +4365,7 @@ static void measureFps(const uint8_t *frame)
        state.audioSwitchThreadActive) {
       state.fpsWindowStartUs = state.fpsWindowFrames = state.fpsWindowMaxGapUs = 0;
       state.fpsAdaptiveBadWindows = 0;
+      state.fpsAdaptiveLowBufferWindows = 0;
       state.fpsFallbackRequested = 0;
       return;
    }
@@ -4324,22 +4383,30 @@ static void measureFps(const uint8_t *frame)
       int minimumFps = (state.vidFps * 4 + 4) / 5;
       uint64_t maxGapUs = state.fpsWindowMaxGapUs;
       int lowFps = averageFps < minimumFps;
-      // A single long frame gap can be caused by a transient I/O or scheduling stall.
-      // Require repeated underperformance before changing quality; only a severe,
-      // sustained-window FPS collapse is allowed to trigger an immediate fallback.
+      // Never downgrade from one window, including a severe (<60%) window.
+      // LIVE decisions also inspect the actual byte/segment cushion.
       int degradedWindow = lowFps || (maxGapUs >= 1000000ull && averageFps * 10 < state.vidFps * 9);
-      int severeDegradation = averageFps * 5 < state.vidFps * 3;
+      VideoLiveBufferStatus bufferStatus;
+      int haveLiveBuffer = state.isLive && getVideoPlayerLiveBufferStatus(state.player, &bufferStatus);
+      int lowLiveBuffer = haveLiveBuffer && bufferStatus.aheadBytes < (2ull * 1024ull * 1024ull) &&
+                          bufferStatus.segmentsAhead <= 1;
       if (degradedWindow) state.fpsAdaptiveBadWindows++;
       else state.fpsAdaptiveBadWindows = 0;
-      int fallbackEligible = severeDegradation || state.fpsAdaptiveBadWindows >= 2;
+      if (lowLiveBuffer) state.fpsAdaptiveLowBufferWindows++;
+      else state.fpsAdaptiveLowBufferWindows = 0;
+      int requiredBadWindows = haveLiveBuffer && state.fpsAdaptiveLowBufferWindows < 2 ? 3 : 2;
+      int fallbackEligible = state.fpsAdaptiveBadWindows >= requiredBadWindows;
       int cooldownReady = !state.fpsAdaptiveLastSwitchUs ||
                           (now >= state.fpsAdaptiveLastSwitchUs &&
                            now - state.fpsAdaptiveLastSwitchUs >= 20000000ull);
       uint64_t sinceSwitch = state.fpsAdaptiveLastSwitchUs && now >= state.fpsAdaptiveLastSwitchUs
                            ? now - state.fpsAdaptiveLastSwitchUs : 0;
-      logInfo("[yt-fps-adaptive] spanMs=%llu averageFps=%d targetFps=%d minimumFps=%d maxGapMs=%llu lowFps=%d badWindows=%d fallbackEligible=%d switches=%d cooldownMs=%llu\n",
+      logInfo("[yt-fps-adaptive] spanMs=%llu averageFps=%d targetFps=%d minimumFps=%d maxGapMs=%llu lowFps=%d badWindows=%d lowBuffer=%d lowBufferWindows=%d aheadKB=%llu segmentsAhead=%d requiredWindows=%d fallbackEligible=%d switches=%d cooldownMs=%llu\n",
               (unsigned long long)(elapsed/1000ull), averageFps, state.vidFps, minimumFps,
               (unsigned long long)(maxGapUs/1000ull), lowFps, state.fpsAdaptiveBadWindows,
+              lowLiveBuffer, state.fpsAdaptiveLowBufferWindows,
+              (unsigned long long)(haveLiveBuffer ? bufferStatus.aheadBytes/1024ull : 0),
+              haveLiveBuffer ? bufferStatus.segmentsAhead : -1, requiredBadWindows,
               fallbackEligible, state.fpsAdaptiveSwitches, (unsigned long long)(sinceSwitch/1000ull));
       if (fallbackEligible && state.fpsAdaptiveSwitches < 3 && cooldownReady)
          state.fpsFallbackRequested = 1;
@@ -4733,6 +4800,23 @@ static void getCropToFillRect(int frameW, int frameH, int *dx, int *dy, int *dw,
       *dx = 0;
       *dy = (state.screenH - *dh) / 2 + (int)(cropPanY * excess / 2.0f);
    }
+
+   // The regular overscan is applied by the display viewport to the whole HUD.
+   // Cancel that transform for the video rectangle only, then apply the independent
+   // Crop-to-Fill overscan value. The two settings therefore never add together.
+   float regularScale = 1.0f + (float)getOverscanPercent() * 0.01f;
+   float cropScale = 1.0f + (float)getCropToFillOverscanPercent() * 0.01f;
+   float scale = cropScale / regularScale;
+   float centerX = (float)state.screenW * 0.5f;
+   float centerY = (float)state.screenH * 0.5f;
+   float rectCenterX = (float)*dx + (float)*dw * 0.5f;
+   float rectCenterY = (float)*dy + (float)*dh * 0.5f;
+   *dw = (int)((float)*dw * scale + 0.5f);
+   *dh = (int)((float)*dh * scale + 0.5f);
+   rectCenterX = centerX + (rectCenterX - centerX) * scale;
+   rectCenterY = centerY + (rectCenterY - centerY) * scale;
+   *dx = (int)(rectCenterX - (float)*dw * 0.5f + 0.5f);
+   *dy = (int)(rectCenterY - (float)*dh * 0.5f + 0.5f);
 }
 
 static void drawAutoplayNotice(void)
@@ -4882,12 +4966,16 @@ static void drawPlay(void)
    // until the first frame is presented (open, then the async resume seek's reload) keep the loading
    // status up instead of a black screen; with no player this shows the failure message.
    if (!state.firstFrameSeen || state.audioSwitchThreadActive || state.resolutionSwitchThreadActive) {
-      int statusX = state.screenW / 2 - statusLabel.tt.tex.w / 2;
+      int reserveDots = strcmp(statusLabel.text, "Loading") == 0 ? loadingDotsMaxWidth : 0;
+      int statusX = state.screenW / 2 - (statusLabel.tt.tex.w + reserveDots) / 2;
       int statusY = state.screenH / 2 - statusLabel.tt.tex.h / 2;
       if (state.audioSwitchThreadActive)
          drawBadge(&statusLabel, statusX - BADGE_PAD_X, statusY - 4);
-      else
+      else {
          drawLabelAt(&statusLabel, statusX, statusY);
+         if (loadingDotsLabel.tt.tex.w > 0)
+            drawLabelAt(&loadingDotsLabel, statusX + statusLabel.tt.tex.w, statusY);
+      }
    }
 
    if (state.liveFailureVisible) {
@@ -4969,6 +5057,7 @@ static void termPlay(void)
    if (state.liveRetiringPlayer) { destroyVideoPlayer(state.liveRetiringPlayer); state.liveRetiringPlayer = NULL; }
    if (state.vodRetiringPlayer) { destroyVideoPlayer(state.vodRetiringPlayer); state.vodRetiringPlayer = NULL; }
    freeLabel(&statusLabel);
+   freeLabel(&loadingDotsLabel);
    for (int i = 0; i < STAT_LINES; i++) freeLabel(&statLabels[i]);
    freeLabel(&timeLeftLabel);
    freeLabel(&timeRightLabel);

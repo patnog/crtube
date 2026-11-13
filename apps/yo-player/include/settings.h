@@ -60,6 +60,9 @@ int setSubtitleLanguage(const char *languageCode);
 // Uniform display overscan in percent (-15..+15). Changes are saved immediately to settings.txt.
 int getOverscanPercent(void);
 int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails
+// Independent overscan used only while Crop to Fill is enabled.
+int getCropToFillOverscanPercent(void);
+int setCropToFillOverscanPercent(int percent);
 
 // Screensaver inactivity timeout in seconds: 0=off, otherwise 30..300 in 30-second steps.
 int getScreensaverTimeout(void);

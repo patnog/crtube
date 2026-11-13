@@ -10,6 +10,13 @@
 
 typedef struct LiveSource LiveSource;
 
+typedef struct {
+   uint64_t bufferedBytes;
+   uint64_t aheadBytes;
+   int segmentsAhead;
+   int fetchInFlight;
+} LiveSourceBufferStatus;
+
 // open the sq window. playSq < 0 begins a few segments behind edgeSq so there is a small buffer; playSq >= 0
 // begins at that segment (a rewind into the DVR window, or a rebuild at the segment playing - TEE Vanced).
 // Should that first segment be gone from the server's window (404), the stream begins at the live edge
@@ -21,6 +28,7 @@ LiveSource *openLiveSource(const char *baseUrl, long startSq, long edgeSq, long 
 int64_t  readLiveSource(LiveSource *source, void *buffer, uint64_t length);   // bytes, 0 = eof/cancelled, -1 err
 int      seekLiveSource(LiveSource *source, uint64_t offset);                 // within the buffered window; 0 / -1
 uint64_t getLiveSourcePosition(const LiveSource *source);
+int      getLiveSourceBufferStatus(const LiveSource *source, LiveSourceBufferStatus *status);
 
 // the segment the stream began with (once its first segment is in), else the one it is about to fetch first
 long getLiveSourceFirstSq(const LiveSource *source);

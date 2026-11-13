@@ -251,11 +251,11 @@ static int         panelConfirmHint, panelBackHint;
 // Compact settings shell. The selected value is highlighted independently of
 // its row label; font scaling never changes the panel's physical geometry.
 #define SETTINGS_PANEL_W 680
-#define SETTINGS_PANEL_H 560
+#define SETTINGS_PANEL_H 600
 #define SETTINGS_ROW_HEIGHT 38
 #define SETTINGS_ROW_TOP 56
 #define SETTINGS_ROW_STEP 43
-#define SETTINGS_ROW_COUNT 10
+#define SETTINGS_ROW_COUNT 11
 static Label settingsTitle, settingsLabels[SETTINGS_ROW_COUNT], settingsValues[SETTINGS_ROW_COUNT];
 static ButtonHints settingsHints;
 #define UPDATE_PANEL_W 680
@@ -283,7 +283,7 @@ static void buildUpdateNotesLines(void);
 static char updateNotesLineText[UPDATE_NOTES_MAX_LINES][LABEL_MAX_TEXT];
 static Label updatePanelTitle, updatePanelInfo[3], updatePanelRows[6];
 static Label updateDialogTitle, updateDialogVersion, updateDialogRows[6];
-static Label updateNotesTitle;
+static Label updateNotesTitle, updateNotesPageLabel;
 static ButtonHints updateHints;
 
 #define THEME_PANEL_W 860
@@ -318,7 +318,7 @@ static Label sponsorActionLabels[3];
 static ButtonHints sponsorHints;
 static ButtonRepeat sponsorNavigateRepeat;
 static ButtonRepeat settingsNavigateRepeat;
-static ButtonRepeat settingsOverscanRepeat, settingsScreensaverRepeat;
+static ButtonRepeat settingsOverscanRepeat, settingsCropOverscanRepeat, settingsScreensaverRepeat;
 static ButtonRepeat exitConfirmNavigateRepeat;
 static Label exitConfirmTitle, exitConfirmMessage, exitConfirmChoices[2];
 static ButtonHints exitConfirmHints;
@@ -1874,7 +1874,17 @@ static void updateSettingsPanel(void)
       settingsOverscanRepeat.timer = 0;
       settingsOverscanRepeat.repeats = 0;
    }
-   if (home.settingsSelected == 8) {
+   int cropOverscanDelta = 0;
+   if (home.settingsSelected == 4) {
+      if (settingsCropOverscanRepeat.timer == 0)
+         settingsCropOverscanRepeat.timer = sys_time_get_system_time();
+      if (isRepeatDue(&settingsCropOverscanRepeat, getPadButtonState(PAD_BTN_LEFT))) cropOverscanDelta = -1;
+      else if (isRepeatDue(&settingsCropOverscanRepeat, getPadButtonState(PAD_BTN_RIGHT))) cropOverscanDelta = 1;
+   } else {
+      settingsCropOverscanRepeat.timer = 0;
+      settingsCropOverscanRepeat.repeats = 0;
+   }
+   if (home.settingsSelected == 9) {
       if (settingsScreensaverRepeat.timer == 0)
          settingsScreensaverRepeat.timer = sys_time_get_system_time();
       if (isRepeatDue(&settingsScreensaverRepeat, getPadButtonState(PAD_BTN_LEFT))) screensaverDelta = -1;
@@ -1883,11 +1893,11 @@ static void updateSettingsPanel(void)
       settingsScreensaverRepeat.timer = 0;
       settingsScreensaverRepeat.repeats = 0;
    }
-   if (home.settingsSelected == 8 && isPadButtonPressed(PAD_BTN_CROSS))
+   if (home.settingsSelected == 9 && isPadButtonPressed(PAD_BTN_CROSS))
       screensaverDelta = 1;
 
    if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
-       isPadButtonPressed(PAD_BTN_RIGHT) || overscanDelta || screensaverDelta) {
+       isPadButtonPressed(PAD_BTN_RIGHT) || overscanDelta || cropOverscanDelta || screensaverDelta) {
       if (home.settingsSelected == 0 || home.settingsSelected == 1) {
          int enabled = home.settingsSelected == 0 ? getAutoplayEnabled() : getEnable1080p60();
          if (isPadButtonPressed(PAD_BTN_LEFT)) enabled = 0;
@@ -1900,26 +1910,29 @@ static void updateSettingsPanel(void)
       } else if (home.settingsSelected == 3) {
          if (overscanDelta)
             setOverscanPercent(getOverscanPercent() + overscanDelta);
-      } else if (home.settingsSelected == 4 && isPadButtonPressed(PAD_BTN_CROSS)) {
-         openRegionPicker();
+      } else if (home.settingsSelected == 4) {
+         if (cropOverscanDelta)
+            setCropToFillOverscanPercent(getCropToFillOverscanPercent() + cropOverscanDelta);
       } else if (home.settingsSelected == 5 && isPadButtonPressed(PAD_BTN_CROSS)) {
-         openSponsorBlockPanel();
+         openRegionPicker();
       } else if (home.settingsSelected == 6 && isPadButtonPressed(PAD_BTN_CROSS)) {
+         openSponsorBlockPanel();
+      } else if (home.settingsSelected == 7 && isPadButtonPressed(PAD_BTN_CROSS)) {
          home.downloadSettingsOpen = 1;
          home.downloadSettingsSelected = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
-      } else if (home.settingsSelected == 7 && isPadButtonPressed(PAD_BTN_CROSS)) {
+      } else if (home.settingsSelected == 8 && isPadButtonPressed(PAD_BTN_CROSS)) {
          home.themeOpen = 1;
          home.themeSelected = getActiveThemePreset();
          if (home.themeSelected < 0 || home.themeSelected >= THEME_ROW_COUNT) home.themeSelected = 0;
          home.themeCustomOpen = 0;
          home.themeConfirmOpen = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
-      } else if (home.settingsSelected == 9 && isPadButtonPressed(PAD_BTN_CROSS)) {
+      } else if (home.settingsSelected == 10 && isPadButtonPressed(PAD_BTN_CROSS)) {
          updateSettingsOpen = 1;
          updateSettingsSelected = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
-      } else if (home.settingsSelected == 8 && screensaverDelta) {
+      } else if (home.settingsSelected == 9 && screensaverDelta) {
          int timeout = getScreensaverTimeout();
          int option = timeout == 0 ? 0 : timeout / 30;
          option = (option + (screensaverDelta > 0 ? 1 : 10)) % 11;
@@ -2215,14 +2228,23 @@ static void drawUpdateNotes(void)
    int h = UPDATE_NOTES_H < home.screenH - 16 ? UPDATE_NOTES_H : home.screenH - 16;
    int x = (home.screenW - w) / 2, y = (home.screenH - h) / 2;
    int visible = UPDATE_NOTES_VISIBLE_LINES;
-   int maxScroll = updateNotesLineCount - visible;
-   if (maxScroll < 0) maxScroll = 0;
-   if (updateNotesScroll > maxScroll) updateNotesScroll = maxScroll;
+   int pageCount = (updateNotesLineCount + visible - 1) / visible;
+   if (pageCount < 1) pageCount = 1;
+   int page = updateNotesScroll / visible + 1;
+   if (page > pageCount) page = pageCount;
+   updateNotesScroll = (page - 1) * visible;
+   char pageText[24];
+   snprintf(pageText, sizeof pageText, "%d/%d", page, pageCount);
+   setLabelIfChanged(&updateNotesPageLabel, pageText);
    fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
    fillGfxRoundedRectangle(x, y, w, h, 10, activeTheme->appBg);
    fillGfxRoundedRectangle(x, y, w, 4, 2, activeTheme->accent);
    refreshLabelScale(&updateNotesTitle);
    drawLabelCentered(&updateNotesTitle, home.screenW / 2, y + 22);
+   refreshLabelScale(&updateNotesPageLabel);
+   setLabelColor(&updateNotesPageLabel, activeTheme->textSecondary);
+   moveLabel(&updateNotesPageLabel, x + w - 72, y + 18);
+   drawLabel(&updateNotesPageLabel);
    for (int i = 0; i < visible; i++) {
       int index = updateNotesScroll + i;
       if (index >= updateNotesLineCount) break;
@@ -2232,9 +2254,6 @@ static void drawUpdateNotes(void)
       moveLabel(&updateNotesLines[i], x + 24, y + 58 + i * UPDATE_NOTES_LINE_STEP);
       drawLabel(&updateNotesLines[i]);
    }
-   initScrollbar(&updateNotesScrollbar, x + w - 18, y + 58, 8,
-                 h - 112, 6, 22, activeTheme->surface, activeTheme->accent);
-   drawScrollbar(&updateNotesScrollbar, updateNotesLineCount, visible, updateNotesScroll);
    updateHints.y = y + h - 28;
    drawButtonHints(&updateHints, home.screenW);
 }
@@ -2244,23 +2263,27 @@ static void drawSettingsPanel(void)
    // Avoid printf floating-point formatting here: the PS3 runtime may be built
    // without float printf support, which can leave only the trailing "x".
    const char *scaleValue = getGfxUiScaleFactor() >= 1.25f ? "1.5x" : "1.0x";
-   char overscanValue[16];
+   char overscanValue[16], cropOverscanValue[16];
    int overscan = getOverscanPercent();
+   int cropOverscan = getCropToFillOverscanPercent();
    if (overscan > 0) snprintf(overscanValue, sizeof overscanValue, "+%d%%", overscan);
    else              snprintf(overscanValue, sizeof overscanValue, "%d%%", overscan);
+   if (cropOverscan > 0) snprintf(cropOverscanValue, sizeof cropOverscanValue, "+%d%%", cropOverscan);
+   else                  snprintf(cropOverscanValue, sizeof cropOverscanValue, "%d%%", cropOverscan);
    setLabelIfChanged(&settingsValues[2], scaleValue);
    setLabelIfChanged(&settingsValues[3], overscanValue);
+   setLabelIfChanged(&settingsValues[4], cropOverscanValue);
    const ContentRegion *region = getContentRegionAt(getContentRegionIndex());
-   setLabelIfChanged(&settingsValues[4], region ? region->name : getContentRegionCode());
-   setLabelIfChanged(&settingsValues[5], "Configure");
+   setLabelIfChanged(&settingsValues[5], region ? region->name : getContentRegionCode());
    setLabelIfChanged(&settingsValues[6], "Configure");
    setLabelIfChanged(&settingsValues[7], "Configure");
+   setLabelIfChanged(&settingsValues[8], "Configure");
    char screensaverValue[16];
    int screensaverSeconds = getScreensaverTimeout();
    if (screensaverSeconds == 0) strCopy(screensaverValue, sizeof screensaverValue, "Off");
    else snprintf(screensaverValue, sizeof screensaverValue, "%ds", screensaverSeconds);
-   setLabelIfChanged(&settingsValues[8], screensaverValue);
-   setLabelIfChanged(&settingsValues[9], "");
+   setLabelIfChanged(&settingsValues[9], screensaverValue);
+   setLabelIfChanged(&settingsValues[10], "");
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
    int x = (home.screenW - panelW) / 2;
@@ -2276,14 +2299,14 @@ static void drawSettingsPanel(void)
       Label *name = &settingsLabels[i];
       int rowY = y + SETTINGS_ROW_TOP + i * SETTINGS_ROW_STEP;
       refreshLabelScale(name);
-      if (i == 9 && i == home.settingsSelected)
+      if (i == 10 && i == home.settingsSelected)
          fillGfxRoundedRectangle(x + 24, rowY - 2, panelW - 48,
                                  SETTINGS_ROW_HEIGHT + 4, 7, activeTheme->rowHighlight);
-      setLabelColor(name, (i == 9 && i == home.settingsSelected) ?
+      setLabelColor(name, (i == 10 && i == home.settingsSelected) ?
                           activeTheme->accent : activeTheme->textPrimary);
       moveLabel(name, x + 40, getCenteredLabelY(name, rowY, SETTINGS_ROW_HEIGHT));
       drawLabel(name);
-      if (i == 9) continue;
+      if (i == 10) continue;
 
       if (i == 0 || i == 1) {
          // Both boolean settings use the same compact OFF/ON switch.
@@ -2907,8 +2930,8 @@ static void initHome(void)
    addButtonHint(&themeHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
    static const char *settingNames[SETTINGS_ROW_COUNT] = {
       "Autoplay", "Enable 1080p60 (experimental)", "UI Scaling",
-      "Overscan", "Content Region", "SponsorBlock", "Download settings", "Themes",
-      "Screensaver timeout", "Updates & About"
+      "Overscan", "Overscan (crop to fill)", "Content Region", "SponsorBlock",
+      "Download settings", "Themes", "Screensaver timeout", "Updates & About"
    };
    for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
       initLabel(&settingsLabels[i], &uiFont, 0, 0, settingsTextW - 220, AUTO, 20,
@@ -2933,14 +2956,16 @@ static void initHome(void)
    for (int i = 0; i < 6; i++)
       initLabel(&updateDialogRows[i], &uiFont, 0, 0, UPDATE_DIALOG_W - 80, AUTO, 19,
                 activeTheme->textPrimary, TEXT_NOWRAP, "");
-   initLabel(&updateNotesTitle, &uiFont, 0, 0, UPDATE_NOTES_W - 48, AUTO, 24,
+   initLabel(&updateNotesTitle, &uiFont, 0, 0, UPDATE_NOTES_W - 120, AUTO, 24,
              activeTheme->textPrimary, TEXT_NOWRAP, "Release Notes");
+   initLabel(&updateNotesPageLabel, &uiFont, 0, 0, 56, AUTO, 18,
+             activeTheme->textSecondary, TEXT_NOWRAP, "1/1");
    for (int i = 0; i < UPDATE_NOTES_VISIBLE_LINES; i++)
       initLabel(&updateNotesLines[i], &uiFont, 0, 0, UPDATE_NOTES_W - 64, AUTO, 23,
                 activeTheme->textPrimary, TEXT_NOWRAP, "");
    initButtonHints(&updateHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
-   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_DPAD_UP), "Move");
-   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Move");
+   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_DPAD_UP), "Page");
+   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Page");
    addButtonHint(&updateHints, getConsoleGlyph(GLYPH_CROSS), "Select");
    addButtonHint(&updateHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
    initLabel(&downloadSettingsTitle, &uiFont, 0, 0, DOWNLOAD_SETTINGS_PANEL_W - 48, AUTO, 24,
@@ -3220,9 +3245,16 @@ static void updateHome(void)
    if (updateNotesOpen) {
       if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) updateNotesOpen = 0;
       else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)) ||
-               isPadButtonPressed(PAD_BTN_RIGHT)) { if (updateNotesScroll < updateNotesLineCount - UPDATE_NOTES_VISIBLE_LINES) updateNotesScroll++; }
+               isPadButtonPressed(PAD_BTN_RIGHT)) {
+         int pageCount = (updateNotesLineCount + UPDATE_NOTES_VISIBLE_LINES - 1) / UPDATE_NOTES_VISIBLE_LINES;
+         if (updateNotesScroll / UPDATE_NOTES_VISIBLE_LINES + 1 < pageCount)
+            updateNotesScroll += UPDATE_NOTES_VISIBLE_LINES;
+      }
       else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)) ||
-               isPadButtonPressed(PAD_BTN_LEFT)) { if (updateNotesScroll > 0) updateNotesScroll--; }
+               isPadButtonPressed(PAD_BTN_LEFT)) {
+         if (updateNotesScroll >= UPDATE_NOTES_VISIBLE_LINES)
+            updateNotesScroll -= UPDATE_NOTES_VISIBLE_LINES;
+      }
       return;
    }
    if (updateDialogOpen) {

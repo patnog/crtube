@@ -714,6 +714,20 @@ int seekLiveSource(LiveSource *source, uint64_t offset)
 
 uint64_t getLiveSourcePosition(const LiveSource *source) { return source->position; }
 
+int getLiveSourceBufferStatus(const LiveSource *source, LiveSourceBufferStatus *status)
+{
+   if (!source || !status || source->isAudio) return 0;
+   LiveSource *mutableSource = (LiveSource *)source;
+   lock(&mutableSource->lock);
+   uint64_t end = source->windowStart + (uint64_t)source->windowLen;
+   status->bufferedBytes = (uint64_t)source->windowLen;
+   status->aheadBytes = end > source->position ? end - source->position : 0;
+   status->segmentsAhead = segmentsAhead(source);
+   status->fetchInFlight = source->fetchInFlight;
+   unlock(&mutableSource->lock);
+   return 1;
+}
+
 long getLiveSourceFirstSq(const LiveSource *source) { return source->firstSq >= 0 ? source->firstSq : source->nextSq; }
 int getLiveSourceHttpError(const LiveSource *source) { return source ? source->httpError : 0; }
 int getLiveSourceError(const LiveSource *source)

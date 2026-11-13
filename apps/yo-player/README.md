@@ -23,7 +23,7 @@ It reuses what this repo already has:
 - **Browse & search** — a sidebar with Recommended, account Subscriptions / History / Watch Later / Playlists, separate PS3-local Subscriptions / History / Watch Later / Playlists, Trending and Live. Search has Relevance / Views sort orders; channel views have Latest / Popular / Oldest. Pasting a YouTube link into search opens it directly. Trending tabs are Gaming, Sports and Podcasts; Live tabs are Popular, Music, Gaming, Sports, Podcasts and News.
 - **Playback with sound** — streamed as it plays (nothing is downloaded in full first), H.264 + AAC. Sony VDEC is the default decoder. An experimental setting can enable the integrated TEE Decoder for supported 1080p50/60 H.264 streams. A continuous monitor measures presented frame rate in eight-second windows; sustained slowdown can trigger up to three downward rendition changes, with a cooldown between switches. This per-playback adaptation does not modify global settings.
   Pause and seek with a scrub bar showing current / total time.
-- **Live streams** — plays anything with a LIVE badge (sports, news), a few seconds behind the live edge.
+- **Live streams** — plays anything with a LIVE badge (sports, news), a few seconds behind the live edge. Startup waits for a small segment buffer; transient segment-fetch failures are retried with capped backoff, and a stalled or failed LIVE session can be renewed. A delayed/paused DVR stream can return to the moving live edge with R1.
 - **Resume** — videos pick up from where you last stopped; already-watched videos are dimmed in the grid.
 - **Subscriptions** — subscribe / unsubscribe from inside a channel; the Subscriptions feed gathers the latest
   uploads from every channel you follow, newest first.
@@ -288,7 +288,8 @@ overscan are saved immediately. A bad value quietly falls back to its default.
 - **`download-secondary-subtitle`** — `off` (default) or a supported language code for an optional second subtitle track.
 - **`region`** — two-letter country code for content lists (default `US`); selectable in Home Settings → Content Region.
 - **`screensaver-timeout`** — `0` (off) or `30`–`300` seconds in 30-second steps (default `30`).
-- **`overscan`** — uniform output zoom from `-15` to `+15` percent (default `0`).
+- **`overscan`** — uniform output zoom from `-15` to `+15` percent (default `0`), used in normal video mode.
+- **`overscan-crop-to-fill`** — independent video zoom from `-15` to `+15` percent (default `0`), used only while Crop to Fill is enabled. It is configured separately from `overscan`, so normal video output and Crop-to-Fill framing can be adjusted independently.
 - **`subtitle-offset`** — subtitle vertical offset in virtual screen pixels, `-150` to `+150` (default `0`; positive moves up).
 - **`subtitle-text-color`**, **`subtitle-background-color`**, **`subtitle-background-opacity`**, **`subtitle-highlight`**, **`subtitle-font-size`** — subtitle appearance indexes with ranges `0–5`, `0–4`, `0–4`, `0–2` and `0–5`.
 - **`theme-custom-bg`** and **`theme-custom-accent`** — custom theme background (`dark`/`light`) and accent colour (`#RRGGBB`).
@@ -394,6 +395,20 @@ VOD and live streams use separate extraction paths because YouTube does not retu
 - **Members-only videos:** The grid checks restricted videos in the background and marks detected items with a `*Members only` badge. A restricted item may not provide a playable stream to an anonymous session.
 
 These client identifiers and YouTube endpoints are implementation details, not stable APIs. YouTube can change or block them without notice.
+
+
+## Playback recovery and network failure handling
+
+Playback distinguishes media-source failures from decoder/demuxer failures so a damaged or unsupported stream is not mistaken for a temporary network outage.
+
+- **VOD session recovery:** transport or HTTP source failures can trigger a fresh playback-session extraction and player replacement. The player makes at most five renewal attempts; after that it stops with an explicit failure state instead of looping indefinitely.
+- **LIVE segment recovery:** individual DASH segment fetches are retried with exponential delays starting at 500 ms and capped at 5 seconds. A source stops after five consecutive fetch failures. Initial playback primes up to three roughly two-second segments (about six seconds) before releasing the reader, reducing startup starvation.
+- **LIVE session recovery:** a failed LIVE source can trigger a renewed extraction/session, with a bounded retry budget. If no new frame is presented for 20 seconds, the player treats the stream as stalled and begins recovery rather than waiting forever.
+- **Adaptive quality:** presented frame rate is monitored continuously in eight-second windows. Sustained slowdown can trigger up to three downward rendition changes, with a cooldown. It can first move from high frame rate to 30 FPS and then reduce resolution. These changes apply only to the current playback.
+- **HTTP stream recovery:** the shared streaming reader can reopen a failed source and retry stalled reads a bounded number of times. Consecutive transport failures are tracked separately from ordinary empty-buffer waits; exhausted retries become a terminal source error propagated to the player.
+- **TLS/network time bounds:** the BearSSL transport bounds DNS and TCP connection waits to five seconds, socket I/O waits to five seconds, and response-header waits to ten seconds. This limits hangs caused by stalled network operations; it cannot guarantee that a remote server will recover.
+
+These are bounded recovery mechanisms, not a guarantee that every video or network condition can be recovered. Decoder failures remain distinct and are not blindly retried as network failures.
 
 ## Known limitations
 

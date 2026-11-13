@@ -129,6 +129,11 @@ int seekVideoSource(VideoSource *source, uint64_t offset)
 }
 
 uint64_t getVideoSourcePosition(const VideoSource *source) { return source->pos; }
+
+int getVideoSourceLiveBufferStatus(const VideoSource *source, LiveSourceBufferStatus *status)
+{
+   return source && source->isLive ? getLiveSourceBufferStatus(source->live, status) : 0;
+}
 uint64_t getVideoSourceSize(const VideoSource *source) { return source->size; }
 
 long getVideoSourceLiveFirstSq(const VideoSource *source)

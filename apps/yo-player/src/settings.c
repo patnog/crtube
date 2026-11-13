@@ -46,8 +46,10 @@ static const char *DEFAULT_SETTINGS =
    "# Each category accepts skip, ask, or keep.\n"
    "\n"
    "overscan=0\n"
+   "overscan-crop-to-fill=0\n"
    "screensaver-timeout=30\n"
    "# output zoom in percent (-15 to +15); 0 keeps the original framing\n"
+   "# independent video zoom used only when Crop to Fill is enabled (-15 to +15)\n"
    "subtitle-offset=0\n"
    "# subtitle vertical offset in virtual screen pixels (-150 to +150); positive moves up, negative moves down\n"
    "\n"
@@ -89,6 +91,7 @@ static int autoplayEnabled = 1;
 static int enable1080p60 = 0;
 static char subtitleLanguage[12] = "en";
 static int overscanPercent = 0;
+static int cropToFillOverscanPercent = 0;
 static int screensaverTimeout = 30;
 static int subtitleOffsetPixels = 0;
 static int subtitleStyle[5] = { 0, 0, 3, 0, 2 };
@@ -181,6 +184,7 @@ void loadSettings(void)
 {
    char text[4096];
    overscanPercent = 0;
+   cropToFillOverscanPercent = 0;
    screensaverTimeout = 30;
    subtitleOffsetPixels = 0;
    regionIndex = defaultRegionIndex();
@@ -407,6 +411,23 @@ void loadSettings(void)
    }
    setGfxOverscan(overscanPercent);
 
+   const char *cropOverscan = findSettingValue(text, "overscan-crop-to-fill");
+   if (!cropOverscan) {
+      if (rewriteSettingKey(SETTINGS_PATH, "overscan-crop-to-fill", "0") != 0)
+         logWarn("[settings] could not add default overscan-crop-to-fill key\n");
+   } else {
+      char *end = NULL;
+      long parsed = strtol(cropOverscan, &end, 10);
+      if (end != cropOverscan && (*end == 0 || *end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) {
+         if (parsed < -15) parsed = -15;
+         if (parsed > 15) parsed = 15;
+         cropToFillOverscanPercent = (int)parsed;
+      } else {
+         logWarn("[settings] invalid overscan-crop-to-fill value, using 0\n");
+         cropToFillOverscanPercent = 0;
+      }
+   }
+
    const char *screensaverTimeoutValue = findSettingValue(text, "screensaver-timeout");
    if (!screensaverTimeoutValue) {
       if (rewriteSettingKey(SETTINGS_PATH, "screensaver-timeout", "30") != 0)
@@ -553,6 +574,26 @@ int setEnable1080p60(int enabled)
 }
 
 int getOverscanPercent(void) { return overscanPercent; }
+int getCropToFillOverscanPercent(void) { return cropToFillOverscanPercent; }
+
+int setCropToFillOverscanPercent(int percent)
+{
+   if (percent < -15) percent = -15;
+   if (percent > 15) percent = 15;
+   if (percent == cropToFillOverscanPercent) return 0;
+
+   char value[8];
+   int length = snprintf(value, sizeof value, "%d", percent);
+   if (length <= 0 || length >= (int)sizeof value ||
+       rewriteSettingKey(SETTINGS_PATH, "overscan-crop-to-fill", value) != 0) {
+      logWarn("[settings] could not persist overscan-crop-to-fill=%d\n", percent);
+      return -1;
+   }
+
+   cropToFillOverscanPercent = percent;
+   logInfo("[settings] overscan-crop-to-fill set to %d%%\n", percent);
+   return 0;
+}
 
 int setOverscanPercent(int percent)
 {

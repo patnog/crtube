@@ -1446,6 +1446,18 @@ int getVideoPlayerLiveError(const VideoPlayer *player)
    return error;
 }
 
+int getVideoPlayerLiveBufferStatus(const VideoPlayer *player, VideoLiveBufferStatus *status)
+{
+   if (!player || !status) return 0;
+   LiveSourceBufferStatus liveStatus;
+   if (!getVideoDemuxerLiveBufferStatus(&player->demuxer, &liveStatus)) return 0;
+   status->bufferedBytes = liveStatus.bufferedBytes;
+   status->aheadBytes = liveStatus.aheadBytes;
+   status->segmentsAhead = liveStatus.segmentsAhead;
+   status->fetchInFlight = liveStatus.fetchInFlight;
+   return 1;
+}
+
 int isVideoPlayerReady(const VideoPlayer *player) {
    if (!player || !player->running) return 0;
    int readyFrames = 0;

@@ -87,7 +87,7 @@ never calls them never drags the heap in. Each entry below says which side it is
   into a VSH PRX. The engine asks an ordinary server for everything from the read position on, with a
   `Range` header. YouTube's media hosts no longer answer that (the reply is a redirect whose target is
   refused), so for those it asks for one window at a time as a `&range=start-end` query parameter, sized
-  and paced from the stream's own byte rate because they only serve so far ahead of playback.
+  and paced from the stream's own byte rate because they only serve so far ahead of playback. The prefetcher distinguishes a temporarily empty window from a transport failure, retries failed operations within a bounded budget, and latches a source error when recovery is exhausted. The reader can also reopen a failed stream a limited number of times after prolonged starvation; callers receive a terminal error instead of an endless empty read.
 - **network.h** — `getLocalIpv4()` resolves the console's primary IPv4 address.
 - **ftp.h / ftp.c** — the shared anonymous FTP server, run as a singleton (`startFtpServer`,
   `stopFtpServer`, `isFtpServerRunning`, `isFtpPortAvailable`). Usable from both apps and plugins;

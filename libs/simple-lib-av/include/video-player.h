@@ -10,6 +10,13 @@
 
 typedef struct VideoPlayer VideoPlayer;
 
+typedef struct {
+   uint64_t bufferedBytes;
+   uint64_t aheadBytes;
+   int segmentsAhead;
+   int fetchInFlight;
+} VideoLiveBufferStatus;
+
 // Returns and clears a pending TEE safety/fallback notification. The app should
 // consume it on its main thread and persistently turn off experimental 1080p.
 int consumeVideoPlayerTeeDisableRequest(void);
@@ -38,6 +45,7 @@ void         destroyVideoPlayer(VideoPlayer *player);
 const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height);
 
 int   isVideoPlayerReady(const VideoPlayer *player);
+int   getVideoPlayerLiveBufferStatus(const VideoPlayer *player, VideoLiveBufferStatus *status);
 int   isVideoPlayerFailed(const VideoPlayer *player);
 int   getVideoPlayerLiveHttpError(const VideoPlayer *player); // HTTP response status (400+), or 0
 int   getVideoPlayerLiveError(const VideoPlayer *player);     // HTTP status, -1 transport failure, or 0

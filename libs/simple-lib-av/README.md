@@ -62,6 +62,16 @@ time it draws.
 Sync: while an AAC track is playing, the audio drives the clock (frames are timed against how much
 audio has actually reached the speakers). With no audio track, it falls back to wall-clock time.
 
+## Network stream failure reporting
+
+The network-backed player exposes source failures separately from decoder/demuxer failures. Callers can
+query the source error and LIVE-specific error status, allowing an application to renew a network
+session without treating an unsupported or damaged media stream as a transient connection problem.
+A failed source is terminal only after its bounded transport recovery attempts are exhausted; successful
+reads reset the relevant recovery counters. LIVE segment sources also buffer several segments before
+startup and retry transient fetch failures with capped backoff. These policies apply to the streaming
+sources, not to local-file playback.
+
 ## Drawing the frames
 
 `getVideoFrame` returns planar YUV (Y, then U, then V) - not RGB on purpose. Colour conversion runs
