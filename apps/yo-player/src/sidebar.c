@@ -255,14 +255,18 @@ int isSidebarActive(void)
 
 int getSidebarPanelRightEdge(void)
 {
-   int closedOffset = side.screenW * 5 / 100;
-   int travel = side.panelW - SIDEBAR_EDGE_WIDTH - closedOffset;
-   if (travel < 0) travel = 0;
-   int panelX = -(int)((1.0f - side.progress) * travel + 0.5f);
-   int right = panelX + side.panelW;
+   // Reserve the download badge against the panel's fully OPEN geometry.
+   // The panel is flush with the left edge when open, so its right edge is
+   // exactly panelW. This value never changes during the sidebar animation.
+   int right = side.panelW;
    if (right < 0) right = 0;
    if (right > side.screenW) right = side.screenW;
    return right;
+}
+
+int isSidebarFullyOpen(void)
+{
+   return side.targetOpen && !side.animationRunning && side.progress >= 1.0f;
 }
 
 int isSidebarFocused(void) { return side.focused; }

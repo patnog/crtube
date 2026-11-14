@@ -29,7 +29,6 @@
 #include <stdio.h>
 
 #define MAX_QUEUE          16
-#define DISPLAY_TITLE_MAX  15       // maximum visible title characters, including the ellipsis
 #define OVERLAY_TEXT_SIZE  23
 #define DOWNLOAD_TOAST_US  1000000ULL
 #define DOWNLOAD_LIBRARY_DIR CRTUBE_DATA_DIR "/downloads"
@@ -1174,23 +1173,6 @@ static int clipDisplayTitleLimit(char *out, int cap, const char *title, int maxC
    return 1;
 }
 
-static int clipDisplayTitle(char *out, int cap, const char *title)
-{
-   return clipDisplayTitleLimit(out, cap, title, DISPLAY_TITLE_MAX);
-}
-
-// "Downloading "<title>" NN%" with the title limited to 15 visible characters;
-// "(+N)" is appended when more downloads are queued.
-static void formatOverlay(char *out, int cap)
-{
-   char clipped[sizeof dl.activeTitle];
-   int truncated = clipDisplayTitle(clipped, sizeof clipped, dl.activeTitle);
-
-   int queued = dl.count;
-   if (queued > 0) snprintf(out, cap, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
-   else            snprintf(out, cap, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
-}
-
 int consumeDownloadCompletion(void)
 {
    if (!dl.initialized) return 0;
@@ -1222,9 +1204,8 @@ void updateDownloadOverlay(void)
    /* Completions while browsing should not produce a stale toast on a later playback. */
    consumedCompletionSerial = dl.completionSerial;
    if (!dl.active) return;
-   char text[128];
-   formatOverlay(text, sizeof text);
-   setLabelText(&overlayLabel, text);   // only rasterises on a real change
+   // The sidebar badge is formatted lazily by drawDownloadOverlay().
+   // This keeps title fitting and texture work out of the per-frame update path.
 }
 
 static int downloadsThemeIsDark(void)
@@ -1245,34 +1226,56 @@ static uint32_t downloadNotificationBackground(int largePanel)
 
 void drawDownloadOverlay(int screenWidth)
 {
+   static char cachedTitle[sizeof dl.activeTitle];
+   static int cachedPercent = -1;
+   static int cachedQueue = -1;
+   static int cachedWidth = -1;
+
    if (!dl.initialized) return;
-   if (dl.active && isSidebarActive() && overlayLabel.tt.tex.w > 0) {
-      setLabelColor(&overlayLabel, downloadsThemeIsDark() ? 0xFFFFFFFF : 0xFF000000);
+   if (dl.active && isSidebarFullyOpen()) {
       int left = getSidebarPanelRightEdge() + 12;
       int right = screenWidth - 12;
       int available = right - left;
       if (available >= 100) {
-         char clipped[sizeof dl.activeTitle];
-         char text[128];
-         int queued = dl.count;
-         int fitted = 0;
-         for (int chars = 64; chars >= 1; chars--) {
-            int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, chars);
-            if (queued > 0)
-               snprintf(text, sizeof text, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
-            else
-               snprintf(text, sizeof text, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
-            setLabelText(&overlayLabel, text);
-            refreshLabelScale(&overlayLabel);
-            if (overlayLabel.tt.tex.w + 12 <= available) { fitted = 1; break; }
+         int changed = cachedPercent != dl.percent || cachedQueue != dl.count ||
+                       cachedWidth != screenWidth || strcmp(cachedTitle, dl.activeTitle) != 0;
+         if (changed) {
+            char clipped[sizeof dl.activeTitle];
+            char text[128];
+            int queued = dl.count;
+            int low = 1, high = 64, best = 0;
+            while (low <= high) {
+               int chars = (low + high) / 2;
+               int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, chars);
+               if (queued > 0)
+                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
+               else
+                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
+               setLabelText(&overlayLabel, text);
+               if (overlayLabel.tt.tex.w + 12 <= available) { best = chars; low = chars + 1; }
+               else high = chars - 1;
+            }
+            if (best == 0) setLabelText(&overlayLabel, "Downloading...");
+            else {
+               int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, best);
+               if (queued > 0)
+                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
+               else
+                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
+               setLabelText(&overlayLabel, text);
+            }
+            strCopy(cachedTitle, sizeof cachedTitle, dl.activeTitle);
+            cachedPercent = dl.percent;
+            cachedQueue = dl.count;
+            cachedWidth = screenWidth;
          }
-         if (fitted) {
+         if (overlayLabel.tt.tex.w > 0) {
+            setLabelColor(&overlayLabel, downloadsThemeIsDark() ? 0xFFFFFFFF : 0xFF000000);
             int badgeW = overlayLabel.tt.tex.w + 12;
             int badgeH = overlayLabel.tt.tex.h + 8;
             int x = right - badgeW;
-            int y = 12;
-            fillGfxRectangle(x, y, badgeW, badgeH, activeTheme->badgeFill);
-            drawLabelAt(&overlayLabel, x + 6, y + 4);
+            fillGfxRectangle(x, 12, badgeW, badgeH, activeTheme->badgeFill);
+            drawLabelAt(&overlayLabel, x + 6, 16);
          }
       }
    }
