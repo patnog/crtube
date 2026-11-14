@@ -7,6 +7,7 @@
 // the mode: trending / search / channel + sort) and read back the selection; the grid knows nothing about
 // modes. See search.c / home.c for callers.
 
+#include "http.h"              // HttpRequestGroup
 #include "extractor.h"          // SearchResults / SearchResult
 #include "font.h"               // Font
 #include "ui/label.h"           // Label
@@ -81,6 +82,7 @@ typedef struct {
    int              decodeIndex;                           // thumbnail currently decoding asynchronously, or -1
    int              threadActive, reloadPending;
    volatile int     backgroundPaused;
+   HttpRequestGroup requestGroup;
    sys_ppu_thread_t workerTid;
    volatile int     thumbNext, thumbEnd;          // bounded range for the single active thumbnail worker
 

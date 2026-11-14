@@ -15,6 +15,11 @@
 
 typedef struct { const char *name; const char *value; } HttpHeader;
 
+// Groups one navigation operation's HTTP requests without affecting downloads or playback.
+typedef struct { volatile int cancelled; } HttpRequestGroup;
+void setHttpRequestGroup(HttpRequestGroup *group);
+void cancelHttpRequestGroup(HttpRequestGroup *group);
+
 // section: one-shot request/response
 
 // perform one request and write the response BODY (NUL-terminated, truncated to cap-1) into out. method

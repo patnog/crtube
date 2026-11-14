@@ -590,6 +590,7 @@ static void applyMemberOnlyCacheRange(VideoGrid *grid, int start, int end)
 static void thumbFetchThread(uint64_t arg)
 {
    VideoGrid *grid = (VideoGrid *)(uintptr_t)arg;
+   setHttpRequestGroup(&grid->requestGroup);
    uint8_t *buffer = (uint8_t *)malloc(THUMB_CAP);
    if (buffer) {
       HttpHeader headers[] = { { "User-Agent", THUMB_UA }, { "Accept-Encoding", "identity" } };
@@ -690,6 +691,7 @@ static void thumbFetchThread(uint64_t arg)
          if (grid->thumbs[i].state == THUMB_NONE) grid->thumbs[i].state = THUMB_FAILED;
       }
    }
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -907,6 +909,7 @@ static void evictPlaylistThumbCache(VideoGrid *grid)
 static void worker(uint64_t arg)
 {
    VideoGrid *grid = (VideoGrid *)(uintptr_t)arg;
+   setHttpRequestGroup(&grid->requestGroup);
    logInfo("[diag-grid] worker begin grid=%p job=%d stage=%d\n", grid, grid->job, grid->stage);
    switch (grid->job) {
    case JOB_LOAD: {
@@ -1007,11 +1010,13 @@ static void worker(uint64_t arg)
    __sync_synchronize();
    grid->workerDone = 1;
    logInfo("[diag-grid] worker done grid=%p job=%d stage=%d count=%d\n", grid, grid->job, grid->stage, grid->results.count);
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
 static int spawnWorker(VideoGrid *grid)
 {
+   grid->requestGroup.cancelled = 0;
    grid->stopWorker = 0;
    grid->workerDone = 0;
    grid->threadActive = (spawnJoinableThread(&grid->workerTid, worker, (uint64_t)(uintptr_t)grid,
@@ -1612,6 +1617,7 @@ static void changeSource(VideoGrid *grid, GridFetchFn fetch, void *user, const S
    grid->pendingCached = cached;
    if (!grid->threadActive) { applyDeferredSource(grid); return; }
    grid->stopWorker = 1;
+   cancelHttpRequestGroup(&grid->requestGroup);
    grid->reloadPending = 1;
    grid->stage = GRID_RUNNING;
 }
@@ -1621,7 +1627,7 @@ void setGridCached(VideoGrid *grid, const SearchResults *cached, GridFetchFn fet
 
 void stopVideoGrid(VideoGrid *grid)
 {
-   if (grid->threadActive) { grid->stopWorker = 1; joinThread(grid->workerTid); grid->threadActive = 0; }
+   if (grid->threadActive) { grid->stopWorker = 1; cancelHttpRequestGroup(&grid->requestGroup); joinThread(grid->workerTid); grid->threadActive = 0; }
    grid->reloadPending = 0;
    cancelGridDecode(grid);
 }

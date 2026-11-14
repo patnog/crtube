@@ -38,6 +38,19 @@ void setHttpRequestsCancelled(int cancelled)
       transport->setRequestsCancelled(cancelled != 0);
 }
 
+void setHttpRequestGroup(HttpRequestGroup *group)
+{
+   if (transport && transport->setRequestGroup) transport->setRequestGroup(group);
+}
+
+void cancelHttpRequestGroup(HttpRequestGroup *group)
+{
+   if (!group) return;
+   group->cancelled = 1;
+   __sync_synchronize();
+   if (transport && transport->cancelRequestGroup) transport->cancelRequestGroup(group);
+}
+
 int isHttpUrl(const char *path)
 {
    return strncmp(path, "http://", 7) == 0 || strncmp(path, "https://", 8) == 0;

@@ -14,6 +14,7 @@ extern void sysProcessExit(int status);
 #include "updater.h"
 #include "screens/playlist-picker.h"
 #include "extractor.h"
+#include "http.h"
 #include "vfs.h"
 #include "account.h"
 #include "downloads.h"
@@ -187,6 +188,7 @@ static struct {
    volatile int channelLookupPending;
    volatile int channelLookupActive;
    volatile int channelLookupDone;
+   HttpRequestGroup channelLookupGroup;
    int channelLookupResult;
 } home;
 
@@ -564,10 +566,12 @@ static int fetchLocalHistory(SearchResults *out)
 static void channelLookupWorker(uint64_t arg)
 {
    (void)arg;
+   setHttpRequestGroup(&home.channelLookupGroup);
    home.channelLookupResult = getVideoChannelId(home.channelLookupItem.videoId,
                                                  home.channelLookupItem.channelId,
                                                  sizeof home.channelLookupItem.channelId);
    __sync_synchronize();
+   setHttpRequestGroup(NULL);
    home.channelLookupDone = 1;
    exitThread();
 }
@@ -3349,6 +3353,13 @@ static void updateHome(void)
          refreshCurrentCategory();
    }
    if (home.channelLookupPending) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+         cancelHttpRequestGroup(&home.channelLookupGroup);
+         home.channelLookupPending = 0;
+         resumeVideoGrid(&home.grid);
+         logInfo("[home] channel lookup cancelled by CIRCLE\n");
+         return;
+      }
       updateVideoGrid(&home.grid);   // reap the previous grid job; pauseVideoGrid prevents another one
       if (!home.channelLookupActive && !home.channelLookupDone && !home.grid.threadActive) {
          if (spawnJoinableThread(&home.channelLookupTid, channelLookupWorker, 0,
@@ -3380,6 +3391,10 @@ static void updateHome(void)
       return;
    }
 
+   if (home.channelLookupActive && home.channelLookupDone && !home.channelLookupPending) {
+      joinThread(home.channelLookupTid);
+      home.channelLookupActive = 0;
+   }
    if (home.downloadManagerOpen) { updateDownloadManagement(); return; }
    if (home.accountOpen) { updateAccountPanel(); return; }
    if (home.settingsOpen) { updateSettingsPanel(); return; }
@@ -3704,7 +3719,7 @@ static void updateHome(void)
    if (home.category != HOME_PLAYLIST_CONTENTS && home.category != HOME_LOCAL_PLAYLIST_CONTENTS &&
        isPadButtonPressed(PAD_BTN_R3)) { if (!selected->isLive) enqueueDownload(selected); return; }
    // Recommended tiles don't say which channel they are from
-   if (isPadButtonPressed(PAD_BTN_TRIANGLE)) {
+   if (!home.channelLookupActive && isPadButtonPressed(PAD_BTN_TRIANGLE)) {
       logInfo("[diag-triangle] home page=%d selected=%d videoId=%s channelIdLen=%d authorLen=%d\n",
          home.category, home.grid.selected, selected->videoId,
          (int)strlen(selected->channelId), (int)strlen(selected->author));
@@ -3713,6 +3728,7 @@ static void updateHome(void)
          logInfo("[home] Triangle: scheduling async channel lookup for video=%s\n", channelItem.videoId);
          home.channelLookupItem = channelItem;
          home.channelLookupResult = -1;
+         home.channelLookupGroup.cancelled = 0;
          home.channelLookupDone = 0;
          home.channelLookupActive = 0;
          home.channelLookupPending = 1;
@@ -4069,6 +4085,7 @@ static void resumeHome(void)
 static void termHome(void)
 {
    if (home.channelLookupActive) {
+      cancelHttpRequestGroup(&home.channelLookupGroup);
       joinThread(home.channelLookupTid);
       home.channelLookupActive = 0;
    }

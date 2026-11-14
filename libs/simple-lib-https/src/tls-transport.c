@@ -36,6 +36,7 @@ extern const size_t TLS_TRUST_ANCHORS_COUNT;
 
 struct TlsConn {
    int                    socketHandle;
+   volatile int          *requestGroup;
    br_ssl_client_context  client;
    br_x509_minimal_context x509;
    br_sslio_context       io;
@@ -70,6 +71,10 @@ static int           socketLockReady;
 static volatile int  requestsCancelled;
 #define ACTIVE_SOCKET_MAX 64
 static int activeSockets[ACTIVE_SOCKET_MAX];
+static volatile int *activeSocketGroups[ACTIVE_SOCKET_MAX];
+#define REQUEST_GROUP_BINDINGS 32
+typedef struct { uintptr_t stackKey; volatile int *group; } RequestGroupBinding;
+static RequestGroupBinding requestGroupBindings[REQUEST_GROUP_BINDINGS];
 static int activeSocketCount;
 static unsigned long socketCreatedCount;
 static unsigned long socketClosedCount;
@@ -81,6 +86,7 @@ static int activeConnectionCount;
 static unsigned long connectionCreatedCount;
 static unsigned long connectionClosedCount;
 static unsigned long connectionCloseInvalidCount;
+static int socketGroupCancelled(int handle);
 
 static int getActiveSocketCount(void)
 {
@@ -138,12 +144,12 @@ static void resolverWorker(uint64_t arg)
    exitThread();
 }
 
-static int resolveHostWithTimeout(const char *host, struct in_addr *address)
+static int resolveHostWithTimeout(const char *host, struct in_addr *address, volatile int *group)
 {
    if (!resolveLockReady || !resolverJobLockReady) return -1;
    uint64_t deadline = sys_time_get_system_time() + (uint64_t)DNS_TIMEOUT_MS * 1000ull;
    for (;;) {
-      if (requestsCancelled) {
+      if (requestsCancelled || (group && *group)) {
          lock(&resolverJobLock);
          if (resolverJobState == 1) resolverJobState = 3;
          else if (resolverJobState == 2) resolverJobState = 0;
@@ -208,7 +214,7 @@ static int waitSocketReady(int handle, int writing, unsigned timeoutMs, short *r
    descriptor.events = writing ? POLLOUT : POLLIN;
    descriptor.revents = 0;
 
-   while (!requestsCancelled) {
+   while (!requestsCancelled && !socketGroupCancelled(handle)) {
       uint64_t now = sys_time_get_system_time();
       if (now >= deadline) return 0;
 
@@ -237,13 +243,78 @@ static int waitSocketReady(int handle, int writing, unsigned timeoutMs, short *r
    return -1;
 }
 
+static volatile int *currentRequestGroup(void)
+{
+   sys_ppu_thread_stack_t info;
+   if (sysThreadGetStackInformation(&info) != 0) return NULL;
+   uintptr_t stackKey = (uintptr_t)info.addr;
+   volatile int *group = NULL;
+   if (!socketLockReady) return NULL;
+   lock(&socketLock);
+   for (int i = 0; i < REQUEST_GROUP_BINDINGS; i++)
+      if (requestGroupBindings[i].stackKey == stackKey) { group = requestGroupBindings[i].group; break; }
+   unlock(&socketLock);
+   return group;
+}
+
+volatile int *getTlsRequestGroup(void) { return currentRequestGroup(); }
+
+void setTlsRequestGroup(volatile int *cancelled)
+{
+   sys_ppu_thread_stack_t info;
+   if (sysThreadGetStackInformation(&info) != 0 || !socketLockReady) return;
+   uintptr_t stackKey = (uintptr_t)info.addr;
+   lock(&socketLock);
+   int slot = -1, freeSlot = -1;
+   for (int i = 0; i < REQUEST_GROUP_BINDINGS; i++) {
+      if (requestGroupBindings[i].stackKey == stackKey) { slot = i; break; }
+      if (!requestGroupBindings[i].stackKey && freeSlot < 0) freeSlot = i;
+   }
+   if (slot < 0) slot = freeSlot;
+   if (slot >= 0) {
+      requestGroupBindings[slot].stackKey = cancelled ? stackKey : 0;
+      requestGroupBindings[slot].group = cancelled;
+   }
+   unlock(&socketLock);
+}
+
+static int socketGroupCancelled(int handle)
+{
+   if (!socketLockReady) return 0;
+   int cancelled = 0;
+   lock(&socketLock);
+   for (int i = 0; i < activeSocketCount; i++) {
+      if (activeSockets[i] == handle) {
+         cancelled = activeSocketGroups[i] && *activeSocketGroups[i];
+         break;
+      }
+   }
+   unlock(&socketLock);
+   return cancelled;
+}
+
+void cancelTlsRequestGroup(volatile int *cancelled)
+{
+   if (!cancelled) return;
+   *cancelled = 1;
+   __sync_synchronize();
+   if (!socketLockReady) return;
+   lock(&socketLock);
+   for (int i = 0; i < activeSocketCount; i++)
+      if (activeSocketGroups[i] == cancelled) netShutdown(activeSockets[i], SHUT_RDWR);
+   unlock(&socketLock);
+}
+
 static int registerSocket(int handle)
 {
    if (!socketLockReady) return 0;
+   volatile int *group = currentRequestGroup();
    lock(&socketLock);
-   int accepted = !requestsCancelled && activeSocketCount < ACTIVE_SOCKET_MAX;
+   int accepted = !requestsCancelled && !(group && *group) && activeSocketCount < ACTIVE_SOCKET_MAX;
    if (accepted) {
-      activeSockets[activeSocketCount++] = handle;
+      activeSockets[activeSocketCount] = handle;
+      activeSocketGroups[activeSocketCount] = group;
+      activeSocketCount++;
       socketCreatedCount++;
       if (activeSocketCount > activeSocketHighWater) activeSocketHighWater = activeSocketCount;
    }
@@ -258,7 +329,10 @@ static int unregisterSocket(int handle)
    lock(&socketLock);
    for (int i = 0; i < activeSocketCount; i++) {
       if (activeSockets[i] != handle) continue;
-      activeSockets[i] = activeSockets[--activeSocketCount];
+      int last = --activeSocketCount;
+      activeSockets[i] = activeSockets[last];
+      activeSocketGroups[i] = activeSocketGroups[last];
+      activeSocketGroups[last] = NULL;
       found = 1;
       break;
    }
@@ -316,6 +390,16 @@ static int unregisterTlsConnection(TlsConn *conn)
    return found;
 }
 
+void setTlsConnRequestGroup(TlsConn *conn, volatile int *cancelled)
+{
+   if (!conn || !socketLockReady) return;
+   conn->requestGroup = cancelled;
+   lock(&socketLock);
+   for (int i = 0; i < activeSocketCount; i++)
+      if (activeSockets[i] == conn->socketHandle) { activeSocketGroups[i] = cancelled; break; }
+   unlock(&socketLock);
+}
+
 void setTlsRequestsCancelled(int cancelled)
 {
    if (!socketLockReady) { requestsCancelled = cancelled != 0; return; }
@@ -328,7 +412,7 @@ void setTlsRequestsCancelled(int cancelled)
 
 static int readSocket(int handle, void *buffer, int length)
 {
-   for (unsigned waited = 0; waited < SOCKET_TIMEOUT * 1000u && !requestsCancelled; waited += SOCKET_POLL_MS) {
+   for (unsigned waited = 0; waited < SOCKET_TIMEOUT * 1000u && !requestsCancelled && !socketGroupCancelled(handle); waited += SOCKET_POLL_MS) {
       int got = netRecv(handle, buffer, length, 0);
       if (got > 0) return got;
       if (got == 0) return -1;
@@ -341,7 +425,7 @@ static int readSocket(int handle, void *buffer, int length)
 
 static int writeSocket(int handle, const void *data, int length)
 {
-   for (unsigned waited = 0; waited < SOCKET_TIMEOUT * 1000u && !requestsCancelled; waited += SOCKET_POLL_MS) {
+   for (unsigned waited = 0; waited < SOCKET_TIMEOUT * 1000u && !requestsCancelled && !socketGroupCancelled(handle); waited += SOCKET_POLL_MS) {
       int sent = netSend(handle, data, length, 0);
       if (sent > 0) return sent;
       if (sent == 0) return -1;
@@ -391,7 +475,8 @@ static void closeSocket(int handle)
 // resolve host and open a TCP connection to port 443. returns the socket, or -1.
 static int connectHost(const char *host, int port)
 {
-   if (requestsCancelled) return -1;
+   volatile int *group = currentRequestGroup();
+   if (requestsCancelled || (group && *group)) return -1;
    struct sockaddr_in address;
    memset(&address, 0, sizeof address);
    address.sin_family = AF_INET;
@@ -400,7 +485,7 @@ static int connectHost(const char *host, int port)
    // gethostbyname is isolated on a detached worker so an unresponsive resolver cannot block a player
    // or teardown thread. The caller has a hard wait limit and only one resolver worker may exist.
    uint64_t dnsStartUs = sys_time_get_system_time();
-   int resolvedOk = resolveHostWithTimeout(host, &address.sin_addr) == 0;
+   int resolvedOk = resolveHostWithTimeout(host, &address.sin_addr, group) == 0;
    uint64_t dnsEndUs = sys_time_get_system_time();
    if (!resolvedOk) {
       logError("[tls-connect-timing] host=%s dnsMs=%llu result=failed\n", host,
@@ -408,7 +493,7 @@ static int connectHost(const char *host, int port)
       logError("[tls-diag] dns failed host=%s cancelled=%d\n", host, requestsCancelled);
       return -1;
    }
-   if (requestsCancelled) return -1;
+   if (requestsCancelled || (group && *group)) return -1;
 
    int socketHandle = netSocket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
    if (socketHandle < 0) {
@@ -449,7 +534,7 @@ static int connectHost(const char *host, int port)
       return -1;
    }
    int connected = connectRc == 0;
-   for (unsigned waited = 0; !connected && waited < CONNECT_TIMEOUT_MS && !requestsCancelled; waited += SOCKET_POLL_MS) {
+   for (unsigned waited = 0; !connected && waited < CONNECT_TIMEOUT_MS && !requestsCancelled && !socketGroupCancelled(socketHandle); waited += SOCKET_POLL_MS) {
       short readyEvents = 0;
       int ready = waitSocketReady(socketHandle, 1, SOCKET_POLL_MS, &readyEvents);
       if (ready < 0) break;
@@ -531,6 +616,8 @@ TlsConn *openTlsConn(const char *host)
       return NULL;
    }
    conn->socketHandle = socketHandle;
+   conn->requestGroup = currentRequestGroup();
+   if (conn->requestGroup && *conn->requestGroup) { getTlsChannel()->close(socketHandle); free(conn); return NULL; }
    if (!registerTlsConnection(conn)) {
       logError("[tls-audit] connection registry full conn=%p handle=%d\n", conn, socketHandle);
       getTlsChannel()->close(socketHandle);
@@ -686,6 +773,7 @@ int getTlsStatusLine(TlsConn *conn, char *out, int cap)
 // the server agreed (HTTP/1.0 keep-alive is opt-in: the server must echo Connection: keep-alive).
 int isTlsReusable(TlsConn *conn)
 {
+   if (!conn || (conn->requestGroup && *conn->requestGroup)) return 0;
    if (!conn->poolAllowed || !conn->keepAlive || conn->remaining != 0) return 0;
    char connection[48];
    if (getTlsHeader(conn, "connection", connection, sizeof connection) != 0) return 0;

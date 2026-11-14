@@ -33,6 +33,10 @@ void bindTlsChannel(const TlsChannel *channel);
 // looks names up itself.
 void initTlsResolver(void);
 void setTlsRequestsCancelled(int cancelled); // interrupt active sockets and gate new TLS connections
+void setTlsRequestGroup(volatile int *cancelled);
+volatile int *getTlsRequestGroup(void);
+void cancelTlsRequestGroup(volatile int *cancelled);
+void setTlsConnRequestGroup(TlsConn *conn, volatile int *cancelled);
 
 // resolve host and run a full TLS 1.2 client handshake (cert + hostname validated against the bundled
 // roots, SNI set) to host:443. returns the connection, or NULL on resolve/connect/handshake failure.

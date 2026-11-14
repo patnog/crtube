@@ -36,6 +36,10 @@ typedef struct {
    // interrupt current requests and reject new ones until cleared. optional - used when a screen
    // leaves while its worker threads are blocked in network I/O.
    void (*setRequestsCancelled)(int cancelled);
+
+   // Optional per-operation cancellation; unlike setRequestsCancelled this never touches other requests.
+   void (*setRequestGroup)(HttpRequestGroup *group);
+   void (*cancelRequestGroup)(HttpRequestGroup *group);
 } HttpTransport;
 
 // wire a transport into http.c. an `override` bind claims the slot permanently (modern wins over system

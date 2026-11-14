@@ -112,10 +112,13 @@ static TlsConn *sendReusable(const char *host, const char *path, const char *met
                             int keepAlive, int liveHttp11, const char *headerBlock,
                             const void *body, int bodyLen, int *status, uint64_t *total)
 {
+   volatile int *requestGroup = getTlsRequestGroup();
+   if (requestGroup && *requestGroup) return NULL;
    for (int attempt = 0; attempt < 2; attempt++) {
       uint64_t connectStartUs = sys_time_get_system_time();
       TlsConn *conn = (keepAlive && !liveHttp11 && attempt == 0) ? checkoutConn(host) : NULL;
       int reused = conn != NULL;
+      if (reused) setTlsConnRequestGroup(conn, getTlsRequestGroup());
       if (!reused) {
          logInfo("[tls] opening a new connection to %s\n", host);
          conn = openTlsConn(host);
@@ -259,7 +262,7 @@ static int64_t readBearssl(void *handle, void *buffer, uint64_t cap)
 static void closeBearssl(void *handle)
 {
    TlsConn *conn = handle;
-   if (isTlsReusable(conn)) checkinConn(conn);   // park it for the next request to this host
+   if (isTlsReusable(conn)) { setTlsConnRequestGroup(conn, NULL); checkinConn(conn); }   // park it for the next request to this host
    else closeTlsConn(conn);
 }
 
@@ -283,8 +286,19 @@ static void setRequestsCancelledBearssl(int cancelled)
    setTlsRequestsCancelled(cancelled);
 }
 
+static void setRequestGroupBearssl(HttpRequestGroup *group)
+{
+   setTlsRequestGroup(group ? &group->cancelled : NULL);
+}
+
+static void cancelRequestGroupBearssl(HttpRequestGroup *group)
+{
+   if (group) cancelTlsRequestGroup(&group->cancelled);
+}
+
 static const HttpTransport BEARSSL_TRANSPORT = {
-   openBearssl, readBearssl, closeBearssl, shutdownBearssl, getHeaderBearssl, setRequestsCancelledBearssl
+   openBearssl, readBearssl, closeBearssl, shutdownBearssl, getHeaderBearssl, setRequestsCancelledBearssl,
+   setRequestGroupBearssl, cancelRequestGroupBearssl
 };
 
 void initModernHttp(void)

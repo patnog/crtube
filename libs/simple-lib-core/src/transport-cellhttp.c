@@ -196,7 +196,7 @@ static void shutdownCell(void)
    unlockNet();
 }
 
-static const HttpTransport CELLHTTP_TRANSPORT = { openCell, readCell, closeCell, shutdownCell, NULL, NULL };
+static const HttpTransport CELLHTTP_TRANSPORT = { openCell, readCell, closeCell, shutdownCell, NULL, NULL, NULL, NULL };
 
 void initSystemHttp(void)
 {
