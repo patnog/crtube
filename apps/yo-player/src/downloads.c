@@ -2,6 +2,7 @@
 
 #include "app-config.h"
 #include "downloads.h"
+#include "sidebar.h"
 #include "stream-select.h"      // pickBestVideo / pickBestAudio
 #include "mux-mp4.h"
 #include "demux.h"              // VideoDemuxer + readVideoAu / readAudioAu
@@ -1147,11 +1148,12 @@ void enqueuePlaybackDownload(const SearchResult *item, const char *audioTrackId,
 // ---- overlay ----
 
 // Clip by UTF-8 code points, reserving three of the 15 visible characters for "...".
-static int clipDisplayTitle(char *out, int cap, const char *title)
+static int clipDisplayTitleLimit(char *out, int cap, const char *title, int maxChars)
 {
    const unsigned char *p = (const unsigned char *)title;
    int chars = 0;
-   while (*p && chars < DISPLAY_TITLE_MAX) {
+   if (maxChars < 1) maxChars = 1;
+   while (*p && chars < maxChars) {
       unsigned char c = *p;
       p += (c < 0x80) ? 1 : ((c & 0xE0) == 0xC0) ? 2 : ((c & 0xF0) == 0xE0) ? 3 : ((c & 0xF8) == 0xF0) ? 4 : 1;
       chars++;
@@ -1159,7 +1161,8 @@ static int clipDisplayTitle(char *out, int cap, const char *title)
    if (!*p) { strCopy(out, cap, title); return 0; }
 
    p = (const unsigned char *)title;
-   for (int i = 0; i < DISPLAY_TITLE_MAX - 3 && *p; i++) {
+   int keepChars = maxChars > 3 ? maxChars - 3 : 1;
+   for (int i = 0; i < keepChars && *p; i++) {
       unsigned char c = *p;
       p += (c < 0x80) ? 1 : ((c & 0xE0) == 0xC0) ? 2 : ((c & 0xF0) == 0xE0) ? 3 : ((c & 0xF8) == 0xF0) ? 4 : 1;
    }
@@ -1169,6 +1172,11 @@ static int clipDisplayTitle(char *out, int cap, const char *title)
    memcpy(out, title, bytes);
    out[bytes] = 0;
    return 1;
+}
+
+static int clipDisplayTitle(char *out, int cap, const char *title)
+{
+   return clipDisplayTitleLimit(out, cap, title, DISPLAY_TITLE_MAX);
 }
 
 // "Downloading "<title>" NN%" with the title limited to 15 visible characters;
@@ -1238,14 +1246,35 @@ static uint32_t downloadNotificationBackground(int largePanel)
 void drawDownloadOverlay(int screenWidth)
 {
    if (!dl.initialized) return;
-   if (dl.active && overlayLabel.tt.tex.w > 0) {
+   if (dl.active && isSidebarActive() && overlayLabel.tt.tex.w > 0) {
       setLabelColor(&overlayLabel, downloadsThemeIsDark() ? 0xFFFFFFFF : 0xFF000000);
-      refreshLabelScale(&overlayLabel);
-      int badgeW = overlayLabel.tt.tex.w + 12, badgeH = OVERLAY_TEXT_SIZE + 8;
-      int screenHeight = getGfxScreenHeight();
-      int x = 12, y = screenHeight - badgeH - 10;
-      fillGfxRectangle(x, y, badgeW, badgeH, activeTheme->badgeFill);
-      drawLabelAt(&overlayLabel, x + 6, y + 4);
+      int left = getSidebarPanelRightEdge() + 12;
+      int right = screenWidth - 12;
+      int available = right - left;
+      if (available >= 100) {
+         char clipped[sizeof dl.activeTitle];
+         char text[128];
+         int queued = dl.count;
+         int fitted = 0;
+         for (int chars = 64; chars >= 1; chars--) {
+            int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, chars);
+            if (queued > 0)
+               snprintf(text, sizeof text, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
+            else
+               snprintf(text, sizeof text, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
+            setLabelText(&overlayLabel, text);
+            refreshLabelScale(&overlayLabel);
+            if (overlayLabel.tt.tex.w + 12 <= available) { fitted = 1; break; }
+         }
+         if (fitted) {
+            int badgeW = overlayLabel.tt.tex.w + 12;
+            int badgeH = overlayLabel.tt.tex.h + 8;
+            int x = right - badgeW;
+            int y = 12;
+            fillGfxRectangle(x, y, badgeW, badgeH, activeTheme->badgeFill);
+            drawLabelAt(&overlayLabel, x + 6, y + 4);
+         }
+      }
    }
    if (dl.spacePrompt && downloadToastLabel.tt.tex.w > 0) {
       setLabelColor(&downloadToastLabel, activeTheme->textPrimary);

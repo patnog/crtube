@@ -253,6 +253,18 @@ int isSidebarActive(void)
    return side.progress > 0.0f || side.targetOpen || side.animationRunning;
 }
 
+int getSidebarPanelRightEdge(void)
+{
+   int closedOffset = side.screenW * 5 / 100;
+   int travel = side.panelW - SIDEBAR_EDGE_WIDTH - closedOffset;
+   if (travel < 0) travel = 0;
+   int panelX = -(int)((1.0f - side.progress) * travel + 0.5f);
+   int right = panelX + side.panelW;
+   if (right < 0) right = 0;
+   if (right > side.screenW) right = side.screenW;
+   return right;
+}
+
 int isSidebarFocused(void) { return side.focused; }
 
 static void moveSelection(int direction)

@@ -45,12 +45,12 @@ extern void sysProcessExit(int status);
 #define HEADER_Y      54
 #define TITLE_SIZE    30
 #define GRID_TOP      100
-#define HINTS_BOTTOM     88       // standard single-row hint top offset from the screen bottom
-#define SD_HINTS_BOTTOM 100       // lower hint-row top offset; keeps 2.0x glyphs inside TV safe area
+#define HINTS_BOTTOM     42       // standard single-row hint top offset from the screen bottom
+#define SD_HINTS_BOTTOM  76       // lower hint-row top offset; keeps 2.0x glyphs inside TV safe area
 #define SD_HINT_ROW_GAP   8
 #define GRID_BOTTOM_GAP  24
 #define SD_GRID_BOTTOM_GAP 20
-#define MAX_HINT_ROWS 3
+#define MAX_HINT_ROWS 2
 #define HINT_ROW_GAP 8
 #define SD_MAX_SCALE    1.5f
 #define SD_HEADER_Y      54
@@ -2883,7 +2883,7 @@ static void initHome(void)
    homeFooterRows = getButtonHintsFitRows(&hints, home.screenW, MAX_HINT_ROWS);
    if (homeFooterRows < 1) homeFooterRows = 1;
    float hintGlyphFinal = HINT_GLYPH_H * (sdHintsTwoRows ? SD_MAX_SCALE : 1.0f);
-   int footerRowStep = (int)(hintGlyphFinal + HINT_ROW_GAP + 0.5f);
+   int footerRowStep = (int)((hintGlyphFinal + HINT_ROW_GAP) * hints.fitScale + 0.5f);
    homeFooterTopY = homeFooterBottomY - (homeFooterRows - 1) * footerRowStep;
 
    int panelY = (home.screenH - getAccountPanelHeight()) / 2;
@@ -3957,8 +3957,8 @@ static void drawHome(void)
    drawPlaylistShuffleBadge();
    if (home.category == HOME_DOWNLOADS) drawDownloadSpaceStatus();
    drawButtonHintsFitted(&hints, home.screenW, homeFooterBottomY, HINT_ROW_GAP, MAX_HINT_ROWS);
-   drawDownloadOverlay(home.screenW);
    if (!home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen) drawSidebar();
+   drawDownloadOverlay(home.screenW);
    if (home.accountOpen) drawAccountPanel();
    if (home.settingsOpen) {
       if (updateSettingsOpen) drawUpdateSettingsPanel();

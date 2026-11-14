@@ -29,6 +29,8 @@ typedef struct {
    int      count;
    int      stableLayout;   // keep each hint's anchor fixed at the maximum UI scale
    float    renderedUiScale; // last UI scale used to size the captions
+   float    fitScale;         // uniform downscale used when two rows need to fit horizontally
+   float    renderedFitScale;
 } ButtonHints;
 
 void initButtonHints(ButtonHints *bar, Font *font, int y, int glyphHeight, int captionSize, uint32_t captionColor);

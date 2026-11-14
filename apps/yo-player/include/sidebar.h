@@ -29,6 +29,7 @@ void refreshSidebarThemeColors(void);
 void openSidebar(void);
 void setSidebarCurrent(SidebarItem item);
 int  isSidebarActive(void);
+int  getSidebarPanelRightEdge(void);
 int  isSidebarFocused(void);
 // LEFT opens from the first grid column; UP/DOWN navigate; CROSS commits;
 // LEFT, RIGHT or CIRCLE closes the menu.

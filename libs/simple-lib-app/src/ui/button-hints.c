@@ -57,20 +57,22 @@ static float hintCurrentScale(void)
 
 static int hintGlyphSize(const ButtonHints *bar, int baseSize)
 {
-   (void)bar;
-   if (!isGfxSdVideoOutput()) return baseSize;
-   return (int)(baseSize * 1.5f / hintCurrentScale() + 0.5f);
+   float fit = bar->fitScale > 0.0f ? bar->fitScale : 1.0f;
+   if (!isGfxSdVideoOutput()) return (int)(baseSize * fit + 0.5f);
+   return (int)(baseSize * 1.5f * fit / hintCurrentScale() + 0.5f);
 }
 
 // Captions use the normal transformed draw path. Compensate their raster size
 // for the current UI zoom so their final on-screen size remains 1.5x.
 static void refreshHintCaptionSizes(ButtonHints *bar)
 {
-   if (!isGfxSdVideoOutput()) return;
-   float scale = hintCurrentScale();
-   if (bar->renderedUiScale == scale) return;
+   float scale = isGfxSdVideoOutput() ? hintCurrentScale() : 1.0f;
+   float fit = bar->fitScale > 0.0f ? bar->fitScale : 1.0f;
+   if (bar->renderedUiScale == scale && bar->renderedFitScale == fit) return;
 
-   int size = (int)(bar->captionSize * 1.5f / scale + 0.5f);
+   int size = isGfxSdVideoOutput()
+      ? (int)(bar->captionSize * 1.5f * fit / scale + 0.5f)
+      : (int)(bar->captionSize * fit + 0.5f);
    if (size < 1) size = 1;
    for (int i = 0; i < bar->count; i++) {
       Label *caption = &bar->hints[i].caption;
@@ -82,19 +84,22 @@ static void refreshHintCaptionSizes(ButtonHints *bar)
       setLabelText(caption, text);
    }
    bar->renderedUiScale = scale;
+   bar->renderedFitScale = fit;
 }
 
 static int hintIconGap(const ButtonHints *bar)
 {
    float scale = hintScale(bar);
-   return bar->stableLayout ? (int)(ICON_GAP / scale + 0.5f) : ICON_GAP;
+   float fit = bar->fitScale > 0.0f ? bar->fitScale : 1.0f;
+   return bar->stableLayout ? (int)(ICON_GAP * fit / scale + 0.5f) : (int)(ICON_GAP * fit + 0.5f);
 }
 
 static int hintRowGap(const ButtonHints *bar, int paired)
 {
    int base = paired ? PAIR_GAP : (bar->gap > 0 ? bar->gap : HINT_GAP);
    float scale = hintScale(bar);
-   return bar->stableLayout ? (int)(base / scale + 0.5f) : base;
+   float fit = bar->fitScale > 0.0f ? bar->fitScale : 1.0f;
+   return bar->stableLayout ? (int)(base * fit / scale + 0.5f) : (int)(base * fit + 0.5f);
 }
 
 static int hintDrawY(const ButtonHints *bar)
@@ -170,7 +175,7 @@ void drawButtonHints(ButtonHints *bar, int screenWidth)
    drawButtonHintsAt(bar, (screenWidth - total) / 2);
 }
 
-#define HINT_FIT_MAX_ROWS 3
+#define HINT_FIT_MAX_ROWS 2
 
 typedef struct {
    int indices[MAX_BUTTON_HINTS];
@@ -191,8 +196,8 @@ static int hintFitRowWidth(const ButtonHints *bar, const int *widths,
    return total;
 }
 
-static int buildHintFitLayout(ButtonHints *bar, int screenWidth, int maxRows,
-                              HintFitLayout *layout)
+static int buildHintFitLayoutAtScale(ButtonHints *bar, int screenWidth, int maxRows,
+                                     HintFitLayout *layout)
 {
    int widths[MAX_BUTTON_HINTS];
    int visible = 0;
@@ -261,6 +266,32 @@ static int buildHintFitLayout(ButtonHints *bar, int screenWidth, int maxRows,
    return chosen;
 }
 
+static int buildHintFitLayout(ButtonHints *bar, int screenWidth, int maxRows,
+                              HintFitLayout *layout)
+{
+   if (!bar) return 0;
+   if (maxRows < 1) maxRows = 1;
+   if (maxRows > 2) maxRows = 2;
+
+   // First preserve the configured size. If two rows still exceed the safe
+   // horizontal area, progressively scale glyphs, captions and gaps together.
+   float initialFit = bar->fitScale > 0.0f ? bar->fitScale : 1.0f;
+   for (int step = 0; step <= 18; step++) {
+      bar->fitScale = initialFit - step * 0.05f;
+      if (bar->fitScale < 0.1f) bar->fitScale = 0.1f;
+      bar->renderedUiScale = 0.0f;
+      refreshHintCaptionSizes(bar);
+      int rows = buildHintFitLayoutAtScale(bar, screenWidth, maxRows, layout);
+      int widest = 0;
+      for (int i = 0; i < rows; i++)
+         if (layout->widths[i] > widest) widest = layout->widths[i];
+      float scale = hintCurrentScale();
+      int capacity = (int)(screenWidth / scale + 0.5f);
+      if (widest <= capacity || step == 18 || bar->fitScale <= 0.1f) return rows;
+   }
+   return 0;
+}
+
 int getButtonHintsFitRows(ButtonHints *bar, int screenWidth, int maxRows)
 {
    HintFitLayout layout;
@@ -277,7 +308,8 @@ int drawButtonHintsFitted(ButtonHints *bar, int screenWidth, int bottomY, int ro
    float scale = hintCurrentScale();
    float centerY = getGfxScreenHeight() * 0.5f;
    int glyphHeight = (int)(hintGlyphSize(bar, bar->glyphHeight) * scale + 0.5f);
-   int rowStep = glyphHeight + rowGap;
+   float fit = bar->fitScale > 0.0f ? bar->fitScale : 1.0f;
+   int rowStep = glyphHeight + (int)(rowGap * fit + 0.5f);
    int rowOffset = 0;
    for (int row = 0; row < rows; row++) {
       int targetY = bottomY - (rows - 1 - row) * rowStep;

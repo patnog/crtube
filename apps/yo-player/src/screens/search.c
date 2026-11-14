@@ -33,13 +33,13 @@
 #define SORT_TEXT_SIZE    20
 #define HISTORY_ROW_H     46
 #define HISTORY_ROW_GAP    4
-#define HINTS_BOTTOM      88
+#define HINTS_BOTTOM      42
 #define HINT_GLYPH_H     28
 #define HINT_TEXT        22
-#define SD_HINTS_BOTTOM 100
+#define SD_HINTS_BOTTOM 76
 #define HINT_ROW_GAP      8
 #define GRID_BOTTOM_GAP  24
-#define MAX_HINT_ROWS     3
+#define MAX_HINT_ROWS     2
 static const char *SortNames[SORT_COUNT] = { "Relevance", "Views", "Newest" };
 static const char *ChannelSortNames[CHANNEL_SORT_COUNT] = { "Latest", "Popular", "Oldest" };
 
@@ -463,11 +463,13 @@ static void initSearch(void)
    setButtonHintsStableLayout(&hints, 1);
    // Measure the longest dynamic captions so later mode changes cannot need an unreserved row.
    setButtonHintCaption(&hints, crossHint, "Open playlist");
+   setButtonHintCaption(&hints, squareHint, "Watch Later / Playlist (hold)");
    setButtonHintCaption(&hints, triangleHint, "Unsubscribe");
    search.footerRows = getButtonHintsFitRows(&hints, search.screenW, MAX_HINT_ROWS);
+   setButtonHintCaption(&hints, squareHint, "Watch Later");
    if (search.footerRows < 1) search.footerRows = 1;
    float hintGlyphFinal = HINT_GLYPH_H * (isGfxSdVideoOutput() ? 1.5f : search.uiScale);
-   int footerRowStep = (int)(hintGlyphFinal + HINT_ROW_GAP + 0.5f);
+   int footerRowStep = (int)((hintGlyphFinal + HINT_ROW_GAP) * hints.fitScale + 0.5f);
    search.footerTopY = search.footerBottomY - (search.footerRows - 1) * footerRowStep;
 
    search.historyVisibleRows = (search.footerTopY - search.historyTop - 12) /
@@ -897,8 +899,8 @@ static void drawSearch(void)
    }
 
    drawButtonHintsFitted(&hints, search.screenW, search.footerBottomY, HINT_ROW_GAP, MAX_HINT_ROWS);
-   drawDownloadOverlay(search.screenW);
    drawSidebar();
+   drawDownloadOverlay(search.screenW);
 }
 
 static void suspendSearch(void)
