@@ -402,6 +402,39 @@ static void publishVideoDiag(VideoPlayer *player, uint64_t nowUs)
    unlock(&player->lock);
 }
 
+typedef struct {
+   uint64_t windowStartUs, lastLoopStartUs;
+   uint64_t loops, produced, empty, errors, ringFull;
+   uint64_t intervalMaxUs, cycleUs, cycleMaxUs;
+   uint64_t claimUs, claimMaxUs, decodeUs, decodeMaxUs;
+   uint64_t publishLockUs, publishLockMaxUs, ringWaitUs;
+} DecodeThreadDiag;
+
+static void reportDecodeThreadDiag(DecodeThreadDiag *d, uint64_t nowUs)
+{
+   if (!d->windowStartUs) d->windowStartUs = nowUs;
+   if (nowUs - d->windowStartUs < 5000000ull) return;
+   logInfo("[video-thread-diag] spanMs=%llu loops=%llu avgCycleUs=%llu maxCycleUs=%llu maxLoopGapUs=%llu claimAvgUs=%llu claimMaxUs=%llu decodeAvgUs=%llu decodeMaxUs=%llu publishLockAvgUs=%llu publishLockMaxUs=%llu produced=%llu empty=%llu errors=%llu ringFull=%llu ringWaitMs=%llu\n",
+           (unsigned long long)((nowUs-d->windowStartUs)/1000ull),
+           (unsigned long long)d->loops,
+           (unsigned long long)(d->loops ? d->cycleUs/d->loops : 0),
+           (unsigned long long)d->cycleMaxUs, (unsigned long long)d->intervalMaxUs,
+           (unsigned long long)(d->loops ? d->claimUs/d->loops : 0),
+           (unsigned long long)d->claimMaxUs,
+           (unsigned long long)(d->loops ? d->decodeUs/d->loops : 0),
+           (unsigned long long)d->decodeMaxUs,
+           (unsigned long long)(d->loops ? d->publishLockUs/d->loops : 0),
+           (unsigned long long)d->publishLockMaxUs,
+           (unsigned long long)d->produced, (unsigned long long)d->empty,
+           (unsigned long long)d->errors, (unsigned long long)d->ringFull,
+           (unsigned long long)(d->ringWaitUs/1000ull));
+   d->windowStartUs = nowUs;
+   d->loops = d->produced = d->empty = d->errors = d->ringFull = 0;
+   d->intervalMaxUs = d->cycleUs = d->cycleMaxUs = 0;
+   d->claimUs = d->claimMaxUs = d->decodeUs = d->decodeMaxUs = 0;
+   d->publishLockUs = d->publishLockMaxUs = d->ringWaitUs = 0;
+}
+
 // Time every decoder poll, including polls that return no picture. This separates decoder latency
 // from time spent waiting for transport data or for an input queue slot.
 static int diagGetFrame(VideoPlayer *player, uint8_t *yuv, int *width, int *height, uint64_t *pts)
@@ -605,23 +638,58 @@ static void decodeThread(uint64_t arg)
 {
    VideoPlayer *player = (VideoPlayer *)(uintptr_t)arg;
    int startedAtKeyframe = 0;
+   DecodeThreadDiag diag = {0};
 
    while (player->running) {
-      if (player->seekRequestNs >= 0) { performSeek(player); startedAtKeyframe = 0; continue; }
+      uint64_t loopStartUs = sys_time_get_system_time();
+      if (diag.lastLoopStartUs && loopStartUs >= diag.lastLoopStartUs) {
+         uint64_t intervalUs = loopStartUs - diag.lastLoopStartUs;
+         if (intervalUs > diag.intervalMaxUs) diag.intervalMaxUs = intervalUs;
+      }
+      diag.lastLoopStartUs = loopStartUs;
+      diag.loops++;
+      if (player->seekRequestNs >= 0) {
+         performSeek(player);
+         startedAtKeyframe = 0;
+         uint64_t nowUs = sys_time_get_system_time();
+         uint64_t cycleUs = nowUs - loopStartUs;
+         diag.cycleUs += cycleUs;
+         if (cycleUs > diag.cycleMaxUs) diag.cycleMaxUs = cycleUs;
+         reportDecodeThreadDiag(&diag, nowUs);
+         continue;
+      }
 
+      uint64_t claimStartUs = sys_time_get_system_time();
       int slot = claimEmptySlot(player);
+      uint64_t claimElapsedUs = sys_time_get_system_time() - claimStartUs;
+      diag.claimUs += claimElapsedUs;
+      if (claimElapsedUs > diag.claimMaxUs) diag.claimMaxUs = claimElapsedUs;
       if (slot < 0) {
          uint64_t waitStart = sys_time_get_system_time();
          sleepMs(2);
          uint64_t waited = sys_time_get_system_time() - waitStart;
          player->diagPendingRingWaits++;
          player->diagPendingRingWaitUs += waited;
+         diag.ringFull++;
+         diag.ringWaitUs += waited;
          publishVideoDiag(player, sys_time_get_system_time());
+         uint64_t nowUs = sys_time_get_system_time();
+         uint64_t cycleUs = nowUs - loopStartUs;
+         diag.cycleUs += cycleUs;
+         if (cycleUs > diag.cycleMaxUs) diag.cycleMaxUs = cycleUs;
+         reportDecodeThreadDiag(&diag, nowUs);
          continue;
       }   // ring full: wait for the UI to consume a frame
 
       int width, height; uint64_t pts;
+      uint64_t decodeStartUs = sys_time_get_system_time();
       int got = player->decoder ? decodeNextFrame(player, player->slots[slot].yuv, &width, &height, &pts, &startedAtKeyframe) : -1;
+      uint64_t decodeElapsedUs = sys_time_get_system_time() - decodeStartUs;
+      diag.decodeUs += decodeElapsedUs;
+      if (decodeElapsedUs > diag.decodeMaxUs) diag.decodeMaxUs = decodeElapsedUs;
+      if (got == 1) diag.produced++;
+      else if (got == 0) diag.empty++;
+      else diag.errors++;
 
       if (player->catchUpAllowed && got == 1 && player->decoder && isH264DecoderTee(player->decoder)) {
          uint64_t clock = 0;
@@ -635,6 +703,8 @@ static void decodeThread(uint64_t arg)
       uint64_t publishLockStartUs = sys_time_get_system_time();
       lock(&player->lock);
       uint64_t publishLockWaitUs = sys_time_get_system_time() - publishLockStartUs;
+      diag.publishLockUs += publishLockWaitUs;
+      if (publishLockWaitUs > diag.publishLockMaxUs) diag.publishLockMaxUs = publishLockWaitUs;
       player->diagDecodeLockCalls++;
       player->diagDecodeLockWaitUs += publishLockWaitUs;
       if (publishLockWaitUs > player->diagDecodeLockWaitMaxUs) player->diagDecodeLockWaitMaxUs = publishLockWaitUs;
@@ -664,6 +734,11 @@ static void decodeThread(uint64_t arg)
          // EOF is terminal; errors are kept distinct and cannot trigger autoplay. A later seek can retry.
          while (player->running && (player->ended || player->failed) && player->seekRequestNs < 0) sleepMs(10);
       }
+      uint64_t nowUs = sys_time_get_system_time();
+      uint64_t cycleUs = nowUs - loopStartUs;
+      diag.cycleUs += cycleUs;
+      if (cycleUs > diag.cycleMaxUs) diag.cycleMaxUs = cycleUs;
+      reportDecodeThreadDiag(&diag, nowUs);
    }
    exitThread();
 }

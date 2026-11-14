@@ -163,6 +163,7 @@ static uint32_t   batchUvOffset[FRAME_COUNT];
 static int        batchVertCount = 0;
 static int        batchFlushStart = 0;
 static int        frameDroppedCalls = 0;     // draw calls the frame could not afford
+static int        gfxYuvDiagFrameActive = 0;
 
 // textures handed back during a frame, released once that frame has been shown
 #define GFX_RETIRED_MAX 256
@@ -1136,16 +1137,85 @@ void drawGfxTextureFixedSizeScaledPosition(int x, int y, int w, int h, GfxTextur
    drawGfxTextureInternal(x, y, w, h, tex, u0, v0, u1, v1, tint, filter, 2);
 }
 
+// YUV submission timing is CPU-side only; it does not imply RSX completion.
+static uint64_t gfxYuvDiagWindowUs;
+static uint64_t gfxYuvDiagCalls, gfxYuvDiagTotalUs, gfxYuvDiagTotalMaxUs;
+static uint64_t gfxYuvDiagFlushUs, gfxYuvDiagFlushMaxUs;
+static uint64_t gfxYuvDiagAddressUs, gfxYuvDiagAddressMaxUs;
+static uint64_t gfxYuvDiagSubmitUs, gfxYuvDiagSubmitMaxUs;
+static uint64_t gfxYuvDiagAddressErrors, gfxYuvDiagInvalid, gfxYuvDiagOverflow;
+
+static void reportGfxYuvDiag(uint64_t nowUs)
+{
+   if (!gfxYuvDiagWindowUs) gfxYuvDiagWindowUs = nowUs;
+   if (nowUs - gfxYuvDiagWindowUs < 5000000ull) return;
+   logInfo("[gfx-yuv-diag] spanMs=%llu calls=%llu totalAvgUs=%llu totalMaxUs=%llu flushAvgUs=%llu flushMaxUs=%llu addressAvgUs=%llu addressMaxUs=%llu submitAvgUs=%llu submitMaxUs=%llu addressErr=%llu invalid=%llu overflow=%llu\n",
+           (unsigned long long)((nowUs-gfxYuvDiagWindowUs)/1000ull),
+           (unsigned long long)gfxYuvDiagCalls,
+           (unsigned long long)(gfxYuvDiagCalls ? gfxYuvDiagTotalUs/gfxYuvDiagCalls : 0),
+           (unsigned long long)gfxYuvDiagTotalMaxUs,
+           (unsigned long long)(gfxYuvDiagCalls ? gfxYuvDiagFlushUs/gfxYuvDiagCalls : 0),
+           (unsigned long long)gfxYuvDiagFlushMaxUs,
+           (unsigned long long)(gfxYuvDiagCalls ? gfxYuvDiagAddressUs/gfxYuvDiagCalls : 0),
+           (unsigned long long)gfxYuvDiagAddressMaxUs,
+           (unsigned long long)(gfxYuvDiagCalls ? gfxYuvDiagSubmitUs/gfxYuvDiagCalls : 0),
+           (unsigned long long)gfxYuvDiagSubmitMaxUs,
+           (unsigned long long)gfxYuvDiagAddressErrors,
+           (unsigned long long)gfxYuvDiagInvalid,
+           (unsigned long long)gfxYuvDiagOverflow);
+   gfxYuvDiagWindowUs = nowUs;
+   gfxYuvDiagCalls = gfxYuvDiagTotalUs = gfxYuvDiagTotalMaxUs = 0;
+   gfxYuvDiagFlushUs = gfxYuvDiagFlushMaxUs = 0;
+   gfxYuvDiagAddressUs = gfxYuvDiagAddressMaxUs = 0;
+   gfxYuvDiagSubmitUs = gfxYuvDiagSubmitMaxUs = 0;
+   gfxYuvDiagAddressErrors = gfxYuvDiagInvalid = gfxYuvDiagOverflow = 0;
+}
+
 void drawGfxYuvFrame(int x, int y, int w, int h, const void *yuvPlanes, int frameW, int frameH)
 {
-   if (!initialized || !yuvPlanes || frameW <= 0 || frameH <= 0) return;
+   uint64_t totalStartUs = sys_time_get_system_time();
+   uint64_t stageStartUs;
+   gfxYuvDiagFrameActive = 1;
+   uint64_t flushUs = 0, addressUs = 0, submitUs = 0;
+   gfxYuvDiagCalls++;
+   if (!initialized || !yuvPlanes || frameW <= 0 || frameH <= 0) {
+      gfxYuvDiagInvalid++;
+      reportGfxYuvDiag(sys_time_get_system_time());
+      return;
+   }
 
+   stageStartUs = sys_time_get_system_time();
    flushBatch();
-   if (batchWouldOverflow(VERTS_PER_RECT)) return;
+   flushUs = sys_time_get_system_time() - stageStartUs;
+   if (batchWouldOverflow(VERTS_PER_RECT)) {
+      gfxYuvDiagOverflow++;
+      gfxYuvDiagFlushUs += flushUs;
+      if (flushUs > gfxYuvDiagFlushMaxUs) gfxYuvDiagFlushMaxUs = flushUs;
+      uint64_t totalUs = sys_time_get_system_time() - totalStartUs;
+      gfxYuvDiagTotalUs += totalUs;
+      if (totalUs > gfxYuvDiagTotalMaxUs) gfxYuvDiagTotalMaxUs = totalUs;
+      reportGfxYuvDiag(sys_time_get_system_time());
+      return;
+   }
 
    uint32_t planeOffset;
-   if (cellGcmAddressToOffset((void *)yuvPlanes, &planeOffset) != CELL_OK) return;
+   stageStartUs = sys_time_get_system_time();
+   int addressRc = cellGcmAddressToOffset((void *)yuvPlanes, &planeOffset);
+   addressUs = sys_time_get_system_time() - stageStartUs;
+   if (addressRc != CELL_OK) {
+      gfxYuvDiagAddressErrors++;
+      gfxYuvDiagFlushUs += flushUs;
+      gfxYuvDiagAddressUs += addressUs;
+      if (flushUs > gfxYuvDiagFlushMaxUs) gfxYuvDiagFlushMaxUs = flushUs;
+      if (addressUs > gfxYuvDiagAddressMaxUs) gfxYuvDiagAddressMaxUs = addressUs;
+      uint64_t totalUs = sys_time_get_system_time() - totalStartUs;
+      gfxYuvDiagTotalUs += totalUs;
+      if (totalUs > gfxYuvDiagTotalMaxUs) gfxYuvDiagTotalMaxUs = totalUs;
+      reportGfxYuvDiag(sys_time_get_system_time());
+      return;
+   }
 
+   stageStartUs = sys_time_get_system_time();
    // one opaque full-uv quad through the shared batch arrays
    float x0 = toClipX(x), y0 = toClipY(y), x1 = toClipX(x + w), y1 = toClipY(y + h);
    uint32_t white = 0xFFFFFFFFu;
@@ -1177,6 +1247,20 @@ void drawGfxYuvFrame(int x, int y, int w, int h, const void *yuvPlanes, int fram
    cellGcmSetDrawArrays(CTX, CELL_GCM_PRIMITIVE_TRIANGLES, 0, 6);
 
    batchFlushStart = batchVertCount;
+   submitUs = sys_time_get_system_time() - stageStartUs;
+
+   gfxYuvDiagFlushUs += flushUs;
+   gfxYuvDiagAddressUs += addressUs;
+   gfxYuvDiagSubmitUs += submitUs;
+   if (flushUs > gfxYuvDiagFlushMaxUs) gfxYuvDiagFlushMaxUs = flushUs;
+   if (addressUs > gfxYuvDiagAddressMaxUs) gfxYuvDiagAddressMaxUs = addressUs;
+   if (submitUs > gfxYuvDiagSubmitMaxUs) gfxYuvDiagSubmitMaxUs = submitUs;
+   {
+      uint64_t totalUs = sys_time_get_system_time() - totalStartUs;
+      gfxYuvDiagTotalUs += totalUs;
+      if (totalUs > gfxYuvDiagTotalMaxUs) gfxYuvDiagTotalMaxUs = totalUs;
+   }
+   reportGfxYuvDiag(sys_time_get_system_time());
 }
 
 void setGfxVsync(GfxVsync vsync)
@@ -1188,28 +1272,90 @@ void endGfxFrame(void)
 {
    if (!initialized) return;
 
+   uint64_t frameStartUs = sys_time_get_system_time();
+   uint64_t flushStartUs = frameStartUs;
    flushBatch();
+   uint64_t flushUs = sys_time_get_system_time() - flushStartUs;
    reportFrameBudget();
 
-   // queue this frame's flip without blocking the CPU on it. cellGcmSetWaitFlip is a gpu-side barrier:
-   // the RSX won't draw into a buffer still on screen, so no tearing beyond what vsync-off already implies.
-   if (cellGcmSetFlip(CTX, backBuffer) != CELL_OK) return;
+   // Queue this frame's flip without blocking the CPU on it. Keep submission and
+   // queue-drain timing separate: a slow RSX can show up in the latter.
+   uint32_t queueBefore = (uint32_t)(flipsSubmitted - flipsCompleted);
+   uint64_t submitStartUs = sys_time_get_system_time();
+   if (cellGcmSetFlip(CTX, backBuffer) != CELL_OK) {
+      if (gfxYuvDiagFrameActive)
+         logError("[gfx-frame-diag] cellGcmSetFlip failed buffer=%d queued=%u\n", backBuffer, queueBefore);
+      return;
+   }
    cellGcmFlush(CTX);
    cellGcmSetWaitFlip(CTX);
    flipsSubmitted++;
+   uint64_t submitUs = sys_time_get_system_time() - submitStartUs;
 
    backBuffer = (backBuffer + 1) % FRAME_COUNT;
 
-   // stall only when the pipeline is full - one buffer on screen plus FRAME_COUNT-2 flips already queued.
-   // with three buffers the CPU may run one flip ahead, so a slow GPU frame overlaps the next frame's work
-   // instead of stalling us. the timeout is a safety net: a missed flip callback falls back to a brief wait
-   // rather than a hard-lock.
-   uint64_t startUs = sys_time_get_system_time();
+   // Stall only when the pipeline is full. The timeout remains the existing safety guard.
+   uint64_t waitStartUs = sys_time_get_system_time();
    while ((uint32_t)(flipsSubmitted - flipsCompleted) >= FRAME_COUNT - 1) {
-      if (sys_time_get_system_time() - startUs > 50000) break;   // 50ms guard, never a hard-lock
+      if (sys_time_get_system_time() - waitStartUs > 50000) break;
       sys_timer_usleep(200);
    }
-   lastFlipWaitUs = sys_time_get_system_time() - startUs;
+   lastFlipWaitUs = sys_time_get_system_time() - waitStartUs;
+   uint32_t queueAfter = (uint32_t)(flipsSubmitted - flipsCompleted);
+
+   if (gfxYuvDiagFrameActive) {
+      static uint64_t windowStartUs;
+      static uint64_t calls, intervalUs, intervalMaxUs;
+      static uint64_t endFrameUs, endFrameMaxUs, flushTotalUs, flushMaxUs;
+      static uint64_t submitTotalUs, submitMaxUs, waitTotalUs, waitMaxUs;
+      static uint64_t queueMax, queueStalls, waitTimeouts, droppedCalls;
+      static uint64_t lastFrameStartUs;
+      uint64_t nowUs = sys_time_get_system_time();
+      uint64_t elapsedFrameUs = nowUs - frameStartUs;
+      uint64_t interval = lastFrameStartUs && frameStartUs >= lastFrameStartUs
+                        ? frameStartUs - lastFrameStartUs : 0;
+      lastFrameStartUs = frameStartUs;
+      if (!windowStartUs) windowStartUs = frameStartUs;
+      calls++;
+      intervalUs += interval;
+      if (interval > intervalMaxUs) intervalMaxUs = interval;
+      endFrameUs += elapsedFrameUs;
+      if (elapsedFrameUs > endFrameMaxUs) endFrameMaxUs = elapsedFrameUs;
+      flushTotalUs += flushUs;
+      if (flushUs > flushMaxUs) flushMaxUs = flushUs;
+      submitTotalUs += submitUs;
+      if (submitUs > submitMaxUs) submitMaxUs = submitUs;
+      waitTotalUs += lastFlipWaitUs;
+      if (lastFlipWaitUs > waitMaxUs) waitMaxUs = lastFlipWaitUs;
+      if (queueBefore > queueMax) queueMax = queueBefore;
+      if (queueAfter > queueMax) queueMax = queueAfter;
+      if (lastFlipWaitUs > 1000) queueStalls++;
+      if (lastFlipWaitUs >= 50000) waitTimeouts++;
+      droppedCalls += (uint64_t)frameDroppedCalls;
+
+      if (nowUs - windowStartUs >= 5000000ull) {
+         logInfo("[gfx-frame-diag] spanMs=%llu calls=%llu avgIntervalUs=%llu maxIntervalUs=%llu endFrameAvgUs=%llu endFrameMaxUs=%llu flushAvgUs=%llu flushMaxUs=%llu submitAvgUs=%llu submitMaxUs=%llu flipWaitAvgUs=%llu flipWaitMaxUs=%llu queueMax=%llu queueStalls=%llu waitTimeouts=%llu droppedDrawCalls=%llu queuedNow=%u\n",
+                 (unsigned long long)((nowUs-windowStartUs)/1000ull),
+                 (unsigned long long)calls,
+                 (unsigned long long)(calls ? intervalUs/calls : 0),
+                 (unsigned long long)intervalMaxUs,
+                 (unsigned long long)(calls ? endFrameUs/calls : 0),
+                 (unsigned long long)endFrameMaxUs,
+                 (unsigned long long)(calls ? flushTotalUs/calls : 0),
+                 (unsigned long long)flushMaxUs,
+                 (unsigned long long)(calls ? submitTotalUs/calls : 0),
+                 (unsigned long long)submitMaxUs,
+                 (unsigned long long)(calls ? waitTotalUs/calls : 0),
+                 (unsigned long long)waitMaxUs,
+                 (unsigned long long)queueMax, (unsigned long long)queueStalls,
+                 (unsigned long long)waitTimeouts, (unsigned long long)droppedCalls, queueAfter);
+         windowStartUs = nowUs;
+         calls = intervalUs = intervalMaxUs = 0;
+         endFrameUs = endFrameMaxUs = flushTotalUs = flushMaxUs = 0;
+         submitTotalUs = submitMaxUs = waitTotalUs = waitMaxUs = 0;
+         queueMax = queueStalls = waitTimeouts = droppedCalls = 0;
+      }
+   }
 }
 
 void finishGfx(void)

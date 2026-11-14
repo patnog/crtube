@@ -1909,17 +1909,21 @@ static void initPlay(void)
    addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CROSS), "Return");
    addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CIRCLE), "Return");
    setButtonHintsStableLayout(&liveFailureHints, 1);
-   // Use two rows so all ten playback controls remain readable at 1.5x UI scale.
+   // Use two rows so playback controls remain readable at 1.5x UI scale.
    // drawButtonHintsFitted() only scales down when the available width requires it.
    initButtonHints(&playbackHints, &uiFont, 0, 30, 20, activeTheme->textSecondary);
    setButtonHintGap(&playbackHints, 8);
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CROSS), "Play / Pause");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CROSS), "Play/Pause");
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_LEFT), NULL);
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Seek");
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_L1), NULL);
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R1), "Chapter / Video");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R1), "Chapter/Video (hold)");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_UP), NULL);
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Volume");
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_TRIANGLE), "Subtitles");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_L2), "OSD");
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R2), "Crop");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R3), "Stats");
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CIRCLE), "Hide OSD");
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_START), "Options");
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_SELECT), "Description");
@@ -5013,20 +5017,42 @@ static void drawAutoplayNotice(void)
 
 static void drawPlay(void)
 {
+   // Playback render-loop diagnostics: aggregate only, never log per frame.
+   static uint64_t renderDiagWindowUs, renderDiagLastStartUs;
+   static uint64_t renderDiagCalls, renderDiagIntervalsUs, renderDiagIntervalMaxUs;
+   static uint64_t renderDiagTotalUs, renderDiagTotalMaxUs;
+   static uint64_t renderDiagClearUs, renderDiagClearMaxUs;
+   static uint64_t renderDiagPullUs, renderDiagPullMaxUs;
+   static uint64_t renderDiagYuvUs, renderDiagYuvMaxUs;
+   static uint64_t renderDiagRestUs, renderDiagRestMaxUs;
+   static uint64_t renderDiagGap17, renderDiagGap20, renderDiagGap25;
+   static uint64_t renderDiagGap33, renderDiagGap50, renderDiagGap100;
+   static uint64_t renderDiagFrames, renderDiagNoFrame;
+   uint64_t renderStartUs = sys_time_get_system_time();
+   uint64_t renderIntervalUs = renderDiagLastStartUs && renderStartUs >= renderDiagLastStartUs
+                             ? renderStartUs - renderDiagLastStartUs : 0;
+   uint64_t clearStartUs, clearElapsedUs, framePullElapsedUs = 0, yuvDrawElapsedUs = 0;
+   renderDiagLastStartUs = renderStartUs;
+
    // The selected SD UI zoom is intended for library/navigation screens only (including
    // 480-line anamorphic 16:9). Keep playback controls and overlays at their original
    // 1.0x geometry so the seek bar and other HUD elements retain their designed layout.
    float selectedUiScale = getGfxSdUiScale();
    setGfxSdUiScale(1.0f);
 
+   clearStartUs = sys_time_get_system_time();
    clearGfx(COLOR_BLACK);   // clear the full output; overscan transforms video and HUD, not the black margins
+   clearElapsedUs = sys_time_get_system_time() - clearStartUs;
 
    const uint8_t *frame = NULL;
+   int renderHasFrame = 0;
    if (state.player) {
       int w, h;
       uint64_t framePullStartUs = sys_time_get_system_time();
       frame = getVideoFrame(state.player, &w, &h);
       uint64_t framePullUs = sys_time_get_system_time() - framePullStartUs;
+      framePullElapsedUs = framePullUs;
+      renderHasFrame = frame != NULL;
       if (frame) {
          if (!state.firstFrameSeen) {
             showControls();   // bring up the HUD as playback starts; it auto-hides as usual
@@ -5079,7 +5105,8 @@ static void drawPlay(void)
                     w, h, dw, dh);
          uint64_t drawStartUs = sys_time_get_system_time();
          drawGfxYuvFrame(dx, dy, dw, dh, frame, w, h);
-         recordVideoRenderDraw(framePullUs, sys_time_get_system_time() - drawStartUs, w, h);
+         yuvDrawElapsedUs = sys_time_get_system_time() - drawStartUs;
+         recordVideoRenderDraw(framePullUs, yuvDrawElapsedUs, w, h);
          if (!state.diagFirstYuvDraw) {
             state.diagFirstYuvDraw = 1;
             logInfo("[video-diag] first drawGfxYuvFrame complete\n");
@@ -5156,6 +5183,70 @@ static void drawPlay(void)
        drawDownloadOverlay(state.screenW);
    // Restore the selected library scale before the next screen is drawn.
    setGfxSdUiScale(selectedUiScale);
+
+   // Split the UI-thread frame into clear, frame acquisition, YUV submission and remaining HUD.
+   // The interval includes stalls outside drawPlay as well as missed scheduling opportunities.
+   {
+      uint64_t renderEndUs = sys_time_get_system_time();
+      uint64_t totalUs = renderEndUs >= renderStartUs ? renderEndUs - renderStartUs : 0;
+      uint64_t restUs = totalUs > clearElapsedUs + framePullElapsedUs + yuvDrawElapsedUs
+                      ? totalUs - clearElapsedUs - framePullElapsedUs - yuvDrawElapsedUs : 0;
+      if (!renderDiagWindowUs) renderDiagWindowUs = renderStartUs;
+      renderDiagCalls++;
+      renderDiagIntervalsUs += renderIntervalUs;
+      if (renderIntervalUs > renderDiagIntervalMaxUs) renderDiagIntervalMaxUs = renderIntervalUs;
+      if (renderIntervalUs > 17000ull) renderDiagGap17++;
+      if (renderIntervalUs >= 20000ull) renderDiagGap20++;
+      if (renderIntervalUs >= 25000ull) renderDiagGap25++;
+      if (renderIntervalUs >= 33333ull) renderDiagGap33++;
+      if (renderIntervalUs >= 50000ull) renderDiagGap50++;
+      if (renderIntervalUs >= 100000ull) renderDiagGap100++;
+      renderDiagTotalUs += totalUs;
+      if (totalUs > renderDiagTotalMaxUs) renderDiagTotalMaxUs = totalUs;
+      renderDiagClearUs += clearElapsedUs;
+      if (clearElapsedUs > renderDiagClearMaxUs) renderDiagClearMaxUs = clearElapsedUs;
+      renderDiagPullUs += framePullElapsedUs;
+      if (framePullElapsedUs > renderDiagPullMaxUs) renderDiagPullMaxUs = framePullElapsedUs;
+      renderDiagYuvUs += yuvDrawElapsedUs;
+      if (yuvDrawElapsedUs > renderDiagYuvMaxUs) renderDiagYuvMaxUs = yuvDrawElapsedUs;
+      renderDiagRestUs += restUs;
+      if (restUs > renderDiagRestMaxUs) renderDiagRestMaxUs = restUs;
+      if (renderHasFrame) renderDiagFrames++;
+      else renderDiagNoFrame++;
+
+      if (renderEndUs - renderDiagWindowUs >= 5000000ull) {
+         logInfo("[play-render-diag] spanMs=%llu calls=%llu avgIntervalUs=%llu maxIntervalUs=%llu gap17=%llu gap20=%llu gap25=%llu gap33=%llu gap50=%llu gap100=%llu avgTotalUs=%llu maxTotalUs=%llu clearAvgUs=%llu clearMaxUs=%llu pullAvgUs=%llu pullMaxUs=%llu yuvAvgUs=%llu yuvMaxUs=%llu restAvgUs=%llu restMaxUs=%llu frameCalls=%llu noFrameCalls=%llu stage=%d live=%d paused=%d seeking=%d\n",
+                 (unsigned long long)((renderEndUs-renderDiagWindowUs)/1000ull),
+                 (unsigned long long)renderDiagCalls,
+                 (unsigned long long)(renderDiagCalls ? renderDiagIntervalsUs/renderDiagCalls : 0),
+                 (unsigned long long)renderDiagIntervalMaxUs,
+                 (unsigned long long)renderDiagGap17, (unsigned long long)renderDiagGap20,
+                 (unsigned long long)renderDiagGap25, (unsigned long long)renderDiagGap33,
+                 (unsigned long long)renderDiagGap50, (unsigned long long)renderDiagGap100,
+                 (unsigned long long)(renderDiagCalls ? renderDiagTotalUs/renderDiagCalls : 0),
+                 (unsigned long long)renderDiagTotalMaxUs,
+                 (unsigned long long)(renderDiagCalls ? renderDiagClearUs/renderDiagCalls : 0),
+                 (unsigned long long)renderDiagClearMaxUs,
+                 (unsigned long long)(renderDiagCalls ? renderDiagPullUs/renderDiagCalls : 0),
+                 (unsigned long long)renderDiagPullMaxUs,
+                 (unsigned long long)(renderDiagCalls ? renderDiagYuvUs/renderDiagCalls : 0),
+                 (unsigned long long)renderDiagYuvMaxUs,
+                 (unsigned long long)(renderDiagCalls ? renderDiagRestUs/renderDiagCalls : 0),
+                 (unsigned long long)renderDiagRestMaxUs,
+                 (unsigned long long)renderDiagFrames, (unsigned long long)renderDiagNoFrame,
+                 state.stage, state.isLive, state.player ? isVideoPaused(state.player) : 0, state.seeking);
+         renderDiagWindowUs = renderEndUs;
+         renderDiagCalls = renderDiagIntervalsUs = renderDiagIntervalMaxUs = 0;
+         renderDiagTotalUs = renderDiagTotalMaxUs = 0;
+         renderDiagClearUs = renderDiagClearMaxUs = 0;
+         renderDiagPullUs = renderDiagPullMaxUs = 0;
+         renderDiagYuvUs = renderDiagYuvMaxUs = 0;
+         renderDiagRestUs = renderDiagRestMaxUs = 0;
+         renderDiagGap17 = renderDiagGap20 = renderDiagGap25 = 0;
+         renderDiagGap33 = renderDiagGap50 = renderDiagGap100 = 0;
+         renderDiagFrames = renderDiagNoFrame = 0;
+      }
+   }
 }
 
 static void joinPlaybackWorker(const char *name, sys_ppu_thread_t tid)
