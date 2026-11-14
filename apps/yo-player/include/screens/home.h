@@ -8,7 +8,8 @@ void openHome(void);
 void openHomeSettingsPanel(void);
 void openHomeSettingsPanelFromSearch(const char *query, int sort, int landing);
 void openHomePlaylist(const char *playlistId, const char *title);
-void openHomePlaylistFromSearch(const char *playlistId, const char *title, const char *query, int sort);
+void openHomePlaylistFromSearch(const char *playlistId, const char *title, const char *query, int sort,
+                                const char *channelId, const char *channelName, int channelCategory);
 
 // Apply an action selected from the shared sidebar overlay (also used by channel view).
 void handleHomeSidebarSelection(int picked);

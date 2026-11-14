@@ -1765,7 +1765,7 @@ static int getChannelLive(const char *channelId, SearchResults *out)
 
 // Channel category feeds use YouTube's own browse tabs. Streams intentionally retain
 // archived broadcasts as VOD entries; Videos remains the default channel landing feed.
-#define CHANNEL_SHORTS_PARAMS    "EgZzaG9ydHPyBgQKAjoA"
+#define CHANNEL_SHORTS_PARAMS    "EgZzaG9ydHPyBgUKA5oBAA=="
 #define CHANNEL_PLAYLISTS_PARAMS "EglwbGF5bGlzdHPyBgQKAkIA"
 static int getChannelCategory(const char *channelId, int category, const char *continuation, SearchResults *out)
 {

@@ -174,6 +174,9 @@ static struct {
    int       playlistReturnLocal;
    int       localPlaylistTab; // 0 = saved YouTube playlists, 1 = local PS3 playlists
    char      playlistReturnQuery[SEARCH_QUERY_LEN];
+   char      playlistReturnChannelId[32];
+   char      playlistReturnChannelName[48];
+   int       playlistReturnChannelCategory;
    SortOrder sort;
    PlaylistSortOrder playlistSort;
    char      playlistId[64];
@@ -189,6 +192,8 @@ static struct {
 
 static Font        uiFont;
 static Label       titleLabel, statusLabel, playlistErrorLabel, playlistToastLabel;
+static Label       statusDotsLabel;
+static uint64_t    homeLoadingStartedUs;
 static Label       downloadSpacePrefixLabel, downloadSpaceAvailableLabel;
 static uint64_t    downloadSpaceStatsUpdatedUs;
 static int         downloadSpaceAvailableLow;
@@ -840,7 +845,8 @@ void openHomePlaylist(const char *playlistId, const char *title)
    }
 }
 
-void openHomePlaylistFromSearch(const char *playlistId, const char *title, const char *query, int sort)
+void openHomePlaylistFromSearch(const char *playlistId, const char *title, const char *query, int sort,
+                                const char *channelId, const char *channelName, int channelCategory)
 {
    if (!playlistId || !playlistId[0]) return;
    home.playlistReturnToSearch = 1;
@@ -848,6 +854,9 @@ void openHomePlaylistFromSearch(const char *playlistId, const char *title, const
    home.playlistReturnCategory = home.category;
    home.playlistReturnSort = sort;
    strCopy(home.playlistReturnQuery, sizeof home.playlistReturnQuery, query ? query : "");
+   strCopy(home.playlistReturnChannelId, sizeof home.playlistReturnChannelId, channelId ? channelId : "");
+   strCopy(home.playlistReturnChannelName, sizeof home.playlistReturnChannelName, channelName ? channelName : "");
+   home.playlistReturnChannelCategory = channelCategory;
    home.playlistError = 0;
    strCopy(home.playlistId, sizeof home.playlistId, playlistId);
    strCopy(home.playlistTitle, sizeof home.playlistTitle, title && title[0] ? title : "Playlist");
@@ -2811,6 +2820,9 @@ static void initHome(void)
    downloadSpaceStatsUpdatedUs = 0;
    downloadSpaceAvailableLow = 0;
    initLabel(&statusLabel, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, AUTO, 21, activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
+   initLabel(&statusDotsLabel, &uiFont, MARGIN_X, gridTop, 48, AUTO, 21,
+             activeTheme->textSecondary, TEXT_NOWRAP, "...");
+   setLabelScaleWithUi(&statusDotsLabel, 1);
    initLabel(&playlistErrorLabel, &uiFont, MARGIN_X, 0, home.screenW - 2 * MARGIN_X, AUTO, 18,
              activeTheme->textPrimary, TEXT_WRAP, "This playlist is private, restricted or unavailable.");
    initLabel(&playlistToastLabel, &uiFont, 0, 0, home.screenW - 80, AUTO, 23,
@@ -3358,7 +3370,7 @@ static void updateHome(void)
             SearchResult channelItem = home.channelLookupItem;
             logInfo("[home] Triangle: async channel lookup resolved %s\n", channelItem.channelId);
             cacheCurrent();
-            openChannelFor(&channelItem);
+            openChannelForCategory(&channelItem, home.playlistReturnChannelCategory);
          } else {
             logWarn("[home] Triangle: async channel lookup failed video=%s\n",
                     home.channelLookupItem.videoId);
@@ -3447,9 +3459,21 @@ static void updateHome(void)
                home.playlistReturnCategory = -1;
                home.playlistReturnSort = SORT_RELEVANCE;
                home.playlistReturnQuery[0] = 0;
-               if (returnCategory >= 0 && returnCategory != home.category)
-                  switchToCategory(returnCategory);
-               openSearchQueryWithSort(query, returnSort);
+               if (home.playlistReturnChannelId[0]) {
+                  SearchResult channelItem;
+                  memset(&channelItem, 0, sizeof channelItem);
+                  strCopy(channelItem.channelId, sizeof channelItem.channelId, home.playlistReturnChannelId);
+                  strCopy(channelItem.author, sizeof channelItem.author, home.playlistReturnChannelName);
+                  home.playlistReturnChannelId[0] = 0;
+                  home.playlistReturnChannelName[0] = 0;
+                  if (returnCategory >= 0 && returnCategory != home.category)
+                     switchToCategory(returnCategory);
+                  openChannelForCategory(&channelItem, home.playlistReturnChannelCategory);
+               } else {
+                  if (returnCategory >= 0 && returnCategory != home.category)
+                     switchToCategory(returnCategory);
+                  openSearchQueryWithSort(query, returnSort);
+               }
             } else if (home.playlistReturnLocal) {
                switchToCategory(HOME_LOCAL_PLAYLISTS);
             } else {
@@ -3699,7 +3723,7 @@ static void updateHome(void)
       logInfo("[diag-triangle] home cacheCurrent begin\n");
       cacheCurrent();
       logInfo("[diag-triangle] home cacheCurrent done; openChannelFor begin\n");
-      openChannelFor(&channelItem);
+      openChannelForCategory(&channelItem, home.playlistReturnChannelCategory);
       logInfo("[diag-triangle] home openChannelFor returned\n");
       return;
    }
@@ -3886,12 +3910,26 @@ static void drawHome(void)
                                    9, activeTheme->badgeFill);
       drawLabelAt(&playlistErrorLabel, statusX, statusY);
    } else if (gridStage(&home.grid) == GRID_READY) {
+      homeLoadingStartedUs = 0;
       drawVideoGrid(&home.grid);
    } else {
       GridStage stage = gridStage(&home.grid);
-      setLabelText(&statusLabel, stage == GRID_ERROR ? "Unable to load content" :
-                   (stage == GRID_EMPTY ? "No results" : "Loading..."));
-      drawLabel(&statusLabel);
+      if (stage == GRID_RUNNING) {
+         static const char *const frames[] = { "", ".", "..", "..." };
+         uint64_t now = getTimeUs();
+         if (!homeLoadingStartedUs) homeLoadingStartedUs = now;
+         setLabelText(&statusLabel, "Loading");
+         setLabelText(&statusDotsLabel, frames[((now - homeLoadingStartedUs) / 300000ULL) & 3ULL]);
+         refreshLabelScale(&statusLabel);
+         refreshLabelScale(&statusDotsLabel);
+         moveLabel(&statusDotsLabel, statusLabel.x + statusLabel.tt.tex.w, statusLabel.y);
+         drawLabel(&statusLabel);
+         drawLabel(&statusDotsLabel);
+      } else {
+         homeLoadingStartedUs = 0;
+         setLabelText(&statusLabel, stage == GRID_ERROR ? "Unable to load content" : "No results");
+         drawLabel(&statusLabel);
+      }
    }
    // Draw the header after the grid so the category chips remain above any
    // selection glow that reaches into the header band.

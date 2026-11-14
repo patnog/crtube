@@ -46,6 +46,7 @@ static const char *ChannelSortNames[CHANNEL_SORT_COUNT] = { "Latest", "Popular",
 static char         pendingQuery[SEARCH_QUERY_LEN];
 static SearchResult pendingChannel;
 static int          pendingIsChannel;
+static int          pendingChannelCategory;
 static int          pendingLanding;
 static int          pendingSort;
 static int          pendingSortValid;
@@ -80,6 +81,8 @@ static struct {
 
 static Font        uiFont;
 static Label       queryLabel, queryPromptPrefix, queryPromptSuffix;
+static Label       statusDotsLabel;
+static uint64_t    searchLoadingStartedUs;
 static Label       sortLabel, sortLabels[SORT_COUNT], statusLabel, historyTitleLabel, historyEmptyLabel;
 static Label       channelCategoryLabels[4];
 static Label       historyLabels[MAX_SEARCH_HISTORY];
@@ -238,11 +241,11 @@ static void updateChannelGridLayout(void)
    stopVideoGrid(&search.grid);
    termVideoGrid(&search.grid);
    int homeGridTop = isGfxSdVideoOutput() ? 132 : 100;
-   int headerGridTop = HEADER_Y + search.fieldHeight + (int)(10 * search.uiScale + 0.5f);
-   search.gridTop = headerGridTop > homeGridTop ? headerGridTop : homeGridTop;
+   search.gridTop = homeGridTop;
+   int gridBottomGap = isGfxSdVideoOutput() ? 20 : GRID_BOTTOM_GAP;
    initVideoGrid(&search.grid, &uiFont, MARGIN_X, search.gridTop,
                  search.screenW - 2 * MARGIN_X,
-                 search.footerTopY - search.gridTop - GRID_BOTTOM_GAP);
+                 search.footerTopY - search.gridTop - gridBottomGap);
    setGridWatchedPredicate(&search.grid, isWatched);
    setGridWatchedPosition(&search.grid, getWatchedPosition);
    setGridWatchLaterPredicate(&search.grid, isWatchLater);
@@ -304,10 +307,11 @@ static void initSearch(void)
    search.screenH = getGfxScreenHeight();
    search.uiScale = getGfxUiScaleFactor();
    if (search.uiScale < 1.0f) search.uiScale = 1.0f;
-   search.fieldHeight = (int)(FIELD_H * search.uiScale + 0.5f);
+   /* Keep the search header inside the same vertical band as navigation titles.
+    * The previous 56px scaled field pushed the grid down at larger UI scales. */
+   search.fieldHeight = (int)(40 * search.uiScale + 0.5f);
    int homeGridTop = isGfxSdVideoOutput() ? 132 : 100;
-   int headerGridTop = HEADER_Y + search.fieldHeight + (int)(10 * search.uiScale + 0.5f);
-   search.gridTop = headerGridTop > homeGridTop ? headerGridTop : homeGridTop;
+   search.gridTop = homeGridTop;
    search.historyTitleY = search.gridTop + (int)(16 * search.uiScale + 0.5f);
    search.historyTop = search.gridTop + (int)(58 * search.uiScale + 0.5f);
    search.historyRowHeight = (int)(HISTORY_ROW_H * search.uiScale + 0.5f);
@@ -331,7 +335,8 @@ static void initSearch(void)
       strCopy(search.channelName, sizeof search.channelName,
               pendingChannel.author[0] ? pendingChannel.author : "Channel");
       search.channelSort = CHANNEL_SORT_LATEST;
-      search.channelCategory = 0;
+      search.channelCategory = pendingChannelCategory;
+      if (search.channelCategory < 0 || search.channelCategory >= 4) search.channelCategory = 0;
       search.channelSortToken[0] = 0;
    } else {
       strCopy(search.query, sizeof search.query, pendingQuery);
@@ -425,6 +430,9 @@ static void initSearch(void)
                 search.screenW - 2 * MARGIN_X, AUTO, 21,
                 activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
    setLabelScaleWithUi(&statusLabel, 1);
+   initLabelRaw(&statusDotsLabel, &uiFont, MARGIN_X, 0, 48, AUTO, 21,
+                activeTheme->textSecondary, TEXT_NOWRAP, "...");
+   setLabelScaleWithUi(&statusDotsLabel, 1);
    initLabel(&historyTitleLabel, &uiFont, MARGIN_X, 0, AUTO, AUTO, 24,
              activeTheme->textSecondary, TEXT_NOWRAP, "Recent searches");
    setLabelScaleWithUi(&historyTitleLabel, 1);
@@ -468,9 +476,10 @@ static void initSearch(void)
    if (search.historyVisibleRows > MAX_SEARCH_HISTORY) search.historyVisibleRows = MAX_SEARCH_HISTORY;
    reloadHistory();
 
+   int gridBottomGap = isGfxSdVideoOutput() ? 20 : GRID_BOTTOM_GAP;
    initVideoGrid(&search.grid, &uiFont, MARGIN_X, search.gridTop,
                  search.screenW - 2 * MARGIN_X,
-                 search.footerTopY - search.gridTop - GRID_BOTTOM_GAP);
+                 search.footerTopY - search.gridTop - gridBottomGap);
    setGridWatchedPredicate(&search.grid, isWatched);
    setGridWatchedPosition(&search.grid, getWatchedPosition);
    setGridWatchLaterPredicate(&search.grid, isWatchLater);
@@ -653,8 +662,16 @@ static void updateSearch(void)
          char playlistId[64], playlistTitle[160];
          strCopy(playlistId, sizeof playlistId, selected->playlistId);
          strCopy(playlistTitle, sizeof playlistTitle, selected->title);
+         int fromChannel = search.channelId[0] != 0;
+         char returnChannelId[32], returnChannelName[48];
+         strCopy(returnChannelId, sizeof returnChannelId, search.channelId);
+         strCopy(returnChannelName, sizeof returnChannelName, search.channelName);
+         int returnChannelCategory = search.channelCategory;
          popScreen();
-         openHomePlaylistFromSearch(playlistId, playlistTitle, search.query, (int)search.sort);
+         openHomePlaylistFromSearch(playlistId, playlistTitle, search.query, (int)search.sort,
+                                    fromChannel ? returnChannelId : "",
+                                    fromChannel ? returnChannelName : "",
+                                    returnChannelCategory);
          return;
       }
       if (selected->videoId[0]) {
@@ -837,6 +854,7 @@ static void drawSearch(void)
    } else {
       if (!search.channelId[0]) drawSearchSortPills();
       if (gridStage(&search.grid) == GRID_READY) {
+         searchLoadingStartedUs = 0;
          drawVideoGrid(&search.grid);
       } else {
          GridStage stage = gridStage(&search.grid);
@@ -855,11 +873,26 @@ static void drawSearch(void)
             const char *message = stage == GRID_ERROR ?
                (search.channelId[0] ? "Unable to load this channel category" : "Unable to load results") :
                (stage == GRID_EMPTY ? "No results" : "Loading...");
-            setLabelText(&statusLabel, message);
-            refreshLabelScale(&statusLabel);
-            moveLabel(&statusLabel, MARGIN_X, search.gridTop);
+            if (stage == GRID_RUNNING) {
+               static const char *const frames[] = { "", ".", "..", "..." };
+               uint64_t now = getTimeUs();
+               if (!searchLoadingStartedUs) searchLoadingStartedUs = now;
+               setLabelText(&statusLabel, "Loading");
+               setLabelText(&statusDotsLabel, frames[((now - searchLoadingStartedUs) / 300000ULL) & 3ULL]);
+               refreshLabelScale(&statusLabel);
+               refreshLabelScale(&statusDotsLabel);
+               moveLabel(&statusLabel, MARGIN_X, search.gridTop);
+               moveLabel(&statusDotsLabel, MARGIN_X + statusLabel.tt.tex.w, search.gridTop);
+               drawLabel(&statusLabel);
+               drawLabel(&statusDotsLabel);
+            } else {
+               searchLoadingStartedUs = 0;
+               setLabelText(&statusLabel, message);
+               refreshLabelScale(&statusLabel);
+               moveLabel(&statusLabel, MARGIN_X, search.gridTop);
+               drawLabel(&statusLabel);
+            }
          }
-         drawLabel(&statusLabel);
       }
    }
 
@@ -961,8 +994,14 @@ void openSearchQueryWithSort(const char *query, int sort)
 
 void openChannelFor(const SearchResult *item)
 {
+   openChannelForCategory(item, 0);
+}
+
+void openChannelForCategory(const SearchResult *item, int category)
+{
    if (!item || !item->channelId[0]) return;
    pendingChannel = *item;
+   pendingChannelCategory = category;
    pendingIsChannel = 1;
    pendingLanding = 0;
    pendingSortValid = 0;

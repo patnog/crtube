@@ -17,3 +17,4 @@ void openSearchQueryWithSort(const char *query, int sort);
 
 // push the search screen showing the given result's channel (its videos only).
 void openChannelFor(const SearchResult *item);
+void openChannelForCategory(const SearchResult *item, int category);
