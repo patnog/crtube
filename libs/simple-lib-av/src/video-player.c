@@ -138,6 +138,7 @@ struct VideoPlayer {
    uint64_t diagAudioFeeds, diagAudioAuFeedUs, diagAudioAuFeedMaxUs;
    int diagReadyCount, diagReadyHighWater;
    uint64_t diagLastReportUs;
+   uint64_t diagDecisionLogUs;
    // Previous report samples for measuring the audio-master clock and video PTS progression.
    uint64_t diagClockSampleUs, diagAudioPlayedSample, diagVideoPtsSample;
    // Thread-local-in-practice pending buckets avoid taking the player mutex on every decoder poll.
@@ -1213,8 +1214,9 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
 
    // pick the latest ready frame whose pts is due; drop older ready frames (skip if we fell behind)
    int best = -1; uint64_t bestPts = 0;
-   int readyCountNow = 0;
+   int readyCountNow = 0, dueCount = 0, futureCount = 0, seekBlockedCount = 0;
    uint64_t oldestReady = 0, newestReady = 0;
+   uint64_t nextDueEligiblePts = 0, nextSeekEligiblePts = 0;
    uint64_t selectStartUs = sys_time_get_system_time();
    for (int i = 0; i < FRAME_SLOTS; i++) {
       if (player->slots[i].state == SLOT_READY) {
@@ -1222,9 +1224,19 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
          if (!readyCountNow || player->slots[i].pts > newestReady) newestReady = player->slots[i].pts;
          readyCountNow++;
       }
-      if (player->slots[i].state == SLOT_READY && player->slots[i].pts <= clock &&
-          (!player->seekInProgress || player->slots[i].pts >= player->seekFrameMinPts) &&
-          (best < 0 || player->slots[i].pts >= bestPts)) { best = i; bestPts = player->slots[i].pts; }
+      if (player->slots[i].state == SLOT_READY) {
+         uint64_t pts = player->slots[i].pts;
+         if (player->seekInProgress && pts < player->seekFrameMinPts) {
+            seekBlockedCount++;
+            if (!nextSeekEligiblePts || pts < nextSeekEligiblePts) nextSeekEligiblePts = pts;
+         } else if (pts <= clock) {
+            dueCount++;
+            if (best < 0 || pts >= bestPts) { best = i; bestPts = pts; }
+         } else {
+            futureCount++;
+            if (!nextDueEligiblePts || pts < nextDueEligiblePts) nextDueEligiblePts = pts;
+         }
+      }
    }
    uint64_t selectUs = sys_time_get_system_time() - selectStartUs;
    player->diagFrameSelectCalls++;
@@ -1243,6 +1255,10 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
    }
 
    int selectedNewFrame = 0;
+   int decisionDroppedCount = 0;
+   uint64_t decisionDroppedMinPts = 0, decisionDroppedMaxPts = 0;
+   uint64_t decisionDroppedPts[FRAME_SLOTS] = {0};
+   uint64_t previousDisplayedPts = player->currentPts;
    if (best >= 0) {
       // The decoder has completed the seek and a frame from the new position is now being
       // presented. Until this point callers must not enqueue another chapter seek.
@@ -1261,6 +1277,11 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
          if (player->slots[i].state == SLOT_RETIRING) player->slots[i].state = SLOT_EMPTY;                // GPU is done with it by now
          else if (player->slots[i].state == SLOT_DISPLAYING) player->slots[i].state = SLOT_RETIRING;      // hold one present for the frame in flight
          else if (player->slots[i].state == SLOT_READY && player->slots[i].pts < bestPts) {
+            uint64_t droppedPts = player->slots[i].pts;
+            if (!decisionDroppedCount || droppedPts < decisionDroppedMinPts) decisionDroppedMinPts = droppedPts;
+            if (!decisionDroppedCount || droppedPts > decisionDroppedMaxPts) decisionDroppedMaxPts = droppedPts;
+            if (decisionDroppedCount < FRAME_SLOTS) decisionDroppedPts[decisionDroppedCount] = droppedPts;
+            decisionDroppedCount++;
             player->slots[i].state = SLOT_EMPTY;
             player->diagDroppedReady++;
          }
@@ -1287,6 +1308,14 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
       else player->diagRenderRepeatedFrames++;
    }
    uint64_t reportNow = sys_time_get_system_time();
+   int decisionSeekActive = player->seekInProgress;
+   uint64_t decisionSeekMinPts = player->seekFrameMinPts;
+   uint64_t nextFutureInMs = nextDueEligiblePts > clock ? (nextDueEligiblePts - clock) / 1000000ull : 0;
+   int logDecision = !player->diagDecisionLogUs || reportNow - player->diagDecisionLogUs >= 500000ull;
+   if (logDecision) player->diagDecisionLogUs = reportNow;
+   const char *decisionReason = best >= 0 ? (selectedNewFrame ? "selected_new" : "selected_current") :
+      (readyCountNow == 0 ? "no_ready" : (dueCount == 0 && seekBlockedCount > 0 && futureCount == 0 ? "seek_filter" :
+      (dueCount == 0 ? "waiting_future" : "no_selection")));
    uint64_t renderLockHoldUs = reportNow - lockAcquiredUs;
    player->diagRenderLockHoldUs += renderLockHoldUs;
    if (renderLockHoldUs > player->diagRenderLockHoldMaxUs) player->diagRenderLockHoldMaxUs = renderLockHoldUs;
@@ -1404,6 +1433,28 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
    }
    uint64_t currentPtsMs = player->currentPts / 1000000ull;
    unlock(&player->lock);
+
+   if (logDecision)
+      logInfo("[video-select] reason=%s clockMs=%llu currentBeforeMs=%llu selectedMs=%llu ready=%d due=%d future=%d seekBlocked=%d nextFutureMs=%llu nextFutureInMs=%llu seekMinMs=%llu oldestSeekBlockedMs=%llu dropped=%d droppedPtsRangeMs=%llu..%llu droppedPtsMs=%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu seekActive=%d frameChanged=%d\n",
+              decisionReason, (unsigned long long)(clock/1000000ull),
+              (unsigned long long)(previousDisplayedPts/1000000ull),
+              (unsigned long long)(best >= 0 ? bestPts/1000000ull : 0),
+              readyCountNow, dueCount, futureCount, seekBlockedCount,
+              (unsigned long long)(nextDueEligiblePts/1000000ull),
+              (unsigned long long)nextFutureInMs,
+              (unsigned long long)(decisionSeekMinPts/1000000ull),
+              (unsigned long long)(nextSeekEligiblePts/1000000ull), decisionDroppedCount,
+              (unsigned long long)(decisionDroppedMinPts/1000000ull),
+              (unsigned long long)(decisionDroppedMaxPts/1000000ull),
+              (unsigned long long)(decisionDroppedPts[0]/1000000ull),
+              (unsigned long long)(decisionDroppedPts[1]/1000000ull),
+              (unsigned long long)(decisionDroppedPts[2]/1000000ull),
+              (unsigned long long)(decisionDroppedPts[3]/1000000ull),
+              (unsigned long long)(decisionDroppedPts[4]/1000000ull),
+              (unsigned long long)(decisionDroppedPts[5]/1000000ull),
+              (unsigned long long)(decisionDroppedPts[6]/1000000ull),
+              (unsigned long long)(decisionDroppedPts[7]/1000000ull),
+              decisionSeekActive, selectedNewFrame);
 
    if (doReport)
       logInfo("[video-live-diag] spanMs=2000 render=%llu presented=%llu newFrame=%llu repeated=%llu heldSeek=%llu heldPreroll=%llu renderLockWaitAvgUs=%llu renderLockWaitMaxUs=%llu renderLockHoldAvgUs=%llu renderLockHoldMaxUs=%llu selectAvgUs=%llu selectMaxUs=%llu decodeLockWaitAvgUs=%llu decodeLockWaitMaxUs=%llu decoded=%llu decodePoll=%llu pollAvgUs=%llu pollMaxUs=%llu pollEmpty=%llu pollErr=%llu auRead=%llu readAvgUs=%llu readMaxUs=%llu readErr=%llu auFeed=%llu feedAvgUs=%llu feedMaxUs=%llu feedBlocked=%llu ringWait=%llu ringWaitMs=%llu ready=%d readyHigh=%d dropped=%llu noDue=%llu empty=%llu clockMs=%llu currentPtsMs=%llu readyOldMs=%llu readyNewMs=%llu decodedPts=%llu..%llu decodedGapMaxMs=%llu auBytes=%llu auMaxBytes=%llu auPtsGapMaxMs=%llu presentedPts=%llu..%llu presentedGapMaxMs=%llu clockLateMaxMs=%llu videoAheadMaxMs=%llu audioAlive=%d audioValid=%d audioRate=%d audioBaseMs=%llu audioPlayed=%llu audioSpace=%d audioElapsedMs=%llu audioPlayedDelta=%llu audioMeasuredRate=%llu audioCounterReset=%d audioClockMs=%llu audioVsOldestMs=%lld readyPtsSpanMs=%llu videoPtsDeltaMs=%llu videoPtsRatePermille=%llu videoPtsReset=%d audioPcmCalls=%llu pcmAvgUs=%llu pcmMaxUs=%llu pcmBlocks=%llu pcmSamples=%llu audioAuReads=%llu audioReadAvgUs=%llu audioReadMaxUs=%llu audioAuBytes=%llu audioAuFeeds=%llu audioAuFeedAvgUs=%llu audioAuFeedMaxUs=%llu audioPushCalls=%llu audioPushAvgUs=%llu audioPushMaxUs=%llu audioFeedWaitMs=%llu slotStates=0x%x\n",

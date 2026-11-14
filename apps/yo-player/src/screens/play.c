@@ -1181,21 +1181,23 @@ static void worker(uint64_t arg)
          }
       }
       int defaultPick = -1;
-      // Match an explicitly identified non-dubbed original first. Never default to an auto-dub.
+      // 1) Prefer an explicitly identified upload-original track, when available.
       for (int j = 0; j < state.audioCount; j++) {
-         if (strcmp(state.audioIds[j], "__original_upload__") == 0) { defaultPick = j; break; }
-         const StreamFormat *candidate = pickAudioForTrack(info, state.audioIds[j]);
-         if (candidate && !candidate->audioIsAutoDubbed) { defaultPick = j; break; }
+         if (strcmp(state.audioIds[j], "__original_upload__") == 0) {
+            defaultPick = j;
+            break;
+         }
       }
-      // Match YouTube's declared default only if it is not marked as an auto-dub.
-      if (defaultPick < 0 && info->defaultAudioTrackId[0])
-         for (int j = 0; j < state.audioCount; j++)
-            if (strcmp(state.audioIds[j], info->defaultAudioTrackId) == 0) {
-               const StreamFormat *candidate = pickAudioForTrack(info, state.audioIds[j]);
-               if (candidate && !candidate->audioIsAutoDubbed) defaultPick = j;
-               break;
-            }
-      // Some player responses omit the captions-level ID but mark a default adaptive format.
+      // 2) Respect YouTube's declared default track, provided it is not an auto-dub.
+      if (defaultPick < 0 && info->defaultAudioTrackId[0]) {
+         for (int j = 0; j < state.audioCount; j++) {
+            if (strcmp(state.audioIds[j], info->defaultAudioTrackId) != 0) continue;
+            const StreamFormat *candidate = pickAudioForTrack(info, state.audioIds[j]);
+            if (candidate && !candidate->audioIsAutoDubbed) defaultPick = j;
+            break;
+         }
+      }
+      // 3) Fall back to an adaptive format explicitly marked as the default.
       if (defaultPick < 0)
          for (int i = 0; i < info->formatCount && defaultPick < 0; i++) {
             const StreamFormat *f = &info->formats[i];
@@ -1203,6 +1205,16 @@ static void worker(uint64_t arg)
             for (int j = 0; j < state.audioCount; j++)
                if (strcmp(state.audioIds[j], f->audioTrackId) == 0) { defaultPick = j; break; }
          }
+      // 4) Last resort: choose the first available non-auto-dubbed track.
+      if (defaultPick < 0) {
+         for (int j = 0; j < state.audioCount; j++) {
+            const StreamFormat *candidate = pickAudioForTrack(info, state.audioIds[j]);
+            if (candidate && !candidate->audioIsAutoDubbed) {
+               defaultPick = j;
+               break;
+            }
+         }
+      }
       logInfo("[audio-diag] video defaultAudioTrackId='%s' defaultPick=%d tracks=%d\n",
               info->defaultAudioTrackId, defaultPick, state.audioCount);
       for (int i = 0; i < state.audioCount; i++) {
@@ -1907,8 +1919,11 @@ static void initPlay(void)
    addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CROSS), "Return");
    addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CIRCLE), "Return");
    setButtonHintsStableLayout(&liveFailureHints, 1);
-   initButtonHints(&playbackHints, &uiFont, 0, 20, 14, activeTheme->textSecondary);
-   setButtonHintGap(&playbackHints, 14);
+   // Playback hints are intentionally kept on one row. Use a larger base size so
+   // the glyphs and captions remain legible at SD UI scaling (including 1.5x),
+   // while tighter inter-group spacing leaves room for START and SELECT.
+   initButtonHints(&playbackHints, &uiFont, 0, 24, 16, activeTheme->textSecondary);
+   setButtonHintGap(&playbackHints, 7);
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CROSS), "Play / Pause");
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_LEFT), NULL);
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Seek");
@@ -1917,6 +1932,8 @@ static void initPlay(void)
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_TRIANGLE), "Subtitles");
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R2), "Crop");
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CIRCLE), "Hide OSD");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_START), "Options");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_SELECT), "Description");
    initLabelRaw(&toastLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");   // raw: shows track names
    initLabelRaw(&askPromptPrefixLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "Press");
    initLabelRaw(&askPromptSuffixLabel, &uiFont, 0, 0, 260, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "to skip sponsor");
@@ -4695,7 +4712,7 @@ static void drawSeekBar(void)
    int barLeft  = (int)(state.screenW * 0.24f);
    int barRight = state.screenW - barLeft;
    int span     = barRight - barLeft;
-   int barY     = (int)(state.screenH * (state.screenH <= 576 ? 0.90f : 0.94f));
+   int barY     = (int)(state.screenH * (state.screenH <= 576 ? 0.86f : 0.91f));
    int barH     = 8;
    int barTopY  = barY - barH / 2;
    int filledW  = (int)(progress * span);
@@ -5080,7 +5097,7 @@ static void drawPlay(void)
       if (state.stage == STAGE_PLAYING && controlsVisible() && !overlayUp) {
          if (!state.isLive || state.liveDvr) {
             drawSeekBar();
-            int seekBarY = (int)(state.screenH * (state.screenH <= 576 ? 0.90f : 0.94f));
+            int seekBarY = (int)(state.screenH * (state.screenH <= 576 ? 0.86f : 0.91f));
             playbackHints.y = seekBarY + 15;
             drawButtonHintsFitted(&playbackHints, state.screenW, seekBarY + 16, 0, 1);
          }
