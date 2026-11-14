@@ -12,6 +12,7 @@
 #include "ui/button-hints.h"
 #include "ui/console-glyphs.h"
 #include "ui/icon-font.h"
+#include "ui/loading-indicator.h"
 
 #include "gfx.h"
 #include "theme.h"
@@ -104,7 +105,6 @@ typedef struct {
 
 static Font        uiFont;
 static Label       queryLabel, queryPromptPrefix, queryPromptSuffix;
-static Label       statusDotsLabel;
 static uint64_t    searchLoadingStartedUs;
 static Label       sortLabel, sortLabels[SORT_COUNT], statusLabel, historyTitleLabel, historyEmptyLabel;
 static Label       channelCategoryLabels[4];
@@ -542,9 +542,6 @@ static void initSearch(void)
                 search.screenW - 2 * MARGIN_X, AUTO, 21,
                 activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
    setLabelScaleWithUi(&statusLabel, 1);
-   initLabelRaw(&statusDotsLabel, &uiFont, MARGIN_X, 0, 48, AUTO, 21,
-                activeTheme->textSecondary, TEXT_NOWRAP, "...");
-   setLabelScaleWithUi(&statusDotsLabel, 1);
    initLabel(&historyTitleLabel, &uiFont, MARGIN_X, 0, AUTO, AUTO, 24,
              activeTheme->textSecondary, TEXT_NOWRAP, "Recent searches");
    setLabelScaleWithUi(&historyTitleLabel, 1);
@@ -991,17 +988,7 @@ static void drawSearch(void)
                (search.channelId[0] ? "Unable to load this channel category" : "Unable to load results") :
                (stage == GRID_EMPTY ? "No results" : "Loading...");
             if (stage == GRID_RUNNING) {
-               static const char *const frames[] = { "", ".", "..", "..." };
-               uint64_t now = getTimeUs();
-               if (!searchLoadingStartedUs) searchLoadingStartedUs = now;
-               setLabelText(&statusLabel, "Loading");
-               setLabelText(&statusDotsLabel, frames[((now - searchLoadingStartedUs) / 300000ULL) & 3ULL]);
-               refreshLabelScale(&statusLabel);
-               refreshLabelScale(&statusDotsLabel);
-               moveLabel(&statusLabel, MARGIN_X, search.gridTop);
-               moveLabel(&statusDotsLabel, MARGIN_X + statusLabel.tt.tex.w, search.gridTop);
-               drawLabel(&statusLabel);
-               drawLabel(&statusDotsLabel);
+               drawLoadingIndicator(search.screenW / 2, search.screenH / 2, &searchLoadingStartedUs);
             } else {
                searchLoadingStartedUs = 0;
                setLabelText(&statusLabel, message);

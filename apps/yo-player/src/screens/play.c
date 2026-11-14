@@ -22,6 +22,7 @@
 #include "pad.h"
 #include "font.h"
 #include "ui/label.h"
+#include "ui/loading-indicator.h"
 #include "ui/button-hints.h"
 #include "ui/console-glyphs.h"
 #include "ui/volume-meter.h"
@@ -456,8 +457,6 @@ static struct {
 
 static Font  uiFont;
 static Label statusLabel;
-static Label loadingDotsLabel;
-static int loadingDotsMaxWidth;
 static uint64_t loadingAnimationStartedUs;
 static Label statLabels[STAT_LINES];
 static Label timeLeftLabel, timeRightLabel;   // seek bar: current time (left) / total (right)
@@ -1815,7 +1814,6 @@ static int playbackChapterRowHeight(void)
 }
 
 static void renderDescription(void);
-static const char *getAnimatedLoadingText(void);
 
 static void applyPlaybackUiLabelScale(float scale)
 {
@@ -1825,10 +1823,6 @@ static void applyPlaybackUiLabelScale(float scale)
 
 #define SCALE_PLAYBACK_LABEL(label) setLabelFixedRenderScale(&(label), scale, 0)
    SCALE_PLAYBACK_LABEL(statusLabel);
-   SCALE_PLAYBACK_LABEL(loadingDotsLabel);
-   setLabelText(&loadingDotsLabel, "...");
-   loadingDotsMaxWidth = loadingDotsLabel.tt.tex.w;
-   setLabelText(&loadingDotsLabel, "");
    for (int i = 0; i < STAT_LINES; i++) {
       statLabels[i].size = playbackSubtitleFontSize(22);
       statLabels[i].fixedRenderScale = 0.0f;
@@ -1900,10 +1894,6 @@ static void initPlay(void)
 
    uiFont = openSystemFont(FONT_POP);
    initLabel(&statusLabel, &uiFont, 0, 0, state.screenW - 80, AUTO, playbackFontSize(28), activeTheme->textPrimary, TEXT_WRAP, "");
-   initLabelRaw(&loadingDotsLabel, &uiFont, 0, 0, 100, AUTO, playbackFontSize(28), activeTheme->textPrimary, TEXT_NOWRAP, "");
-   setLabelText(&loadingDotsLabel, "...");
-   loadingDotsMaxWidth = loadingDotsLabel.tt.tex.w;
-   setLabelText(&loadingDotsLabel, "");
    statsTextPadding = (int)(measureFontText(&uiFont, playbackSubtitleFontSize(22), "   ") + 0.5f);
    if (statsTextPadding < 3) statsTextPadding = 3;
    int statsTextMaxWidth = state.screenW - 80 - 2 * statsTextPadding;
@@ -1919,11 +1909,10 @@ static void initPlay(void)
    addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CROSS), "Return");
    addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CIRCLE), "Return");
    setButtonHintsStableLayout(&liveFailureHints, 1);
-   // Playback hints are intentionally kept on one row. Use a larger base size so
-   // the glyphs and captions remain legible at SD UI scaling (including 1.5x),
-   // while tighter inter-group spacing leaves room for START and SELECT.
-   initButtonHints(&playbackHints, &uiFont, 0, 24, 16, activeTheme->textSecondary);
-   setButtonHintGap(&playbackHints, 7);
+   // Use two rows so all ten playback controls remain readable at 1.5x UI scale.
+   // drawButtonHintsFitted() only scales down when the available width requires it.
+   initButtonHints(&playbackHints, &uiFont, 0, 30, 20, activeTheme->textSecondary);
+   setButtonHintGap(&playbackHints, 8);
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CROSS), "Play / Pause");
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_LEFT), NULL);
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Seek");
@@ -4445,12 +4434,10 @@ static void updatePlay(void)
 
    // status text: the failure reason, or "Loading..." until playback. setLabelText skips unchanged
    // text, so calling it each frame only rasterises on a real change.
-   setLabelText(&loadingDotsLabel, "");
    if (state.audioSwitchThreadActive) setLabelText(&statusLabel, state.message[0] ? state.message : "Loading audio...");
    else if (state.resolutionSwitchThreadActive) {
       if (state.resolutionSwitchTeeRecovery) {
          setLabelText(&statusLabel, "Loading");
-         setLabelText(&loadingDotsLabel, getAnimatedLoadingText());
       } else {
          setLabelText(&statusLabel, "Changing resolution...");
       }
@@ -4460,19 +4447,10 @@ static void updatePlay(void)
          setLabelText(&statusLabel, state.message);
       } else {
          setLabelText(&statusLabel, "Loading");
-         setLabelText(&loadingDotsLabel, getAnimatedLoadingText());
       }
    }
 }
 
-static const char *getAnimatedLoadingText(void)
-{
-   static const char *const frames[] = { "", ".", "..", "..." };
-   uint64_t now = sys_time_get_system_time();
-   if (!loadingAnimationStartedUs) loadingAnimationStartedUs = now;
-   unsigned frame = (unsigned)(((now - loadingAnimationStartedUs) / 300000ULL) & 3ULL);
-   return frames[frame];
-}
 
 // Measure the real presented frame rate from changes in the frame pointer.
 // The adaptive window is repeated throughout playback, not just at startup.
@@ -4698,8 +4676,16 @@ static void drawLiveBadgeAt(int x, int y)
    drawLabelAt(&liveBadgeLabel, x + padX, y + padY);
 }
 
-// a red YouTube-style progress bar low on the screen with current/total time on each side, drawn from
-// plain rectangles (no spritesheet), with sponsor segments marked over the fill.
+// Keep the seek bar, subtitle baseline and two-row playback hints coordinated.
+// The bar is raised to reserve a dedicated footer area for the larger controls.
+static int playbackSeekBarY(void)
+{
+   if (state.screenH <= 576) return (int)(state.screenH * 0.77f);
+   if (state.screenH >= 900) return (int)(state.screenH * 0.86f);
+   return (int)(state.screenH * 0.82f);
+}
+
+// a red YouTube-style progress bar with current/total time and sponsor segments.
 static void drawSeekBar(void)
 {
    float duration = state.isLive ? liveTimelineLength() : getVideoDurationSeconds(state.player);
@@ -4712,7 +4698,7 @@ static void drawSeekBar(void)
    int barLeft  = (int)(state.screenW * 0.24f);
    int barRight = state.screenW - barLeft;
    int span     = barRight - barLeft;
-   int barY     = (int)(state.screenH * (state.screenH <= 576 ? 0.86f : 0.91f));
+   int barY     = playbackSeekBarY();
    int barH     = 8;
    int barTopY  = barY - barH / 2;
    int filledW  = (int)(progress * span);
@@ -4775,7 +4761,15 @@ static void drawSubtitle(void)
 {
    if (state.subtitlePick < 0 || subtitleLabel.tt.tex.w == 0) return;
    int x = state.screenW / 2 - subtitleLabel.tt.tex.w / 2;
-   int y = (int)(state.screenH * 0.94f) - 40 - subtitleLabel.tt.tex.h;
+   // Move captions above the seek HUD only while that HUD is actually visible.
+   // Once the OSD times out (or a full-screen overlay hides it), restore the
+   // original subtitle baseline instead of leaving captions permanently raised.
+   int seekHudVisible = controlsVisible() && !state.chaptersVisible &&
+                        !state.descriptionVisible && !optionsVisible;
+   int subtitleAnchorY = seekHudVisible
+      ? playbackSeekBarY()
+      : (int)(state.screenH * 0.94f);
+   int y = subtitleAnchorY - 40 - subtitleLabel.tt.tex.h;
    y -= getSubtitleOffset();
    if (y < 12) y = 12;
    int maxY = state.screenH - subtitleLabel.tt.tex.h - 12;
@@ -5097,9 +5091,15 @@ static void drawPlay(void)
       if (state.stage == STAGE_PLAYING && controlsVisible() && !overlayUp) {
          if (!state.isLive || state.liveDvr) {
             drawSeekBar();
-            int seekBarY = (int)(state.screenH * (state.screenH <= 576 ? 0.86f : 0.91f));
-            playbackHints.y = seekBarY + 15;
-            drawButtonHintsFitted(&playbackHints, state.screenW, seekBarY + 16, 0, 1);
+            float uiScale = getGfxUiScaleFactor();
+            if (uiScale < 1.0f) uiScale = 1.0f;
+            // SD output keeps hint glyphs at 1.5x independently of UI zoom;
+            // HD output follows the configured UI scale. Reserve the footer
+            // using the same effective height as drawButtonHintsFitted().
+            float hintScale = isGfxSdVideoOutput() ? 1.5f : uiScale;
+            int hintGlyphHeight = (int)(playbackHints.glyphHeight * hintScale + 0.5f);
+            int hintBottomY = state.screenH - hintGlyphHeight - 16;
+            drawButtonHintsFitted(&playbackHints, state.screenW, hintBottomY, 8, 2);
          }
       }
       if (state.stage == STAGE_PLAYING && fullPlaybackHudVisible() && !overlayUp) {
@@ -5125,16 +5125,15 @@ static void drawPlay(void)
    // until the first frame is presented (open, then the async resume seek's reload) keep the loading
    // status up instead of a black screen; with no player this shows the failure message.
    if (!state.firstFrameSeen || state.audioSwitchThreadActive || state.resolutionSwitchThreadActive) {
-      int reserveDots = strcmp(statusLabel.text, "Loading") == 0 ? loadingDotsMaxWidth : 0;
-      int statusX = state.screenW / 2 - (statusLabel.tt.tex.w + reserveDots) / 2;
-      int statusY = state.screenH / 2 - statusLabel.tt.tex.h / 2;
-      if (state.audioSwitchThreadActive)
-         drawBadge(&statusLabel, statusX - BADGE_PAD_X, statusY - 4);
-      else {
+      if (state.stage == STAGE_FAILED) {
+         int statusX = state.screenW / 2 - statusLabel.tt.tex.w / 2;
+         int statusY = state.screenH / 2 - statusLabel.tt.tex.h / 2;
          drawLabelAt(&statusLabel, statusX, statusY);
-         if (loadingDotsLabel.tt.tex.w > 0)
-            drawLabelAt(&loadingDotsLabel, statusX + statusLabel.tt.tex.w, statusY);
+      } else {
+         drawLoadingIndicator(state.screenW / 2, state.screenH / 2, &loadingAnimationStartedUs);
       }
+   } else {
+      loadingAnimationStartedUs = 0;
    }
 
    if (state.liveFailureVisible) {
@@ -5219,7 +5218,6 @@ static void termPlay(void)
    if (state.liveRetiringPlayer) { destroyVideoPlayer(state.liveRetiringPlayer); state.liveRetiringPlayer = NULL; }
    if (state.vodRetiringPlayer) { destroyVideoPlayer(state.vodRetiringPlayer); state.vodRetiringPlayer = NULL; }
    freeLabel(&statusLabel);
-   freeLabel(&loadingDotsLabel);
    for (int i = 0; i < STAT_LINES; i++) freeLabel(&statLabels[i]);
    freeLabel(&timeLeftLabel);
    freeLabel(&timeRightLabel);

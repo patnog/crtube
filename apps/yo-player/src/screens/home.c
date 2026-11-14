@@ -23,6 +23,7 @@ extern void sysProcessExit(int status);
 #include "ui/button-hints.h"
 #include "ui/console-glyphs.h"
 #include "ui/icon-font.h"
+#include "ui/loading-indicator.h"
 
 #include "gfx.h"
 #include "theme.h"
@@ -190,7 +191,6 @@ static struct {
 
 static Font        uiFont;
 static Label       titleLabel, statusLabel, playlistErrorLabel, playlistToastLabel;
-static Label       statusDotsLabel;
 static uint64_t    homeLoadingStartedUs;
 static Label       downloadSpacePrefixLabel, downloadSpaceAvailableLabel;
 static int         downloadSpaceAvailableLow;
@@ -2896,9 +2896,6 @@ static void initHome(void)
    setLabelScaleWithUi(&downloadSpaceAvailableLabel, 1);
    downloadSpaceAvailableLow = 0;
    initLabel(&statusLabel, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, AUTO, 21, activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
-   initLabel(&statusDotsLabel, &uiFont, MARGIN_X, gridTop, 48, AUTO, 21,
-             activeTheme->textSecondary, TEXT_NOWRAP, "...");
-   setLabelScaleWithUi(&statusDotsLabel, 1);
    initLabel(&playlistErrorLabel, &uiFont, MARGIN_X, 0, home.screenW - 2 * MARGIN_X, AUTO, 18,
              activeTheme->textPrimary, TEXT_WRAP, "This playlist is private, restricted or unavailable.");
    initLabel(&playlistToastLabel, &uiFont, 0, 0, home.screenW - 80, AUTO, 23,
@@ -4236,16 +4233,7 @@ static void drawHome(void)
    } else {
       GridStage stage = gridStage(&home.grid);
       if (stage == GRID_RUNNING) {
-         static const char *const frames[] = { "", ".", "..", "..." };
-         uint64_t now = getTimeUs();
-         if (!homeLoadingStartedUs) homeLoadingStartedUs = now;
-         setLabelText(&statusLabel, "Loading");
-         setLabelText(&statusDotsLabel, frames[((now - homeLoadingStartedUs) / 300000ULL) & 3ULL]);
-         refreshLabelScale(&statusLabel);
-         refreshLabelScale(&statusDotsLabel);
-         moveLabel(&statusDotsLabel, statusLabel.x + statusLabel.tt.tex.w, statusLabel.y);
-         drawLabel(&statusLabel);
-         drawLabel(&statusDotsLabel);
+         drawLoadingIndicator(home.screenW / 2, home.screenH / 2, &homeLoadingStartedUs);
       } else {
          homeLoadingStartedUs = 0;
          setLabelText(&statusLabel, stage == GRID_ERROR ? "Unable to load content" : "No results");
