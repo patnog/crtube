@@ -122,6 +122,11 @@ struct VideoPlayer {
    uint64_t diagAuFeeds, diagAuFeedUs, diagAuFeedMaxUs, diagAuFeedBlocked;
    uint64_t diagRingWaits, diagRingWaitUs;
    uint64_t diagRenderCalls, diagPresented, diagDroppedReady, diagNoDue, diagEmptyRing;
+   uint64_t diagRenderLockWaitUs, diagRenderLockWaitMaxUs;
+   uint64_t diagRenderLockHoldUs, diagRenderLockHoldMaxUs;
+   uint64_t diagFrameSelectUs, diagFrameSelectMaxUs, diagFrameSelectCalls;
+   uint64_t diagDecodeLockWaitUs, diagDecodeLockWaitMaxUs, diagDecodeLockCalls;
+   uint64_t diagRenderNewFrames, diagRenderRepeatedFrames, diagRenderHeldSeek, diagRenderHeldPreroll;
    uint64_t diagClockVideoLateMaxNs, diagClockVideoAheadMaxNs;
    uint64_t diagReadyOldestPts, diagReadyNewestPts;
    uint64_t diagPrevDecodedPts, diagDecodedFirstPts, diagDecodedLastPts, diagDecodedPtsGapMaxNs;
@@ -133,6 +138,8 @@ struct VideoPlayer {
    uint64_t diagAudioFeeds, diagAudioAuFeedUs, diagAudioAuFeedMaxUs;
    int diagReadyCount, diagReadyHighWater;
    uint64_t diagLastReportUs;
+   // Previous report samples for measuring the audio-master clock and video PTS progression.
+   uint64_t diagClockSampleUs, diagAudioPlayedSample, diagVideoPtsSample;
    // Thread-local-in-practice pending buckets avoid taking the player mutex on every decoder poll.
    uint64_t diagDecodePublishUs;
    uint64_t diagPendingDecodeCalls, diagPendingDecodeCallUs, diagPendingDecodeCallMaxUs;
@@ -341,7 +348,12 @@ static int presentationClockNs(VideoPlayer *player, uint64_t nowUs, uint64_t *cl
 static int claimEmptySlot(VideoPlayer *player)
 {
    int found = -1;
+   uint64_t lockStartUs = sys_time_get_system_time();
    lock(&player->lock);
+   uint64_t lockWaitUs = sys_time_get_system_time() - lockStartUs;
+   player->diagDecodeLockCalls++;
+   player->diagDecodeLockWaitUs += lockWaitUs;
+   if (lockWaitUs > player->diagDecodeLockWaitMaxUs) player->diagDecodeLockWaitMaxUs = lockWaitUs;
    for (int i = 0; i < FRAME_SLOTS; i++)
       if (player->slots[i].state == SLOT_EMPTY) { player->slots[i].state = SLOT_FILLING; found = i; break; }
    unlock(&player->lock);
@@ -619,7 +631,12 @@ static void decodeThread(uint64_t arg)
          }
       }
 
+      uint64_t publishLockStartUs = sys_time_get_system_time();
       lock(&player->lock);
+      uint64_t publishLockWaitUs = sys_time_get_system_time() - publishLockStartUs;
+      player->diagDecodeLockCalls++;
+      player->diagDecodeLockWaitUs += publishLockWaitUs;
+      if (publishLockWaitUs > player->diagDecodeLockWaitMaxUs) player->diagDecodeLockWaitMaxUs = publishLockWaitUs;
       if (got == 1) {
          int logFirstReady = !player->diagFirstFrameReady;
          if (logFirstReady) player->diagFirstFrameReady = 1;
@@ -1124,12 +1141,23 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
    uint64_t nowUs = sys_time_get_system_time();
    int releaseAudio = 0;   // set when pre-roll fires, to un-hold the audio feed after the lock is dropped
    int releaseAudioPaused = 0;
+   uint64_t lockStartUs = nowUs;
    lock(&player->lock);
+   uint64_t lockAcquiredUs = sys_time_get_system_time();
+   uint64_t lockWaitUs = lockAcquiredUs - lockStartUs;
+   player->diagRenderLockWaitUs += lockWaitUs;
+   if (lockWaitUs > player->diagRenderLockWaitMaxUs) player->diagRenderLockWaitMaxUs = lockWaitUs;
    player->diagRenderCalls++;
 
    // a posted seek freezes presentation: frames decoded before the flush must not advance the
    // position; the displayed frame stays up until the new position's frames arrive
-   if (player->seekRequestNs >= 0) return takeHeldFrame(player, width, height);
+   if (player->seekRequestNs >= 0) {
+      player->diagRenderHeldSeek++;
+      uint64_t holdUs = sys_time_get_system_time() - lockAcquiredUs;
+      player->diagRenderLockHoldUs += holdUs;
+      if (holdUs > player->diagRenderLockHoldMaxUs) player->diagRenderLockHoldMaxUs = holdUs;
+      return takeHeldFrame(player, width, height);
+   }
 
    // anchor the clock to the earliest ready frame, with a short pre-roll: hold the first present until a
    // few frames are buffered (PREROLL_FRAMES) and the audio clock is live. Starting on the very first
@@ -1152,7 +1180,13 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
             audioWaiting = 0;
          }
       }
-      if (found < 0 || !decoderWarm || audioWaiting) return takeHeldFrame(player, width, height);
+      if (found < 0 || !decoderWarm || audioWaiting) {
+         player->diagRenderHeldPreroll++;
+         uint64_t holdUs = sys_time_get_system_time() - lockAcquiredUs;
+         player->diagRenderLockHoldUs += holdUs;
+         if (holdUs > player->diagRenderLockHoldMaxUs) player->diagRenderLockHoldMaxUs = holdUs;
+         return takeHeldFrame(player, width, height);
+      }
       player->basePts    = earliest;
       player->baseWallUs = nowUs;
       player->started    = 1;
@@ -1181,6 +1215,7 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
    int best = -1; uint64_t bestPts = 0;
    int readyCountNow = 0;
    uint64_t oldestReady = 0, newestReady = 0;
+   uint64_t selectStartUs = sys_time_get_system_time();
    for (int i = 0; i < FRAME_SLOTS; i++) {
       if (player->slots[i].state == SLOT_READY) {
          if (!readyCountNow || player->slots[i].pts < oldestReady) oldestReady = player->slots[i].pts;
@@ -1191,6 +1226,10 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
           (!player->seekInProgress || player->slots[i].pts >= player->seekFrameMinPts) &&
           (best < 0 || player->slots[i].pts >= bestPts)) { best = i; bestPts = player->slots[i].pts; }
    }
+   uint64_t selectUs = sys_time_get_system_time() - selectStartUs;
+   player->diagFrameSelectCalls++;
+   player->diagFrameSelectUs += selectUs;
+   if (selectUs > player->diagFrameSelectMaxUs) player->diagFrameSelectMaxUs = selectUs;
    player->diagReadyCount = readyCountNow;
    player->diagReadyOldestPts = oldestReady;
    player->diagReadyNewestPts = newestReady;
@@ -1203,11 +1242,13 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
          player->diagClockVideoAheadMaxNs = newestReady - clock;
    }
 
+   int selectedNewFrame = 0;
    if (best >= 0) {
       // The decoder has completed the seek and a frame from the new position is now being
       // presented. Until this point callers must not enqueue another chapter seek.
       player->seekInProgress = 0;
       if (player->displayIndex != best || player->currentPts != bestPts) {
+         selectedNewFrame = 1;
          player->diagPresented++;
          if (!player->diagPresentedFirstPts) player->diagPresentedFirstPts = bestPts;
          if (player->diagPrevPresentedPts && bestPts > player->diagPrevPresentedPts &&
@@ -1241,12 +1282,23 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
          logFirstReturned = 1;
       }
    }
+   if (buffer) {
+      if (selectedNewFrame) player->diagRenderNewFrames++;
+      else player->diagRenderRepeatedFrames++;
+   }
    uint64_t reportNow = sys_time_get_system_time();
+   uint64_t renderLockHoldUs = reportNow - lockAcquiredUs;
+   player->diagRenderLockHoldUs += renderLockHoldUs;
+   if (renderLockHoldUs > player->diagRenderLockHoldMaxUs) player->diagRenderLockHoldMaxUs = renderLockHoldUs;
    int doReport = !player->diagLastReportUs || reportNow - player->diagLastReportUs >= 2000000ull;
    uint64_t dCalls = 0, dCallUs = 0, dCallMax = 0, dFrames = 0, dEmpty = 0, dErrors = 0;
    uint64_t aReads = 0, aReadUs = 0, aReadMax = 0, aReadErrors = 0;
    uint64_t aFeeds = 0, aFeedUs = 0, aFeedMax = 0, aBlocked = 0, ringWaits = 0, ringWaitUs = 0;
    uint64_t renders = 0, presented = 0, dropped = 0, noDue = 0, emptyRing = 0;
+   uint64_t renderLockWaitUs = 0, renderLockWaitMaxUs = 0, renderLockHoldTotalUs = 0, renderLockHoldMaxUs = 0;
+   uint64_t frameSelectUs = 0, frameSelectMaxUs = 0, frameSelectCalls = 0;
+   uint64_t decodeLockWaitUs = 0, decodeLockWaitMaxUs = 0, decodeLockCalls = 0;
+   uint64_t renderNewFrames = 0, renderRepeatedFrames = 0, renderHeldSeek = 0, renderHeldPreroll = 0;
    uint64_t lateMax = 0, aheadMax = 0, oldestMs = 0, newestMs = 0;
    uint64_t decodedFirstMs=0, decodedLastMs=0, decodedGapMaxMs=0, auBytes=0, auSizeMax=0, auGapMaxMs=0;
    uint64_t presentedFirstMs=0, presentedLastMs=0, presentedGapMaxMs=0;
@@ -1256,7 +1308,12 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
    uint64_t audioFeeds=0, audioAuFeedUs=0, audioAuFeedMaxUs=0;
    int audioSpace=0;
    int readyNow = 0, readyHigh = 0, audioRate = 0, audioAlive = 0, audioValid = 0;
-   uint64_t audioBaseMs = 0, audioPlayed = 0, clockMs = clock / 1000000ull;
+   uint64_t audioBasePts = 0, audioBaseMs = 0, audioPlayed = 0, clockMs = clock / 1000000ull;
+   uint64_t audioElapsedUs = 0, audioPlayedDelta = 0, audioMeasuredRate = 0;
+   uint64_t videoPtsDeltaMs = 0, videoPtsRatePermille = 0, readyPtsSpanMs = 0;
+   uint64_t audioClockNs = 0;
+   long long audioVsOldestMs = 0;
+   int audioCounterReset = 0, videoPtsReset = 0;
    int slotStates = 0;
    if (doReport) {
       player->diagLastReportUs = reportNow;
@@ -1267,6 +1324,14 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
       ringWaits=player->diagRingWaits; ringWaitUs=player->diagRingWaitUs;
       renders=player->diagRenderCalls; presented=player->diagPresented; dropped=player->diagDroppedReady;
       noDue=player->diagNoDue; emptyRing=player->diagEmptyRing;
+      renderLockWaitUs=player->diagRenderLockWaitUs; renderLockWaitMaxUs=player->diagRenderLockWaitMaxUs;
+      renderLockHoldTotalUs=player->diagRenderLockHoldUs; renderLockHoldMaxUs=player->diagRenderLockHoldMaxUs;
+      frameSelectUs=player->diagFrameSelectUs; frameSelectMaxUs=player->diagFrameSelectMaxUs;
+      frameSelectCalls=player->diagFrameSelectCalls;
+      decodeLockWaitUs=player->diagDecodeLockWaitUs; decodeLockWaitMaxUs=player->diagDecodeLockWaitMaxUs;
+      decodeLockCalls=player->diagDecodeLockCalls;
+      renderNewFrames=player->diagRenderNewFrames; renderRepeatedFrames=player->diagRenderRepeatedFrames;
+      renderHeldSeek=player->diagRenderHeldSeek; renderHeldPreroll=player->diagRenderHeldPreroll;
       lateMax=player->diagClockVideoLateMaxNs; aheadMax=player->diagClockVideoAheadMaxNs;
       readyNow=readyCountNow; readyHigh=player->diagReadyHighWater;
       decodedFirstMs=player->diagDecodedFirstPts/1000000ull; decodedLastMs=player->diagDecodedLastPts/1000000ull;
@@ -1283,12 +1348,35 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
       audioFeeds=player->diagAudioFeeds; audioAuFeedUs=player->diagAudioAuFeedUs;
       audioAuFeedMaxUs=player->diagAudioAuFeedMaxUs;
       oldestMs=oldestReady/1000000ull; newestMs=newestReady/1000000ull;
-      audioAlive=player->audioAlive; audioValid=player->audioClockValid; audioBaseMs=player->audioClockBasePts/1000000ull;
+      audioAlive=player->audioAlive; audioValid=player->audioClockValid;
+      audioBasePts=player->audioClockBasePts; audioBaseMs=audioBasePts/1000000ull;
       if (player->audioFeedSlot >= 0 && getAudioSource(player)->audioRate > 0) {
          audioRate=getAudioSource(player)->audioRate;
          audioPlayed=getAudioPcmFeedPlayedFramesSlot(player->audioFeedSlot);
          audioSpace=getAudioPcmFeedSpaceSlot(player->audioFeedSlot);
       }
+      if (audioValid && audioRate > 0) {
+         audioClockNs=audioBasePts + audioPlayed * 1000000000ull / (uint64_t)audioRate;
+         if (readyNow > 0) {
+            if (audioClockNs >= oldestReady) audioVsOldestMs=(long long)((audioClockNs-oldestReady)/1000000ull);
+            else audioVsOldestMs=-(long long)((oldestReady-audioClockNs)/1000000ull);
+            readyPtsSpanMs=(newestReady-oldestReady)/1000000ull;
+         }
+      }
+      if (player->diagClockSampleUs && reportNow > player->diagClockSampleUs) {
+         audioElapsedUs=reportNow-player->diagClockSampleUs;
+         if (audioPlayed >= player->diagAudioPlayedSample) {
+            audioPlayedDelta=audioPlayed-player->diagAudioPlayedSample;
+            audioMeasuredRate=audioElapsedUs ? audioPlayedDelta*1000000ull/audioElapsedUs : 0;
+         } else audioCounterReset=1;
+         if (player->currentPts >= player->diagVideoPtsSample) {
+            videoPtsDeltaMs=(player->currentPts-player->diagVideoPtsSample)/1000000ull;
+            videoPtsRatePermille=audioElapsedUs ? (player->currentPts-player->diagVideoPtsSample)/audioElapsedUs : 0;
+         } else videoPtsReset=1;
+      }
+      player->diagClockSampleUs=reportNow;
+      player->diagAudioPlayedSample=audioPlayed;
+      player->diagVideoPtsSample=player->currentPts;
       for (int i=0;i<FRAME_SLOTS;i++) slotStates |= (player->slots[i].state & 7) << (i*3);
       player->diagDecodeCalls=player->diagDecodeCallUs=player->diagDecodeCallMaxUs=0;
       player->diagDecodeFrames=player->diagDecodeEmpty=player->diagDecodeErrors=0;
@@ -1297,6 +1385,12 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
       player->diagRingWaits=player->diagRingWaitUs=0;
       player->diagRenderCalls=player->diagPresented=player->diagDroppedReady=0;
       player->diagNoDue=player->diagEmptyRing=0;
+      player->diagRenderLockWaitUs=player->diagRenderLockWaitMaxUs=0;
+      player->diagRenderLockHoldUs=player->diagRenderLockHoldMaxUs=0;
+      player->diagFrameSelectUs=player->diagFrameSelectMaxUs=player->diagFrameSelectCalls=0;
+      player->diagDecodeLockWaitUs=player->diagDecodeLockWaitMaxUs=player->diagDecodeLockCalls=0;
+      player->diagRenderNewFrames=player->diagRenderRepeatedFrames=0;
+      player->diagRenderHeldSeek=player->diagRenderHeldPreroll=0;
       player->diagClockVideoLateMaxNs=player->diagClockVideoAheadMaxNs=0;
       player->diagDecodedFirstPts=player->diagDecodedLastPts=player->diagDecodedPtsGapMaxNs=0;
       player->diagAuBytes=player->diagAuSizeMax=player->diagAuPtsGapMaxNs=0;
@@ -1312,9 +1406,15 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
    unlock(&player->lock);
 
    if (doReport)
-      logInfo("[video-live-diag] spanMs=2000 render=%llu presented=%llu decoded=%llu decodePoll=%llu pollAvgUs=%llu pollMaxUs=%llu pollEmpty=%llu pollErr=%llu auRead=%llu readAvgUs=%llu readMaxUs=%llu readErr=%llu auFeed=%llu feedAvgUs=%llu feedMaxUs=%llu feedBlocked=%llu ringWait=%llu ringWaitMs=%llu ready=%d readyHigh=%d dropped=%llu noDue=%llu empty=%llu clockMs=%llu currentPtsMs=%llu readyOldMs=%llu readyNewMs=%llu decodedPts=%llu..%llu decodedGapMaxMs=%llu auBytes=%llu auMaxBytes=%llu auPtsGapMaxMs=%llu presentedPts=%llu..%llu presentedGapMaxMs=%llu clockLateMaxMs=%llu videoAheadMaxMs=%llu audioAlive=%d audioValid=%d audioRate=%d audioBaseMs=%llu audioPlayed=%llu audioSpace=%d audioPcmCalls=%llu pcmAvgUs=%llu pcmMaxUs=%llu pcmBlocks=%llu pcmSamples=%llu audioAuReads=%llu audioReadAvgUs=%llu audioReadMaxUs=%llu audioAuBytes=%llu audioAuFeeds=%llu audioAuFeedAvgUs=%llu audioAuFeedMaxUs=%llu audioPushCalls=%llu audioPushAvgUs=%llu audioPushMaxUs=%llu audioFeedWaitMs=%llu slotStates=0x%x\n",
-              (unsigned long long)renders, (unsigned long long)presented, (unsigned long long)dFrames,
-              (unsigned long long)dCalls, (unsigned long long)(dCalls ? dCallUs/dCalls : 0), (unsigned long long)dCallMax,
+      logInfo("[video-live-diag] spanMs=2000 render=%llu presented=%llu newFrame=%llu repeated=%llu heldSeek=%llu heldPreroll=%llu renderLockWaitAvgUs=%llu renderLockWaitMaxUs=%llu renderLockHoldAvgUs=%llu renderLockHoldMaxUs=%llu selectAvgUs=%llu selectMaxUs=%llu decodeLockWaitAvgUs=%llu decodeLockWaitMaxUs=%llu decoded=%llu decodePoll=%llu pollAvgUs=%llu pollMaxUs=%llu pollEmpty=%llu pollErr=%llu auRead=%llu readAvgUs=%llu readMaxUs=%llu readErr=%llu auFeed=%llu feedAvgUs=%llu feedMaxUs=%llu feedBlocked=%llu ringWait=%llu ringWaitMs=%llu ready=%d readyHigh=%d dropped=%llu noDue=%llu empty=%llu clockMs=%llu currentPtsMs=%llu readyOldMs=%llu readyNewMs=%llu decodedPts=%llu..%llu decodedGapMaxMs=%llu auBytes=%llu auMaxBytes=%llu auPtsGapMaxMs=%llu presentedPts=%llu..%llu presentedGapMaxMs=%llu clockLateMaxMs=%llu videoAheadMaxMs=%llu audioAlive=%d audioValid=%d audioRate=%d audioBaseMs=%llu audioPlayed=%llu audioSpace=%d audioElapsedMs=%llu audioPlayedDelta=%llu audioMeasuredRate=%llu audioCounterReset=%d audioClockMs=%llu audioVsOldestMs=%lld readyPtsSpanMs=%llu videoPtsDeltaMs=%llu videoPtsRatePermille=%llu videoPtsReset=%d audioPcmCalls=%llu pcmAvgUs=%llu pcmMaxUs=%llu pcmBlocks=%llu pcmSamples=%llu audioAuReads=%llu audioReadAvgUs=%llu audioReadMaxUs=%llu audioAuBytes=%llu audioAuFeeds=%llu audioAuFeedAvgUs=%llu audioAuFeedMaxUs=%llu audioPushCalls=%llu audioPushAvgUs=%llu audioPushMaxUs=%llu audioFeedWaitMs=%llu slotStates=0x%x\n",
+              (unsigned long long)renders, (unsigned long long)presented,
+              (unsigned long long)renderNewFrames, (unsigned long long)renderRepeatedFrames,
+              (unsigned long long)renderHeldSeek, (unsigned long long)renderHeldPreroll,
+              (unsigned long long)(renders ? renderLockWaitUs/renders : 0), (unsigned long long)renderLockWaitMaxUs,
+              (unsigned long long)(renders ? renderLockHoldTotalUs/renders : 0), (unsigned long long)renderLockHoldMaxUs,
+              (unsigned long long)(frameSelectCalls ? frameSelectUs/frameSelectCalls : 0), (unsigned long long)frameSelectMaxUs,
+              (unsigned long long)(decodeLockCalls ? decodeLockWaitUs/decodeLockCalls : 0), (unsigned long long)decodeLockWaitMaxUs,
+              (unsigned long long)dFrames, (unsigned long long)dCalls, (unsigned long long)(dCalls ? dCallUs/dCalls : 0), (unsigned long long)dCallMax,
               (unsigned long long)dEmpty, (unsigned long long)dErrors, (unsigned long long)aReads,
               (unsigned long long)(aReads ? aReadUs/aReads : 0), (unsigned long long)aReadMax,
               (unsigned long long)aReadErrors, (unsigned long long)aFeeds,
@@ -1329,7 +1429,13 @@ const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height)
               (unsigned long long)presentedLastMs, (unsigned long long)presentedGapMaxMs,
               (unsigned long long)(lateMax/1000000ull), (unsigned long long)(aheadMax/1000000ull),
               audioAlive, audioValid, audioRate, (unsigned long long)audioBaseMs,
-              (unsigned long long)audioPlayed, audioSpace, (unsigned long long)audioPcmCalls,
+              (unsigned long long)audioPlayed, audioSpace,
+              (unsigned long long)(audioElapsedUs/1000ull), (unsigned long long)audioPlayedDelta,
+              (unsigned long long)audioMeasuredRate, audioCounterReset,
+              (unsigned long long)(audioClockNs/1000000ull), audioVsOldestMs,
+              (unsigned long long)readyPtsSpanMs, (unsigned long long)videoPtsDeltaMs,
+              (unsigned long long)videoPtsRatePermille, videoPtsReset,
+              (unsigned long long)audioPcmCalls,
               (unsigned long long)(audioPcmCalls ? audioPcmUs/audioPcmCalls : 0), (unsigned long long)audioPcmMaxUs,
               (unsigned long long)audioPcmBlocks, (unsigned long long)audioSamples,
               (unsigned long long)audioAuReads, (unsigned long long)(audioAuReads ? audioAuReadUs/audioAuReads : 0),

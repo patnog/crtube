@@ -110,15 +110,41 @@ static int hex4(const char *p)
    return value;
 }
 
-// copy the json string value of "key" found within [from,end), unescaping the
-// usual escapes plus \uXXXX (ascii only - urls and titles are ascii; higher
-// code points are dropped). returns 1 if the key was found.
+// Find a literal only within [from,end). Periodic cancellation checks keep large channel JSON
+// scans interruptible instead of making CIRCLE wait for the entire response to be parsed.
+static const char *findInRange(const char *from, const char *end, const char *needle)
+{
+   size_t length = strlen(needle);
+   if (!from || !end || from > end || length == 0 || (size_t)(end - from) < length) return NULL;
+   const char *scan = from;
+   size_t nextCancelCheck = 0;
+   while ((size_t)(end - scan) >= length) {
+      size_t offset = (size_t)(scan - from);
+      if (offset >= nextCancelCheck) {
+         if (isHttpRequestGroupCancelled()) return NULL;
+         nextCancelCheck = offset + 4096;
+      }
+      size_t candidates = (size_t)(end - scan) - length + 1;
+      if (candidates > 4096) candidates = 4096;
+      const char *hit = memchr(scan, *needle, candidates);
+      if (!hit) {
+         scan += candidates;
+         continue;
+      }
+      if (memcmp(hit, needle, length) == 0) return hit;
+      scan = hit + 1;
+   }
+   return NULL;
+}
+
+// copy the json string value of "key" found within [from,end), unescaping the usual escapes plus \uXXXX.
+// ASCII-only output is intentional: URLs and the identifiers used here are ASCII.
 static int jsonString(const char *from, const char *end, const char *key, char *out, int cap)
 {
    char pat[48];
    int patLen = snprintf(pat, sizeof pat, "\"%s\":\"", key);
-   const char *p = from ? strstr(from, pat) : NULL;
-   if (!p || p >= end) { if (cap) out[0] = 0; return 0; }
+   const char *p = from ? findInRange(from, end, pat) : NULL;
+   if (!p) { if (cap) out[0] = 0; return 0; }
    p += patLen;
 
    int i = 0;
@@ -151,8 +177,8 @@ static int jsonInt(const char *from, const char *end, const char *key, int *out)
 {
    char pat[48];
    int patLen = snprintf(pat, sizeof pat, "\"%s\":", key);
-   const char *p = from ? strstr(from, pat) : NULL;
-   if (!p || p >= end) return 0;
+   const char *p = from ? findInRange(from, end, pat) : NULL;
+   if (!p) return 0;
    p += patLen;
    if (*p == '"') p++;      // some numeric fields are quoted (e.g. lengthSeconds)
    *out = atoi(p);
@@ -164,8 +190,8 @@ static int jsonBool(const char *from, const char *end, const char *key)
 {
    char pat[48];
    int patLen = snprintf(pat, sizeof pat, "\"%s\"", key);
-   const char *p = from ? strstr(from, pat) : NULL;
-   if (!p || p >= end) return 0;
+   const char *p = from ? findInRange(from, end, pat) : NULL;
+   if (!p) return 0;
    p += patLen;
    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
    if (p >= end || *p++ != ':') return 0;
@@ -180,6 +206,7 @@ static const char *jsonObjectEnd(const char *start, const char *end)
    if (!start || start >= end || *start != '{') return NULL;
    int depth = 0, inString = 0, escaped = 0;
    for (const char *p = start; p < end; p++) {
+      if ((((uintptr_t)(p - start)) & 0xFFFu) == 0 && isHttpRequestGroupCancelled()) return NULL;
       char c = *p;
       if (inString) {
          if (escaped) escaped = 0;
@@ -202,6 +229,7 @@ static const char *jsonArrayEnd(const char *start, const char *end)
    if (!start || start >= end || *start != '[') return NULL;
    int depth = 0, inString = 0, escaped = 0;
    for (const char *p = start; p < end; p++) {
+      if ((((uintptr_t)(p - start)) & 0xFFFu) == 0 && isHttpRequestGroupCancelled()) return NULL;
       char c = *p;
       if (inString) {
          if (escaped) escaped = 0;
@@ -224,8 +252,8 @@ static const char *jsonObjectForKey(const char *from, const char *end, const cha
 {
    char pat[64];
    int n = snprintf(pat, sizeof pat, "\"%s\":", key);
-   const char *p = from ? strstr(from, pat) : NULL;
-   if (!p || p >= end) return NULL;
+   const char *p = from ? findInRange(from, end, pat) : NULL;
+   if (!p) return NULL;
    p += n;
    while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
    if (p >= end || *p != '{') return NULL;
@@ -283,8 +311,8 @@ static int jsonArrayStrings(const char *from, const char *end, const char *key,
 {
    char pat[64];
    int n = snprintf(pat, sizeof pat, "\"%s\":", key);
-   const char *p = from ? strstr(from, pat) : NULL;
-   if (!p || p >= end) return 0;
+   const char *p = from ? findInRange(from, end, pat) : NULL;
+   if (!p) return 0;
    p += n;
    while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
    if (p >= end || *p != '[') return 0;
@@ -901,7 +929,7 @@ static int youtubeGetVideoChannelId(const char *videoId, char *channelId, int ch
    }
 
    const char *end = resp + respLen;
-   const char *details = strstr(resp, "\"videoDetails\"");
+   const char *details = findInRange(resp, end, "\"videoDetails\"");
    int found = details && jsonString(details, end, "channelId", channelId, channelIdCap)
                && channelId[0] == 'U' && channelId[1] == 'C';
    if (!found) {
@@ -1339,37 +1367,60 @@ static void jsonEscape(const char *src, char *out, int cap)
 // `key` (e.g. "text" for a runs array, "simpleText" for a plain value) within the block. Missing = left empty.
 static void readField(const char *block, const char *end, const char *container, const char *key, char *out, int cap)
 {
-   const char *pos = strstr(block, container);
-   if (pos && pos < end) jsonString(pos, end, key, out, cap);
+   const char *pos = findInRange(block, end, container);
+   if (pos) jsonString(pos, end, key, out, cap);
+   else if (cap) out[0] = 0;
 }
 
 // the next feed item at or after `from`. Supports video, playlist, Shorts and lockup renderers.
 // Returns the nearest item (NULL if none).
 static const char *nextItemBlock(const char *from)
 {
-   static const char *keys[] = {
-      "\"videoRenderer\"", "\"gridVideoRenderer\"", "\"lockupViewModel\"",
-      "\"playlistRenderer\":{", "\"gridPlaylistRenderer\":{",
-      "\"reelItemRenderer\":{", "\"shortsLockupViewModel\":{"
-   };
-   const char *best = NULL;
-   for (unsigned i = 0; i < sizeof keys / sizeof keys[0]; i++) {
-      const char *hit = strstr(from, keys[i]);
-      if (hit && (!best || hit < best)) best = hit;
+   // Scan once instead of running multiple independent strstr() searches over the remaining JSON
+   // for every item. Channel feeds can contain hundreds of renderers; the old approach repeatedly
+   // rescanned most of the response and made cancellation wait for avoidable quadratic work.
+   for (const char *p = from; *p; p++) {
+      if ((((uintptr_t)(p - from)) & 0xFFFu) == 0 && isHttpRequestGroupCancelled()) return NULL;
+      if (*p != '\"') continue;
+      const char *name = p + 1;
+      size_t length = 0;
+      switch (*name) {
+         case 'v': if (strncmp(name, "videoRenderer", 13) == 0) length = 13; break;
+         case 'g':
+            if (strncmp(name, "gridVideoRenderer", 17) == 0) length = 17;
+            else if (strncmp(name, "gridPlaylistRenderer", 20) == 0) length = 20;
+            break;
+         case 'l': if (strncmp(name, "lockupViewModel", 15) == 0) length = 15; break;
+         case 'p': if (strncmp(name, "playlistRenderer", 16) == 0) length = 16; break;
+         case 'r': if (strncmp(name, "reelItemRenderer", 16) == 0) length = 16; break;
+         case 's': if (strncmp(name, "shortsLockupViewModel", 21) == 0) length = 21; break;
+      }
+      if (!length) continue;
+      // All supported renderer names are JSON object keys: \"name\":{.
+      if (name[length] == '\"' && name[length + 1] == ':' && name[length + 2] == '{')
+         return p;
+      // Keep accepting renderer keys whose parser historically matched the name without checking '{'.
+      if ((length == 13 || length == 17 || length == 15) &&
+          name[length] == '\"' && name[length + 1] == ':') return p;
    }
-   return best;
+   return NULL;
 }
 
 static int isDuplicate(const SearchResults *out, const char *videoId)
 {
-   for (int i = 0; i < out->count; i++) if (strcmp(out->items[i].videoId, videoId) == 0) return 1;
+   for (int i = 0; i < out->count; i++) {
+      if ((i & 31) == 0 && isHttpRequestGroupCancelled()) return 1;
+      if (strcmp(out->items[i].videoId, videoId) == 0) return 1;
+   }
    return 0;
 }
 
 static int isDuplicatePlaylist(const SearchResults *out, const char *playlistId)
 {
-   for (int i = 0; i < out->count; i++)
+   for (int i = 0; i < out->count; i++) {
+      if ((i & 31) == 0 && isHttpRequestGroupCancelled()) return 1;
       if (out->items[i].isPlaylist && strcmp(out->items[i].playlistId, playlistId) == 0) return 1;
+   }
    return 0;
 }
 
@@ -1387,7 +1438,7 @@ static int isSearchPlaylistId(const char *id)
 static void readPlaylistThumbnailVideoId(const char *block, const char *end, char *out, int cap)
 {
    const char *scan = block;
-   while ((scan = strstr(scan, "\"url\":\"")) != NULL && scan < end) {
+   while ((scan = findInRange(scan, end, "\"url\":\"")) != NULL) {
       char url[256];
       if (jsonString(scan, end, "url", url, sizeof url)) {
          const char *video = strstr(url, "/vi/");
@@ -1446,7 +1497,7 @@ static void readPlaylistCount(const char *block, const char *end, char *out, int
 
 static int parsePlaylistRenderer(const char *block, const char *end, SearchResult *item)
 {
-   const char *open = strchr(block, '{');
+   const char *open = memchr(block, '{', (size_t)(end - block));
    if (!open || open >= end) return 0;
    const char *close = jsonObjectEnd(open, end);
    if (!close || close > end) close = end;
@@ -1463,8 +1514,8 @@ static int parsePlaylistRenderer(const char *block, const char *end, SearchResul
 
 static int parseLockupPlaylistItem(const char *block, const char *end, SearchResult *item)
 {
-   const char *playlistType = strstr(block, "\"contentType\":\"LOCKUP_CONTENT_TYPE_PLAYLIST\"");
-   if (!playlistType || playlistType >= end) return 0;
+   const char *playlistType = findInRange(block, end, "\"contentType\":\"LOCKUP_CONTENT_TYPE_PLAYLIST\"");
+   if (!playlistType) return 0;
    if (!jsonString(block, end, "contentId", item->playlistId, sizeof item->playlistId) ||
        !isSearchPlaylistId(item->playlistId)) return 0;
    readObjectStringField(block, end, "lockupMetadataViewModel", "content", item->title, sizeof item->title);
@@ -1509,7 +1560,7 @@ static void readContentEndingWith(const char *from, const char *end, const char 
 {
    int suffixLen = (int)strlen(suffix);
    const char *p = from;
-   while ((p = strstr(p, "\"content\":\"")) != NULL && p + 11 <= end) {
+   while ((p = findInRange(p, end, "\"content\":\"")) != NULL) {
       p += 11;                                       // past "content":"
       const char *close = memchr(p, '"', end - p);
       if (!close) break;
@@ -1525,8 +1576,8 @@ static void readContentEndingWith(const char *from, const char *end, const char 
 // videoRenderer, the author for a lockup). left empty if absent.
 static void readChannelId(const char *block, const char *end, char *out, int cap)
 {
-   const char *p = strstr(block, "\"browseId\":\"UC");
-   if (p && p < end) jsonString(p, end, "browseId", out, cap);
+   const char *p = findInRange(block, end, "\"browseId\":\"UC");
+   if (p) jsonString(p, end, "browseId", out, cap);
    else if (cap) out[0] = 0;
 }
 
@@ -1548,8 +1599,8 @@ static int parseRendererItem(const char *block, const char *end, SearchResult *i
       readField(block, end, "\"shortBylineText\"", "text", item->author, sizeof item->author);
    readField(block, end, "\"viewCountText\"",     "simpleText", item->views,     sizeof item->views);
    readField(block, end, "\"publishedTimeText\"", "simpleText", item->published, sizeof item->published);
-   const char *livePos = strstr(block, "\"style\":\"LIVE\"");   // thumbnailOverlayTimeStatusRenderer
-   item->isLive = (livePos && livePos < end);
+   const char *livePos = findInRange(block, end, "\"style\":\"LIVE\"");   // thumbnailOverlayTimeStatusRenderer
+   item->isLive = livePos != NULL;
    return item->title[0] != 0;
 }
 
@@ -1557,8 +1608,8 @@ static int parseRendererItem(const char *block, const char *end, SearchResult *i
 // pages and other surfaces). 1 if it's a playable video with a title; albums/playlists (other contentTypes) are skipped.
 static int parseLockupItem(const char *block, const char *end, SearchResult *item)
 {
-   const char *videoType = strstr(block, "\"contentType\":\"LOCKUP_CONTENT_TYPE_VIDEO\"");
-   if (!videoType || videoType >= end) return 0;
+   const char *videoType = findInRange(block, end, "\"contentType\":\"LOCKUP_CONTENT_TYPE_VIDEO\"");
+   if (!videoType) return 0;
    if (!jsonString(block, end, "contentId", item->videoId, sizeof item->videoId) || !item->videoId[0]) return 0;
 
    readChannelId(block, end, item->channelId, sizeof item->channelId);
@@ -1570,8 +1621,8 @@ static int parseLockupItem(const char *block, const char *end, SearchResult *ite
    readField(block, end, "\"thumbnailBadgeViewModel\"", "text",    item->duration, sizeof item->duration);
    readContentEndingWith(block, end, " views", item->views, sizeof item->views);
    readContentEndingWith(block, end, " ago",   item->published, sizeof item->published);
-   const char *livePos = strstr(block, "\"style\":\"LIVE\"");
-   item->isLive = (livePos && livePos < end) || strcmp(item->duration, "LIVE") == 0;
+   const char *livePos = findInRange(block, end, "\"style\":\"LIVE\"");
+   item->isLive = (livePos != NULL) || strcmp(item->duration, "LIVE") == 0;
    if (item->isLive) item->duration[0] = 0;
    return item->title[0] != 0;
 }
@@ -1583,6 +1634,7 @@ static void parseVideoResults(const char *resp, int respLen, SearchResults *out,
    const char *end = resp + respLen;
    const char *scan = resp;
    while (out->count < MAX_SEARCH_RESULTS) {
+      if (isHttpRequestGroupCancelled()) { out->count = 0; return; }
       const char *block = nextItemBlock(scan);
       if (!block) break;
       const char *next = nextItemBlock(block + 1);
@@ -1597,8 +1649,8 @@ static void parseVideoResults(const char *resp, int respLen, SearchResults *out,
       int isReelRenderer = strncmp(block + 1, "reelItemRenderer", 16) == 0;
       int isVideoRenderer = strncmp(block + 1, "videoRenderer", 13) == 0 ||
                             strncmp(block + 1, "gridVideoRenderer", 17) == 0;
-      const char *shortsStyle = strstr(block, "\"style\":\"SHORTS\"");
-      const char *shortsUrl = strstr(block, "/shorts/");
+      const char *shortsStyle = findInRange(block, blockEnd, "\"style\":\"SHORTS\"");
+      const char *shortsUrl = findInRange(block, blockEnd, "/shorts/");
       int isShortsVideo = isReelRenderer || isShortsLockup ||
                           (shortsStyle && shortsStyle < blockEnd) ||
                           (shortsUrl && shortsUrl < blockEnd);
@@ -1618,8 +1670,8 @@ static void parseVideoResults(const char *resp, int respLen, SearchResults *out,
               parseRendererItem(block, blockEnd, item);
       }
       // drop members-only videos: they resolve to UNPLAYABLE for an anonymous session (no stream, no author)
-      const char *membersBadge = strstr(block, "Members only");
-      if (!item->isPlaylist && membersBadge && membersBadge < blockEnd) ok = 0;
+      const char *membersBadge = findInRange(block, blockEnd, "Members only");
+      if (!item->isPlaylist && membersBadge) ok = 0;
       if (ok && (item->isPlaylist ? !isDuplicatePlaylist(out, item->playlistId)
                                   : !isDuplicate(out, item->videoId))) out->count++;
       scan = blockEnd;
@@ -1628,15 +1680,15 @@ static void parseVideoResults(const char *resp, int respLen, SearchResults *out,
    // the "load more" token for the next page. anchor on the OBJECT ("...":{) not the bare name - youtube's
    // response carries a schema list of all renderer names ("...","...") and the bare string matches that
    // first, yielding a garbage token. the real continuationItemRenderer holds continuationCommand > token.
-   const char *more = strstr(resp, "\"continuationItemRenderer\":{");
-   if (more && more < end) jsonString(more, end, "token", out->continuation, sizeof out->continuation);
+   const char *more = findInRange(resp, end, "\"continuationItemRenderer\":{");
+   if (more) jsonString(more, end, "token", out->continuation, sizeof out->continuation);
 
    // channel feeds carry the channel's own title in metadata; used to label videos on a channel page that
    // omit their author (the channel is implied). absent in search/trending responses (left empty). anchor on
    // the OBJECT ("...":{) - the bare name appears first in youtube's schema list, and the title after it is a
    // tab ("Home"), not the channel name.
-   const char *channelMeta = strstr(resp, "\"channelMetadataRenderer\":{");
-   if (channelMeta && channelMeta < end) jsonString(channelMeta, end, "title", out->channelName, sizeof out->channelName);
+   const char *channelMeta = findInRange(resp, end, "\"channelMetadataRenderer\":{");
+   if (channelMeta) jsonString(channelMeta, end, "title", out->channelName, sizeof out->channelName);
 
    // channel Videos feeds carry Latest/Popular/Oldest sort chips; each chipViewModel holds a continuation
    // token the screen re-browses with to re-sort. absent in search/trending responses (left empty).
@@ -1644,8 +1696,8 @@ static void parseVideoResults(const char *resp, int respLen, SearchResults *out,
    for (int chip = 0; chip < 3; chip++) {
       char pat[48];
       snprintf(pat, sizeof pat, "\"chipViewModel\":{\"text\":\"%s\"", SORT_CHIP_LABELS[chip]);
-      const char *found = strstr(resp, pat);
-      if (found && found < end) jsonString(found, end, "token", out->sortTokens[chip], MAX_SORT_TOKEN);
+      const char *found = findInRange(resp, end, pat);
+      if (found) jsonString(found, end, "token", out->sortTokens[chip], MAX_SORT_TOKEN);
    }
 }
 
@@ -1668,12 +1720,14 @@ static int postAndParseInternal(const char *url, const char *body, int bodyLen,
    int headerCount = sizeof headers / sizeof headers[0];
 
    int respLen = 0, status = 0;
+   if (isHttpRequestGroupCancelled()) { free(resp); return -1; }
    int rc = fetchHttp("POST", url, headers, headerCount, body, bodyLen, resp, RESP_CAP, &respLen, &status);
-   if (rc < 0)        { free(resp); return rc; }
+   if (rc < 0 || isHttpRequestGroupCancelled()) { free(resp); return rc < 0 ? rc : -1; }
    if (status != 200) { free(resp); return -status; }
 
    parseVideoResults(resp, respLen, out, channelCategory);
    free(resp);
+   if (isHttpRequestGroupCancelled()) { memset(out, 0, sizeof *out); return -1; }
    return 0;
 }
 
@@ -1941,7 +1995,7 @@ static void parseWebPlaylistVideos(const char *resp, int respLen, SearchResults 
       const char *block = findNextWebPlaylistBlock(scan, end, &isLockup);
       if (!block) break;
 
-      const char *open = strchr(block, '{');
+      const char *open = memchr(block, '{', (size_t)(end - block));
       const char *blockEnd = open ? jsonObjectEnd(open, end) : NULL;
       if (!open || !blockEnd || blockEnd <= open || blockEnd > end) break;
 
@@ -1963,8 +2017,8 @@ static void parseWebPlaylistVideos(const char *resp, int respLen, SearchResults 
       scan = blockEnd;
    }
 
-   const char *more = strstr(resp, "\"continuationItemRenderer\":{");
-   if (more && more < end)
+   const char *more = findInRange(resp, end, "\"continuationItemRenderer\":{");
+   if (more)
       jsonString(more, end, "token", out->continuation, sizeof out->continuation);
 
    if (!out->continuation[0]) {

@@ -125,10 +125,6 @@ static struct {
    int       accountOpen;   // the sign-in / account panel is showing
    int       settingsOpen;  // the settings window is showing
    int       settingsSelected;
-   int       settingsReturnToSearch;
-   int       settingsReturnLanding;
-   int       settingsReturnSort;
-   char      settingsReturnQuery[SEARCH_QUERY_LEN];
    int       themeOpen;
    int       themeSelected;
    int       themeCustomOpen;
@@ -204,6 +200,16 @@ static uint64_t    playlistToastShownAt;
 static int         playbackRestorePending;
 static void restoreHomePlaybackSelection(void);
 static ButtonHints hints;
+
+// Search opens Settings as a lightweight overlay screen. Keeping Search on the
+// screen stack avoids termSearch() joining its grid worker just to show Settings.
+static void initSearchSettingsOverlay(void);
+static void updateSearchSettingsOverlay(void);
+static void drawSearchSettingsOverlay(void);
+static void termSearchSettingsOverlay(void);
+static Screen searchSettingsOverlayScreen = { initSearchSettingsOverlay, NULL,
+   updateSearchSettingsOverlay, drawSearchSettingsOverlay, NULL,
+   termSearchSettingsOverlay, SCREEN_TERMINATED };
 static int         sdHintsTwoRows;
 static int         homeFooterBottomY;
 static int         homeFooterRows;
@@ -1365,7 +1371,6 @@ static void onHomePlaylistNameEntered(const char *name)
 
 void openHomeSettingsPanel(void)
 {
-   home.settingsReturnToSearch = 0;
    home.settingsOpen = 1;
    home.settingsSelected = 0;
    home.downloadSettingsOpen = 0;
@@ -1373,16 +1378,16 @@ void openHomeSettingsPanel(void)
 }
 
 
-void openHomeSettingsPanelFromSearch(const char *query, int sort, int landing)
+void openHomeSettingsPanelFromSearch(void)
 {
-   home.settingsReturnToSearch = 1;
-   home.settingsReturnLanding = landing != 0;
-   home.settingsReturnSort = sort;
-   strCopy(home.settingsReturnQuery, sizeof home.settingsReturnQuery, query ? query : "");
+   // Do not pop Search: termSearch() tears down its grid and waits for the
+   // network worker. Push a lightweight Settings overlay instead, preserving
+   // the exact channel/category/query and allowing the grid worker to finish.
    home.settingsOpen = 1;
    home.settingsSelected = 0;
    home.downloadSettingsOpen = 0;
    settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
+   pushScreen(&searchSettingsOverlayScreen);
 }
 
 static const char *downloadResolutionName(int value)
@@ -1870,15 +1875,6 @@ static void updateSettingsPanel(void)
    if (home.sponsorblockOpen) { updateSponsorBlockPanel(); return; }
    if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
       home.settingsOpen = 0;
-      if (home.settingsReturnToSearch) {
-         int landing = home.settingsReturnLanding;
-         int sort = home.settingsReturnSort;
-         char query[SEARCH_QUERY_LEN];
-         strCopy(query, sizeof query, home.settingsReturnQuery);
-         home.settingsReturnToSearch = 0;
-         if (landing || !query[0]) openSearchPage();
-         else openSearchQueryWithSort(query, sort);
-      }
       return;
    }
    if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
@@ -2265,7 +2261,9 @@ static void drawUpdateNotes(void)
    drawLabelCentered(&updateNotesTitle, home.screenW / 2, y + 22);
    refreshLabelScale(&updateNotesPageLabel);
    setLabelColor(&updateNotesPageLabel, activeTheme->textSecondary);
-   moveLabel(&updateNotesPageLabel, x + w - 72, y + 18);
+   int pageLabelX = x + w - 24 - updateNotesPageLabel.tt.tex.w;
+   if (pageLabelX < x + 24) pageLabelX = x + 24;
+   moveLabel(&updateNotesPageLabel, pageLabelX, y + 18);
    drawLabel(&updateNotesPageLabel);
    for (int i = 0; i < visible; i++) {
       int index = updateNotesScroll + i;
@@ -2372,6 +2370,87 @@ static void drawSettingsPanel(void)
    }
    settingsHints.y = y + panelH - 42;
    drawButtonHints(&settingsHints, home.screenW);
+}
+
+// Settings opened from Search is a real stacked overlay, not a pop to Home.
+// Search remains allocated below it, so closing this screen restores the same
+// channel/category and does not rebuild or synchronously join its grid worker.
+static void initSearchSettingsOverlay(void)
+{
+}
+
+static void updateSearchSettingsOverlay(void)
+{
+   if (updateOverwritePromptOpen && updateDialogOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
+         updateOverwritePromptOpen = 0;
+      } else {
+         if (isPadButtonPressed(PAD_BTN_LEFT) || isPadButtonPressed(PAD_BTN_RIGHT) ||
+             isPadButtonPressed(PAD_BTN_UP) || isPadButtonPressed(PAD_BTN_DOWN))
+            updateOverwriteChoice = !updateOverwriteChoice;
+         if (isPadButtonPressed(PAD_BTN_CROSS)) {
+            if (updateOverwriteChoice == 0) startUpdateDownloadOverwrite();
+            updateOverwritePromptOpen = 0;
+         }
+      }
+      return;
+   }
+   if (updateNotesOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) updateNotesOpen = 0;
+      else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)) ||
+               isPadButtonPressed(PAD_BTN_RIGHT)) {
+         int pageCount = (updateNotesLineCount + UPDATE_NOTES_VISIBLE_LINES - 1) / UPDATE_NOTES_VISIBLE_LINES;
+         if (updateNotesScroll / UPDATE_NOTES_VISIBLE_LINES + 1 < pageCount)
+            updateNotesScroll += UPDATE_NOTES_VISIBLE_LINES;
+      } else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)) ||
+                 isPadButtonPressed(PAD_BTN_LEFT)) {
+         if (updateNotesScroll >= UPDATE_NOTES_VISIBLE_LINES)
+            updateNotesScroll -= UPDATE_NOTES_VISIBLE_LINES;
+      }
+      return;
+   }
+   if (updateDialogOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
+         updateDialogOpen = 0;
+         updateDialogDismissed = 1;
+      } else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN))) {
+         updateDialogSelected = (updateDialogSelected + 1) % 5;
+      } else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP))) {
+         updateDialogSelected = (updateDialogSelected + 4) % 5;
+      } else if (isPadButtonPressed(PAD_BTN_CROSS)) {
+         if (updateDialogSelected == 0) { updateNotesOpen = 1; updateNotesScroll = 0; buildUpdateNotesLines(); }
+         else if (updateDialogSelected == 1 && !isUpdateDownloaded()) startUpdateDownload();
+         else if (updateDialogSelected == 2) { disableAutomaticUpdateChecks(); updateDialogOpen = 0; updateDialogDismissed = 1; }
+         else if (updateDialogSelected == 3) { ignoreCurrentUpdate(); updateDialogOpen = 0; updateDialogDismissed = 1; }
+         else { updateDialogOpen = 0; updateDialogDismissed = 1; }
+      }
+      return;
+   }
+
+   int wasOpen = home.settingsOpen;
+   updateSettingsPanel();
+   if (wasOpen && !home.settingsOpen) popScreen();
+}
+
+static void drawSearchSettingsOverlay(void)
+{
+   fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->appBg);
+   if (home.settingsOpen) {
+      if (updateSettingsOpen) drawUpdateSettingsPanel();
+      else if (home.themeOpen) drawThemePanel();
+      else if (home.downloadSettingsOpen) drawDownloadSettingsPanel();
+      else {
+         drawSettingsPanel();
+         if (home.regionOpen) drawRegionPicker();
+         else if (home.sponsorblockOpen) drawSponsorBlockPanel();
+      }
+   }
+   if (updateDialogOpen) drawUpdateDialog();
+   if (updateNotesOpen) drawUpdateNotes();
+}
+
+static void termSearchSettingsOverlay(void)
+{
 }
 
 static void drawHomeIconFixed(Icon *icon, int x, int y, uint32_t color)
@@ -2777,8 +2856,6 @@ static void initHome(void)
    updateDialogDismissed = 0;
    updateNotesOpen = 0;
    updateNotesScroll = 0;
-   home.settingsReturnToSearch = 0;
-   home.settingsReturnQuery[0] = 0;
    home.themeOpen = 0;
    home.themeSelected = 0;
    home.themeCustomOpen = 0;
@@ -2977,7 +3054,7 @@ static void initHome(void)
                 activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabel(&updateNotesTitle, &uiFont, 0, 0, UPDATE_NOTES_W - 120, AUTO, 24,
              activeTheme->textPrimary, TEXT_NOWRAP, "Release Notes");
-   initLabel(&updateNotesPageLabel, &uiFont, 0, 0, 56, AUTO, 18,
+   initLabel(&updateNotesPageLabel, &uiFont, 0, 0, 120, AUTO, 18,
              activeTheme->textSecondary, TEXT_NOWRAP, "1/1");
    for (int i = 0; i < UPDATE_NOTES_VISIBLE_LINES; i++)
       initLabel(&updateNotesLines[i], &uiFont, 0, 0, UPDATE_NOTES_W - 64, AUTO, 23,
@@ -3458,6 +3535,15 @@ static void updateHome(void)
       }
       return;
    }
+   // Handle START before updateVideoGrid() can reap/decode grid work. The worker
+   // continues independently while the Settings panel owns the UI.
+   if (!home.settingsOpen && !home.accountOpen && !home.exitConfirmOpen &&
+       !home.downloadManagerOpen && !home.playlistDeleteConfirmOpen &&
+       !updateDialogOpen && !updateNotesOpen && !isDownloadSpacePromptOpen() &&
+       isPadButtonPressed(PAD_BTN_START)) {
+      openHomeSettingsPanel();
+      return;
+   }
    if (!home.settingsOpen && !home.accountOpen && !home.exitConfirmOpen &&
        !home.downloadManagerOpen && !home.playlistDeleteConfirmOpen &&
        !updateDialogDismissed && shouldNotifyUpdate()) {
@@ -3489,15 +3575,16 @@ static void updateHome(void)
          refreshCurrentCategory();
    }
    if (home.channelLookupPending) {
-      if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+      if (!home.settingsOpen && isPadButtonPressed(PAD_BTN_CIRCLE)) {
          cancelHttpRequestGroup(&home.channelLookupGroup);
          home.channelLookupPending = 0;
          resumeVideoGrid(&home.grid);
          logInfo("[home] channel lookup cancelled by CIRCLE\n");
          return;
       }
-      updateVideoGrid(&home.grid);   // reap the previous grid job; pauseVideoGrid prevents another one
-      if (!home.channelLookupActive && !home.channelLookupDone && !home.grid.threadActive) {
+      // Grid and channel-ID lookup use independent request groups. Do not wait
+      // for the grid worker before starting this lookup: both run off the UI thread.
+      if (!home.channelLookupActive && !home.channelLookupDone) {
          if (spawnJoinableThread(&home.channelLookupTid, channelLookupWorker, 0,
                                  THREAD_PRIORITY_LOW, THREAD_STACK_SIZE_64KB, "yt-channel-id") == 0)
             home.channelLookupActive = 1;
@@ -3506,11 +3593,20 @@ static void updateHome(void)
             home.channelLookupDone = 1;
          }
       }
+      if (home.settingsOpen) {
+         updateSettingsPanel();
+         return;
+      }
       if (home.channelLookupDone) {
          if (home.channelLookupActive) {
             joinThread(home.channelLookupTid);
             home.channelLookupActive = 0;
          }
+         // Only wait asynchronously for jobs that can still mutate SearchResults.
+         // Thumbnail/cache jobs do not own result data and must not delay channel entry.
+         if (home.grid.threadActive && !home.grid.workerDone &&
+             (home.grid.job == JOB_MORE || home.grid.job == JOB_MEMBER_CHECK)) return;
+         if (home.grid.threadActive && home.grid.workerDone) updateVideoGrid(&home.grid);
          home.channelLookupPending = 0;
          resumeVideoGrid(&home.grid);
          if (home.channelLookupResult == 0 && home.channelLookupItem.channelId[0]) {
@@ -3657,7 +3753,6 @@ static void updateHome(void)
    }
 
    if (isPadButtonPressed(PAD_BTN_SELECT)) { cacheCurrent(); openSearchPage(); return; }
-   if (isPadButtonPressed(PAD_BTN_START)) { openHomeSettingsPanel(); return; }
    if (isPadButtonPressed(PAD_BTN_R2)) { refreshCurrentCategory(); return; }
    if (isPadButtonPressed(PAD_BTN_L2) && homeIsPlaylistContents()) {
       setPlaylistShuffleEnabled(!isPlaylistShuffleEnabled());
@@ -4216,7 +4311,9 @@ static void drawHome(void)
 static void suspendHome(void)
 {
    squarePressedAt = 0;
-   stopVideoGrid(&home.grid);   // free the http pools for the pushed screen
+   // Do not join a feed/thumbnail worker when opening Search or another overlay.
+   // The active job is allowed to finish in parallel while this grid is hidden.
+   pauseVideoGrid(&home.grid);
 }
 
 static void restoreHomePlaybackSelection(void)
@@ -4257,18 +4354,25 @@ static void restoreHomePlaybackSelection(void)
 static void resumeHome(void)
 {
    playbackRestorePending = 1;
+
+   // The grid is paused while another screen/overlay owns input. Resume it
+   // before any early return, but never wait for its worker here.
+   resumeVideoGrid(&home.grid);
+
    if (home.category == HOME_DOWNLOADS) {
       requestDownloadManagementRefresh();
-      loadCategory();
+      if (!home.grid.threadActive) loadCategory();
       return;
    }
    if (home.category == HOME_LIVE) {
       uint64_t age = getTimeUs() - home.liveLoadedUs;
-      if (gridStage(&home.grid) != GRID_READY || age >= LIVE_MAX_AGE_US) loadCategory();
+      if (!home.grid.threadActive &&
+          (gridStage(&home.grid) != GRID_READY || age >= LIVE_MAX_AGE_US))
+         loadCategory();
       return;
    }
    if (home.category == HOME_LOCAL_HISTORY) {
-      loadCategory();
+      if (!home.grid.threadActive) loadCategory();
       return;
    }
    // a subscribe/unsubscribe while we were away makes the cached Subscriptions feed stale - drop it and,
@@ -4292,7 +4396,10 @@ static void resumeHome(void)
          return;
       }
    }
-   if (gridStage(&home.grid) != GRID_READY) loadCategory();
+   // A still-running worker is already making progress. Never cancel/restart it
+   // merely because the screen became visible again. Reap it from updateHome().
+   if (home.grid.threadActive) return;
+   if (gridStage(&home.grid) != GRID_READY && gridStage(&home.grid) != GRID_EMPTY) loadCategory();
    else restoreHomePlaybackSelection();
 }
 

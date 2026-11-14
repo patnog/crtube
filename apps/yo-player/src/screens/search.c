@@ -17,6 +17,7 @@
 #include "theme.h"
 #include "pad.h"
 #include "thread.h"
+#include "http.h"               // channel feed request-group cancellation
 #include "font.h"
 #include "ui/label.h"
 #include "screen-manager.h"
@@ -78,6 +79,28 @@ static struct {
    int       historyTitleY, historyTop, historyRowHeight, historyRowGap;
    int       footerBottomY, footerTopY, footerRows;
 } search;
+
+// Keep one first-page snapshot for each channel tab. Category switching can then restore the same
+// result set immediately instead of waiting for another YouTube browse request. R2 bypasses this
+// cache; entries expire after two minutes so this never becomes a permanent/offline feed.
+#define CHANNEL_FEED_CACHE_TTL_US (120ull * 1000000ull)
+typedef struct {
+   volatile int valid;
+   int category;
+   int sort;
+   char channelId[32];
+   char region[8];
+   uint64_t savedAtUs;
+   SearchResults results;
+} ChannelFeedCache;
+static ChannelFeedCache channelFeedCache[4];
+
+typedef struct {
+   char channelId[32];
+   HttpRequestGroup *requestGroup;
+   SearchResults *results;
+   int result;
+} ChannelLiveFetchJob;
 
 static Font        uiFont;
 static Label       queryLabel, queryPromptPrefix, queryPromptSuffix;
@@ -158,7 +181,7 @@ static void setQueryField(void)
    }
 }
 
-static void prependLiveChannelItems(SearchResults *live, SearchResults *regular)
+static void prependLiveChannelItems(SearchResults *live, SearchResults *regular, const char *channelId, const char *channelName)
 {
    int liveCount = 0;
    int capacity = MAX_SEARCH_RESULTS - regular->count;
@@ -171,10 +194,10 @@ static void prependLiveChannelItems(SearchResults *live, SearchResults *regular)
       for (int j = 0; !duplicate && j < liveCount; j++)
          if (strcmp(live->items[j].videoId, item->videoId) == 0) duplicate = 1;
       if (duplicate) continue;
-      if (!item->channelId[0]) strCopy(item->channelId, sizeof item->channelId, search.channelId);
+      if (!item->channelId[0]) strCopy(item->channelId, sizeof item->channelId, channelId);
       if (!item->author[0])
          strCopy(item->author, sizeof item->author,
-                 search.channelName[0] ? search.channelName : regular->channelName);
+                 channelName[0] ? channelName : regular->channelName);
       if (liveCount != i) live->items[liveCount] = *item;
       liveCount++;
    }
@@ -184,38 +207,118 @@ static void prependLiveChannelItems(SearchResults *live, SearchResults *regular)
    regular->count += liveCount;
 }
 
+static void channelLiveFetchWorker(uint64_t arg)
+{
+   ChannelLiveFetchJob *job = (ChannelLiveFetchJob *)(uintptr_t)arg;
+   setHttpRequestGroup(job->requestGroup);
+   job->result = getChannelLiveVideos(job->channelId, job->results);
+   setHttpRequestGroup(NULL);
+   exitThread();
+}
+
+static const SearchResults *findCachedChannelFeed(const char *channelId, int category, int sort)
+{
+   if (!channelId || !channelId[0] || category < 0 || category >= 4) return NULL;
+   ChannelFeedCache *cache = &channelFeedCache[category];
+   if (!cache->valid || cache->category != category || cache->sort != sort ||
+       strcmp(cache->channelId, channelId) != 0 ||
+       strcmp(cache->region, getContentRegionCode()) != 0) return NULL;
+   uint64_t now = getTimeUs();
+   if (now < cache->savedAtUs || now - cache->savedAtUs > CHANNEL_FEED_CACHE_TTL_US) {
+      cache->valid = 0;
+      return NULL;
+   }
+   return &cache->results;
+}
+
+static void cacheChannelFeed(const char *channelId, int category, int sort, const SearchResults *results)
+{
+   if (!channelId || !channelId[0] || !results || results->count <= 0 ||
+       results->count > MAX_SEARCH_RESULTS || category < 0 || category >= 4 ||
+       isHttpRequestGroupCancelled()) return;
+   ChannelFeedCache *cache = &channelFeedCache[category];
+   // Publish valid last: the UI never sees a partially copied SearchResults object.
+   cache->valid = 0;
+   __sync_synchronize();
+   // Only the populated first page is copied. SearchResults has room for 500 entries, but a
+   // channel's first response normally contains a few dozen; avoid a full-structure copy here.
+   cache->results.count = results->count;
+   strCopy(cache->results.continuation, sizeof cache->results.continuation, results->continuation);
+   strCopy(cache->results.channelName, sizeof cache->results.channelName, results->channelName);
+   memcpy(cache->results.sortTokens, results->sortTokens, sizeof cache->results.sortTokens);
+   memcpy(cache->results.items, results->items, (size_t)results->count * sizeof results->items[0]);
+   strCopy(cache->channelId, sizeof cache->channelId, channelId);
+   strCopy(cache->region, sizeof cache->region, getContentRegionCode());
+   cache->category = category;
+   cache->sort = sort;
+   cache->savedAtUs = getTimeUs();
+   __sync_synchronize();
+   cache->valid = 1;
+}
+
 static int searchFetch(const char *token, SearchResults *out, void *user)
 {
    int rc;
-   (void)user;
-   if (search.channelId[0]) {
-      if (search.channelCategory != 0) {
-         rc = getChannelCategoryFeed(search.channelId, search.channelCategory, token, out);
-         if (rc == 0) {
-            for (int i = 0; i < out->count; i++) {
-               if (!out->items[i].channelId[0])
-                  strCopy(out->items[i].channelId, sizeof out->items[i].channelId, search.channelId);
-               if (!out->items[i].author[0] && search.channelName[0])
-                  strCopy(out->items[i].author, sizeof out->items[i].author, search.channelName);
-            }
-         }
+   HttpRequestGroup *requestGroup = (HttpRequestGroup *)user;
+   char channelId[sizeof search.channelId];
+   char channelName[sizeof search.channelName];
+   char sortToken[sizeof search.channelSortToken];
+   char query[sizeof search.query];
+   int category = search.channelCategory;
+   int channelSort = search.channelSort;
+   SortOrder sort = search.sort;
+   strCopy(channelId, sizeof channelId, search.channelId);
+   strCopy(channelName, sizeof channelName, search.channelName);
+   strCopy(sortToken, sizeof sortToken, search.channelSortToken);
+   strCopy(query, sizeof query, search.query);
+
+   if (channelId[0]) {
+      if (category != 0) {
+         rc = getChannelCategoryFeed(channelId, category, token, out);
       } else {
-         const char *first = search.channelSortToken[0] ? search.channelSortToken : NULL;
+         const char *first = sortToken[0] ? sortToken : NULL;
          SearchResults *live = NULL;
-         int liveRc = -1;
+         ChannelLiveFetchJob liveJob;
+         sys_ppu_thread_t liveTid;
+         int liveStarted = 0;
+         memset(&liveJob, 0, sizeof liveJob);
          if (!token) {
             live = malloc(sizeof(*live));
-            if (live) liveRc = getChannelLiveVideos(search.channelId, live);
+            if (live) {
+               strCopy(liveJob.channelId, sizeof liveJob.channelId, channelId);
+               liveJob.requestGroup = requestGroup;
+               liveJob.results = live;
+               liveJob.result = -1;
+               // The Videos tab also promotes currently-live broadcasts. Fetch that supplementary
+               // feed concurrently with Videos rather than serially adding its latency to the page.
+               liveStarted = spawnJoinableThread(&liveTid, channelLiveFetchWorker,
+                               (uint64_t)(uintptr_t)&liveJob, THREAD_PRIORITY_DEFAULT,
+                               THREAD_STACK_SIZE_64KB, "yt-channel-live") == 0;
+            }
          }
-         rc = getChannelVideos(search.channelId, token ? token : first, out);
-         if (rc == 0 && live && liveRc == 0 && live->count > 0)
-            prependLiveChannelItems(live, out);
-         free(live);
+         rc = getChannelVideos(channelId, token ? token : first, out);
+         if (live) {
+            if (liveStarted) joinThread(liveTid);
+            else if (!token && !isHttpRequestGroupCancelled())
+               liveJob.result = getChannelLiveVideos(channelId, live);
+            if (rc == 0 && liveJob.result == 0 && live->count > 0)
+               prependLiveChannelItems(live, out, channelId, channelName);
+            free(live);
+         }
+      }
+      if (rc == 0) {
+         for (int i = 0; i < out->count; i++) {
+            if (!out->items[i].channelId[0])
+               strCopy(out->items[i].channelId, sizeof out->items[i].channelId, channelId);
+            if (!out->items[i].author[0] && channelName[0])
+               strCopy(out->items[i].author, sizeof out->items[i].author, channelName);
+         }
+         if (!token) cacheChannelFeed(channelId, category, channelSort, out);
       }
    } else {
-      rc = searchVideos(search.query, search.sort, token, out);
+      rc = searchVideos(query, sort, token, out);
    }
-   return rc;
+   return isHttpRequestGroupCancelled() ? -1 : rc;
 }
 
 static void updateTriangleHint(void)
@@ -253,7 +356,7 @@ static void updateChannelGridLayout(void)
    search.gridChannelLayout = desired;
 }
 
-static void reload(void)
+static void reload(int allowChannelCache)
 {
    updateChannelGridLayout();
    search.landing = 0;
@@ -263,7 +366,16 @@ static void reload(void)
    setGridFocusHidden(&search.grid, 0);
    setGridSortByPublished(&search.grid, !search.channelId[0] && search.sort == SORT_NEWEST);
    setHeading();
-   setGridSource(&search.grid, searchFetch, NULL);
+   if (!allowChannelCache && search.channelId[0]) {
+      // An explicit refresh supersedes the previous snapshot. Invalidating before starting the worker
+      // prevents a rapid category round-trip from reading the cache while this same slot is rewritten.
+      channelFeedCache[search.channelCategory].valid = 0;
+      __sync_synchronize();
+   }
+   const SearchResults *cached = allowChannelCache && search.channelId[0]
+      ? findCachedChannelFeed(search.channelId, search.channelCategory, search.channelSort) : NULL;
+   if (cached) setGridCached(&search.grid, cached, searchFetch, &search.grid.requestGroup);
+   else setGridSource(&search.grid, searchFetch, &search.grid.requestGroup);
 }
 
 static void enterChannel(const SearchResult *item)
@@ -274,7 +386,7 @@ static void enterChannel(const SearchResult *item)
    search.channelSort = CHANNEL_SORT_LATEST;
    search.channelCategory = 0;
    search.channelSortToken[0] = 0;
-   reload();
+   reload(1);
 }
 
 static void onQueryEntered(const char *text)
@@ -289,7 +401,7 @@ static void onQueryEntered(const char *text)
    reloadHistory();
    search.channelId[0] = 0;
    strCopy(search.query, sizeof search.query, text);
-   reload();
+   reload(0);
 }
 
 static void clearHistory(void)
@@ -490,7 +602,7 @@ static void initSearch(void)
    setGridFocusHidden(&search.grid, search.landing);
    setSidebarCurrent(SIDEBAR_SEARCH);
    setHeading();
-   if (!search.landing) reload();
+   if (!search.landing) reload(1);
 }
 
 static void updateSearch(void)
@@ -508,15 +620,18 @@ static void updateSearch(void)
    if (isSidebarActive()) {
       int picked = updateSidebar();
       if (picked >= 0) {
-         popScreen();
-         handleHomeSidebarSelection(picked);
+         if (picked == SIDEBAR_SETTINGS) {
+            openHomeSettingsPanelFromSearch();
+         } else {
+            popScreen();
+            handleHomeSidebarSelection(picked);
+         }
       }
       return;
    }
 
    if (isPadButtonPressed(PAD_BTN_START)) {
-      openHomeSettingsPanelFromSearch(search.query, (int)search.sort, search.landing);
-      popScreen();
+      openHomeSettingsPanelFromSearch();
       return;
    }
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { popScreen(); return; }
@@ -561,21 +676,21 @@ static void updateSearch(void)
       oskInputBegin("Search YouTube", search.query, onQueryEntered);
       return;
    }
-   if (isPadButtonPressed(PAD_BTN_R2)) { reload(); return; }
+   if (isPadButtonPressed(PAD_BTN_R2)) { reload(0); return; }
    if (search.channelId[0] && isPadButtonPressed(PAD_BTN_R1)) {
       search.channelCategory = (search.channelCategory + 1) % 4;
-      reload();
+      reload(1);
       return;
    }
    if (search.channelId[0] && isPadButtonPressed(PAD_BTN_L1)) {
       search.channelCategory = (search.channelCategory + 3) % 4;
-      reload();
+      reload(1);
       return;
    }
    if (isPadButtonPressed(PAD_BTN_L2) && !search.channelId[0]) {
       search.sort = (SortOrder)((search.sort + 1) % SORT_COUNT);
       setSortPreference(SORT_PREF_SEARCH, (int)search.sort);
-      reload();
+      reload(0);
       return;
    }
 
@@ -862,8 +977,8 @@ static void drawSearch(void)
          GridStage stage = gridStage(&search.grid);
          if (stage == GRID_EMPTY && search.channelId[0]) {
             static const char *const emptyCategoryText[4] = {
-               "This channel has no videos", "This channel has no LIVE streams",
-               "This channel has no Shorts", "This channel has no playlists"
+               "No videos available in this channel", "No LIVE streams available in this channel",
+               "No Shorts available in this channel", "No playlists available in this channel"
             };
             setLabelText(&statusLabel, emptyCategoryText[search.channelCategory]);
             refreshLabelScale(&statusLabel);
@@ -937,9 +1052,31 @@ static void restoreSearchPlaybackSelection(void)
    if (search.grid.scrollRow > maxScroll) search.grid.scrollRow = maxScroll;
 }
 
+static void refreshSearchThemeColors(void)
+{
+   setLabelColor(&queryLabel, activeTheme->textPrimary);
+   setLabelColor(&queryPromptPrefix, activeTheme->textSecondary);
+   setLabelColor(&queryPromptSuffix, activeTheme->textSecondary);
+   setLabelColor(&sortLabel, activeTheme->textSecondary);
+   setLabelColor(&statusLabel, activeTheme->textSecondary);
+   setLabelColor(&historyTitleLabel, activeTheme->textSecondary);
+   setLabelColor(&historyEmptyLabel, activeTheme->textSecondary);
+   for (int i = 0; i < SORT_COUNT; i++)
+      setLabelColor(&sortLabels[i], activeTheme->textSecondary);
+   for (int i = 0; i < 4; i++)
+      setLabelColor(&channelCategoryLabels[i], activeTheme->textSecondary);
+   for (int i = 0; i < MAX_SEARCH_HISTORY; i++)
+      setLabelColor(&historyLabels[i], activeTheme->textPrimary);
+   for (int i = 0; i < hints.count; i++)
+      setLabelColor(&hints.hints[i].caption, activeTheme->textSecondary);
+   hints.captionColor = activeTheme->textSecondary;
+   refreshVideoGridThemeColors(&search.grid);
+}
+
 static void resumeSearch(void)
 {
    playbackRestorePending = 1;
+   refreshSearchThemeColors();
    resumeVideoGrid(&search.grid);
    restoreSearchPlaybackSelection();
 }

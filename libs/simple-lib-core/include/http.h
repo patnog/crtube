@@ -19,6 +19,8 @@ typedef struct { const char *name; const char *value; } HttpHeader;
 typedef struct { volatile int cancelled; } HttpRequestGroup;
 void setHttpRequestGroup(HttpRequestGroup *group);
 void cancelHttpRequestGroup(HttpRequestGroup *group);
+// True on the calling worker when its bound operation has been cancelled.
+int isHttpRequestGroupCancelled(void);
 
 // section: one-shot request/response
 

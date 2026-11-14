@@ -40,6 +40,9 @@ typedef struct {
    // Optional per-operation cancellation; unlike setRequestsCancelled this never touches other requests.
    void (*setRequestGroup)(HttpRequestGroup *group);
    void (*cancelRequestGroup)(HttpRequestGroup *group);
+
+   // Query cancellation from the calling worker. Used by CPU-bound parsers after HTTP completes.
+   int (*isRequestGroupCancelled)(void);
 } HttpTransport;
 
 // wire a transport into http.c. an `override` bind claims the slot permanently (modern wins over system

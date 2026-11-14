@@ -463,7 +463,7 @@ static Label statLabels[STAT_LINES];
 static Label timeLeftLabel, timeRightLabel;   // seek bar: current time (left) / total (right)
 static Label liveBadgeLabel, backToLabel;
 static Label liveFailureTitleLabel, liveFailureBodyLabel;
-static ButtonHints liveFailureHints;
+static ButtonHints liveFailureHints, playbackHints;
 static Label toastLabel;                      // brief centred toast ("Skipped ...", "Subtitles: ...")
 static Label askPromptPrefixLabel, askPromptSuffixLabel;
 static Label titleLabel;                      // video title, top-left while the HUD is visible
@@ -1849,7 +1849,13 @@ static void applyPlaybackUiLabelScale(float scale)
    for (int i = 0; i < 3; i++) SCALE_PLAYBACK_LABEL(optionsCurrentValueLabels[i]);
    SCALE_PLAYBACK_LABEL(playbackSettingsTitle);
    SCALE_PLAYBACK_LABEL(playbackSubtitleStyleTitle);
-   for (int i = 0; i < PLAYBACK_SUBTITLE_STYLE_COUNT; i++) SCALE_PLAYBACK_LABEL(playbackSubtitleStyleLabels[i]);
+   for (int i = 0; i < PLAYBACK_SUBTITLE_STYLE_COUNT; i++) {
+      // The label's raster font grows with playbackFontScale. Grow its wrapping
+      // width by the same factor; otherwise long entries such as "Background
+      // Opacity" are clipped at UI scale 1.5x by the old 300px fixed width.
+      playbackSubtitleStyleLabels[i].width = (int)(300.0f * scale + 0.5f);
+      SCALE_PLAYBACK_LABEL(playbackSubtitleStyleLabels[i]);
+   }
    playbackSubtitlePreview.size = playbackSubtitleFontSize(22 + getSubtitleStyle(4) * 4);
    playbackSubtitlePreview.fixedRenderScale = 0.0f;
    setLabelFixedRenderScale(&playbackSubtitlePreview, 1.0f, 0);
@@ -1901,6 +1907,16 @@ static void initPlay(void)
    addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CROSS), "Return");
    addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CIRCLE), "Return");
    setButtonHintsStableLayout(&liveFailureHints, 1);
+   initButtonHints(&playbackHints, &uiFont, 0, 20, 14, activeTheme->textSecondary);
+   setButtonHintGap(&playbackHints, 14);
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CROSS), "Play / Pause");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_LEFT), NULL);
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Seek");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_L1), NULL);
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R1), "Chapter / Video");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_TRIANGLE), "Subtitles");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R2), "Crop");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CIRCLE), "Hide OSD");
    initLabelRaw(&toastLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");   // raw: shows track names
    initLabelRaw(&askPromptPrefixLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "Press");
    initLabelRaw(&askPromptSuffixLabel, &uiFont, 0, 0, 260, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "to skip sponsor");
@@ -4679,7 +4695,7 @@ static void drawSeekBar(void)
    int barLeft  = (int)(state.screenW * 0.24f);
    int barRight = state.screenW - barLeft;
    int span     = barRight - barLeft;
-   int barY     = (int)(state.screenH * 0.94f);
+   int barY     = (int)(state.screenH * (state.screenH <= 576 ? 0.90f : 0.94f));
    int barH     = 8;
    int barTopY  = barY - barH / 2;
    int filledW  = (int)(progress * span);
@@ -5062,7 +5078,12 @@ static void drawPlay(void)
       if (state.showStats && frame) { updateStatLabels(); drawStatsOverlay(); }
       int overlayUp = state.chaptersVisible || state.descriptionVisible || optionsVisible;   // a full-screen overlay hides the HUD noise
       if (state.stage == STAGE_PLAYING && controlsVisible() && !overlayUp) {
-         if (!state.isLive || state.liveDvr) drawSeekBar();
+         if (!state.isLive || state.liveDvr) {
+            drawSeekBar();
+            int seekBarY = (int)(state.screenH * (state.screenH <= 576 ? 0.90f : 0.94f));
+            playbackHints.y = seekBarY + 15;
+            drawButtonHintsFitted(&playbackHints, state.screenW, seekBarY + 16, 0, 1);
+         }
       }
       if (state.stage == STAGE_PLAYING && fullPlaybackHudVisible() && !overlayUp) {
          drawTitle();
@@ -5190,6 +5211,7 @@ static void termPlay(void)
    freeLabel(&liveFailureTitleLabel);
    freeLabel(&liveFailureBodyLabel);
    termButtonHints(&liveFailureHints);
+   termButtonHints(&playbackHints);
    freeLabel(&toastLabel);
    freeLabel(&askPromptPrefixLabel);
    freeLabel(&askPromptSuffixLabel);

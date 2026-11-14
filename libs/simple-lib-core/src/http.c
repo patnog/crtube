@@ -51,6 +51,12 @@ void cancelHttpRequestGroup(HttpRequestGroup *group)
    if (transport && transport->cancelRequestGroup) transport->cancelRequestGroup(group);
 }
 
+int isHttpRequestGroupCancelled(void)
+{
+   return transport && transport->isRequestGroupCancelled
+          ? transport->isRequestGroupCancelled() : 0;
+}
+
 int isHttpUrl(const char *path)
 {
    return strncmp(path, "http://", 7) == 0 || strncmp(path, "https://", 8) == 0;
@@ -72,6 +78,7 @@ int fetchHttpCapturing(const char *method, const char *url, const HttpHeader *he
    if (status) *status = 0;
    if (capture) capture->value[0] = '\0';
    if (!transport) { logError("[http] no transport bound\n"); return -1; }
+   if (isHttpRequestGroupCancelled()) return -1;
 
    int liveSegment = url && strstr(url, "googlevideo.com") && strstr(url, "/videoplayback/") &&
                      (strstr(url, "/sq/") || strstr(url, "&sq="));
@@ -99,6 +106,11 @@ int fetchHttpCapturing(const char *method, const char *url, const HttpHeader *he
       return -1;
    }
 
+   if (isHttpRequestGroupCancelled()) {
+      transport->close(handle);
+      return -1;
+   }
+
    char contentLength[32] = "", contentRange[96] = "", transferEncoding[32] = "", contentType[64] = "";
    if (liveSegment && transport->getResponseHeader) {
       transport->getResponseHeader(handle, "content-length", contentLength, sizeof contentLength);
@@ -116,6 +128,7 @@ int fetchHttpCapturing(const char *method, const char *url, const HttpHeader *he
    int nextProgressBytes = 256 * 1024;
    uint64_t lastProgressLogUs = openedUs;
    while (cap > 0 && written < cap - 1) {
+      if (isHttpRequestGroupCancelled()) { failed = 1; break; }
       if (liveSegment && sys_time_get_system_time() - requestStartUs >= LIVE_SEGMENT_TIMEOUT_US) {
          logWarn("[live-http-diag] type=%s sq=%ld total request deadline exceeded after %llu ms\n",
                  liveType, liveSq,
