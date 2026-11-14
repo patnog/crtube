@@ -66,6 +66,33 @@ static struct {
    uint64_t         spaceAvailable;
 } dl;
 
+// The library manager has its own lazy worker and lock. It is NOT started from
+// initDownloads(): startup must never enumerate the HDD, read sidecars, migrate
+// MP4s, measure a directory tree, or wait for storage. The worker is created only
+// after the user enters Downloads / opens its manager. Cache locks protect memory
+// copies only; no VFS call, file copy, metadata parse, or delete may run while held.
+static struct {
+   sys_lwmutex_t mutex;
+   sys_ppu_thread_t worker;
+   int workerSpawned;
+   volatile int stop;
+   int refreshRequested;
+   int migrationDone;
+   int loading;
+   int scanError;
+   DownloadManagementItem completed[DOWNLOAD_MANAGEMENT_MAX_ITEMS];
+   DownloadManagementItem failed[DOWNLOAD_MANAGEMENT_MAX_ITEMS];
+   int completedCount;
+   int failedCount;
+   int deleteCount;
+   char deleteIds[DOWNLOAD_MANAGEMENT_MAX_ITEMS][16];
+   int deletingCount;
+   char deletingIds[DOWNLOAD_MANAGEMENT_MAX_ITEMS][16];
+   uint64_t usedBytes;
+   uint64_t freeBytes;
+   int statsReady;
+} manager;
+
 static Font  uiFont;
 static Label overlayLabel;
 static Label downloadToastLabel;
@@ -697,6 +724,8 @@ int deleteDownloadedVideo(const char *videoId)
    deleteFile(path);
    snprintf(path, sizeof path, "%s/%s.chapters", DOWNLOAD_LIBRARY_DIR, videoId);
    deleteFile(path);
+   snprintf(path, sizeof path, "%s/%s.failed", DOWNLOAD_LIBRARY_DIR, videoId);
+   deleteFile(path);
    clearDownloadSubtitleSidecars(videoId);
    return 0;
 }
@@ -833,13 +862,29 @@ static int confirmDownloadSpace(uint64_t estimate)
 
    while (!downloadCancellationRequested() && dl.spaceDecision < 0) sleepMs(50);
    int accepted = dl.spaceDecision == 1;
+   int cancelled = downloadCancellationRequested();
    dl.spacePrompt = 0;
    dl.spaceDecision = -1;
-   return accepted && !downloadCancellationRequested();
+   if (cancelled) return -1;
+   return accepted ? 1 : 0;
+}
+
+static void saveDownloadFailureMarker(const QueueItem *item)
+{
+   if (!item || !validDownloadId(item->videoId)) return;
+   char path[MAX_PATH_LEN];
+   snprintf(path, sizeof path, "%s/%s.failed", DOWNLOAD_LIBRARY_DIR, item->videoId);
+   const char *title = item->title[0] ? item->title : item->videoId;
+   writeFile(path, title, (uint64_t)strlen(title));
 }
 
 static void runOneDownload(const QueueItem *item)
 {
+   // Directory creation belongs to the download worker, never initDownloads().
+   // makeDir may report "already exists" as a nonzero backend result, so do not
+   // treat that return value as failure; the subsequent file operations report
+   // whether the path is actually usable.
+   makeDir(DOWNLOAD_LIBRARY_DIR);
    char finalPath[MAX_PATH_LEN] = "", partPath[MAX_PATH_LEN] = "";
    StreamInfo *info = (StreamInfo *)calloc(1, sizeof *info);
    const Extractor *extractor = findExtractor(item->videoId);
@@ -899,10 +944,14 @@ static void runOneDownload(const QueueItem *item)
    }
 
    uint64_t estimatedBytes = estimateDownloadBytes(video, audio, info->durationSeconds);
-   if (estimatedBytes && !confirmDownloadSpace(estimatedBytes)) {
-      logInfo("[dl] %s skipped by disk-space check (estimate=%llu free=%llu)\n", item->videoId,
-              (unsigned long long)estimatedBytes, (unsigned long long)dl.spaceAvailable);
-      goto failed;
+   if (estimatedBytes) {
+      int spaceCheck = confirmDownloadSpace(estimatedBytes);
+      if (spaceCheck < 0) goto cancelled;
+      if (spaceCheck == 0) {
+         logInfo("[dl] %s skipped by disk-space check (estimate=%llu free=%llu)\n", item->videoId,
+                 (unsigned long long)estimatedBytes, (unsigned long long)dl.spaceAvailable);
+         goto skipped;
+      }
    }
 
    buildDownloadPath(finalPath, sizeof finalPath, item->videoId);
@@ -971,6 +1020,9 @@ static void runOneDownload(const QueueItem *item)
    unlock(&dl.mutex);
 
    free(info->captions); free(info); info = NULL;
+   char failurePath[MAX_PATH_LEN];
+   snprintf(failurePath, sizeof failurePath, "%s/%s.failed", DOWNLOAD_LIBRARY_DIR, item->videoId);
+   deleteFile(failurePath);
    logInfo("[dl] %s done\n", item->videoId);
    if (strcmp(DOWNLOAD_LIBRARY_DIR, getVideoStagingDir()) != 0) {
       char exportPath[MAX_PATH_LEN];
@@ -995,8 +1047,15 @@ cancelled:
    logInfo("[dl] %s cancelled\n", item->videoId);
    return;
 
+skipped:
+   if (info) { free(info->captions); free(info); }
+   if (partPath[0]) deleteFile(partPath);
+   return;
+
 failed:
    if (info) { free(info->captions); free(info); }
+   if (partPath[0]) deleteFile(partPath);
+   saveDownloadFailureMarker(item);
    return;
 }
 
@@ -1032,40 +1091,165 @@ static void downloadWorker(uint64_t arg)
       dl.activeId[0] = 0;
       dl.activeTitle[0] = 0;
       unlock(&dl.mutex);
+
+      // Refresh the library only if the user has already opened it. Never start
+      // extra HDD work in the background merely because the app has downloads.
+      lock(&manager.mutex);
+      if (manager.workerSpawned) {
+         manager.refreshRequested = 1;
+         manager.loading = 1;
+      }
+      unlock(&manager.mutex);
    }
    exitThread();
 }
 
-int getDownloadManagementItems(DownloadManagementItem *out, int capacity)
+static void managerWorker(uint64_t arg);
+static int ensureManagerWorker(void);
+
+void requestDownloadManagementRefresh(void)
 {
-   if (!out || capacity <= 0 || !dl.initialized) return 0;
+   if (!dl.initialized) return;
+   lock(&manager.mutex);
+   if (!manager.loading) {
+      manager.refreshRequested = 1;
+      manager.loading = 1;
+      manager.scanError = 0;
+   }
+   unlock(&manager.mutex);
+   ensureManagerWorker();
+}
+
+int getDownloadManagementItems(int category, int offset, DownloadManagementItem *out,
+                               int capacity, int *total, int *loading)
+{
+   if (total) *total = 0;
+   if (loading) *loading = 0;
+   if (!dl.initialized || !out || capacity <= 0 || offset < 0) return 0;
+
+   if (category == DOWNLOAD_MANAGEMENT_ONGOING) {
+      int count = 0, written = 0;
+      lock(&dl.mutex);
+      count = (dl.active ? 1 : 0) + dl.count;
+      if (total) *total = count;
+      for (int i = offset; i < count && written < capacity; i++) {
+         DownloadManagementItem *entry = &out[written++];
+         memset(entry, 0, sizeof *entry);
+         if (dl.active && i == 0) {
+            strCopy(entry->videoId, sizeof entry->videoId, dl.activeId);
+            strCopy(entry->title, sizeof entry->title, dl.activeTitle);
+            entry->percent = dl.percent;
+            entry->active = 1;
+            entry->cancelling = dl.cancelActive;
+            entry->finalizing = dl.finalizing;
+         } else {
+            int queueIndex = i - (dl.active ? 1 : 0);
+            if (queueIndex >= 0 && queueIndex < dl.count) {
+               strCopy(entry->videoId, sizeof entry->videoId, dl.queue[queueIndex].videoId);
+               strCopy(entry->title, sizeof entry->title, dl.queue[queueIndex].title);
+            }
+         }
+      }
+      unlock(&dl.mutex);
+      return written;
+   }
+
+   if (category != DOWNLOAD_MANAGEMENT_COMPLETED && category != DOWNLOAD_MANAGEMENT_FAILED)
+      return 0;
+
+   lock(&manager.mutex);
+   DownloadManagementItem *items = category == DOWNLOAD_MANAGEMENT_COMPLETED ?
+                                   manager.completed : manager.failed;
+   int count = category == DOWNLOAD_MANAGEMENT_COMPLETED ?
+               manager.completedCount : manager.failedCount;
+   if (total) *total = count;
+   if (loading) *loading = manager.loading ? 1 : (manager.scanError ? 2 : 0);
+   int written = 0;
+   for (int i = offset; i < count && written < capacity; i++)
+      out[written++] = items[i];
+   unlock(&manager.mutex);
+   return written;
+}
+
+int getDownloadManagementIds(int category, char (*out)[16], int capacity)
+{
+   if (!dl.initialized || !out || capacity <= 0) return 0;
    int count = 0;
-   lock(&dl.mutex);
-   if (dl.active && count < capacity) {
-      DownloadManagementItem *entry = &out[count++];
-      memset(entry, 0, sizeof *entry);
-      strCopy(entry->videoId, sizeof entry->videoId, dl.activeId);
-      strCopy(entry->title, sizeof entry->title, dl.activeTitle);
-      entry->percent = dl.percent;
-      entry->active = 1;
-      entry->cancelling = dl.cancelActive;
-      entry->finalizing = dl.finalizing;
+   if (category == DOWNLOAD_MANAGEMENT_ONGOING) {
+      lock(&dl.mutex);
+      if (dl.active && count < capacity) strCopy(out[count++], 16, dl.activeId);
+      for (int i = 0; i < dl.count && count < capacity; i++)
+         strCopy(out[count++], 16, dl.queue[i].videoId);
+      unlock(&dl.mutex);
+      return count;
    }
-   for (int i = 0; i < dl.count && count < capacity; i++) {
-      DownloadManagementItem *entry = &out[count++];
-      memset(entry, 0, sizeof *entry);
-      strCopy(entry->videoId, sizeof entry->videoId, dl.queue[i].videoId);
-      strCopy(entry->title, sizeof entry->title, dl.queue[i].title);
-      entry->percent = 0;
-   }
-   unlock(&dl.mutex);
+   if (category != DOWNLOAD_MANAGEMENT_COMPLETED && category != DOWNLOAD_MANAGEMENT_FAILED)
+      return 0;
+   lock(&manager.mutex);
+   DownloadManagementItem *items = category == DOWNLOAD_MANAGEMENT_COMPLETED ?
+                                   manager.completed : manager.failed;
+   int available = category == DOWNLOAD_MANAGEMENT_COMPLETED ?
+                   manager.completedCount : manager.failedCount;
+   for (int i = 0; i < available && count < capacity; i++)
+      strCopy(out[count++], 16, items[i].videoId);
+   unlock(&manager.mutex);
    return count;
+}
+
+int queueDeleteManagedDownloads(const char *ids[], int count)
+{
+   if (!ids || count <= 0 || !dl.initialized) return -1;
+   if (count > DOWNLOAD_MANAGEMENT_MAX_ITEMS) count = DOWNLOAD_MANAGEMENT_MAX_ITEMS;
+   lock(&manager.mutex);
+   if (manager.deleteCount > 0) {
+      unlock(&manager.mutex);
+      return -1;
+   }
+   manager.deleteCount = 0;
+   for (int i = 0; i < count; i++) {
+      if (!ids[i] || !validDownloadId(ids[i])) continue;
+      strCopy(manager.deleteIds[manager.deleteCount],
+              sizeof manager.deleteIds[manager.deleteCount], ids[i]);
+      manager.deleteCount++;
+   }
+   int queuedCount = manager.deleteCount;
+   if (queuedCount > 0) manager.loading = 1;
+   unlock(&manager.mutex);
+   if (!queuedCount) return -1;
+   if (ensureManagerWorker() != 0) {
+      lock(&manager.mutex);
+      manager.deleteCount = 0;
+      manager.loading = 0;
+      manager.scanError = 1;
+      unlock(&manager.mutex);
+      return -1;
+   }
+   return 0;
+}
+
+int getDownloadLibraryStats(uint64_t *usedBytes, uint64_t *freeBytes, int *ready)
+{
+   if (!dl.initialized) {
+      if (usedBytes) *usedBytes = 0;
+      if (freeBytes) *freeBytes = 0;
+      if (ready) *ready = 0;
+      return 0;
+   }
+   int available;
+   lock(&manager.mutex);
+   available = manager.statsReady;
+   if (usedBytes) *usedBytes = manager.usedBytes;
+   if (freeBytes) *freeBytes = manager.freeBytes;
+   if (ready) *ready = available;
+   unlock(&manager.mutex);
+   return available;
 }
 
 int cancelManagedDownload(const char *videoId)
 {
    if (!videoId || !videoId[0] || !dl.initialized) return 1;
    int result = 1;
+   int removedQueuedItem = 0;
    lock(&dl.mutex);
    if (dl.active && strcmp(dl.activeId, videoId) == 0) {
       result = dl.finalizing ? -1 : 0;
@@ -1075,12 +1259,38 @@ int cancelManagedDownload(const char *videoId)
          if (strcmp(dl.queue[i].videoId, videoId) != 0) continue;
          for (int j = i + 1; j < dl.count; j++) dl.queue[j - 1] = dl.queue[j];
          dl.count--;
+         removedQueuedItem = 1;
          result = 0;
          break;
       }
    }
    unlock(&dl.mutex);
+
+   if (removedQueuedItem) {
+      // A queued ID may have hidden a legacy staged MP4 from the library scan.
+      // Refresh after releasing dl.mutex; never nest the two manager/download locks.
+      lock(&manager.mutex);
+      if (manager.workerSpawned) {
+         manager.refreshRequested = 1;
+         manager.loading = 1;
+      }
+      unlock(&manager.mutex);
+   }
    return result;
+}
+
+static int downloadIdDeleteReserved(const char *videoId)
+{
+   int reserved = 0;
+   lock(&manager.mutex);
+   for (int i = 0; i < manager.deletingCount; i++) {
+      if (strcmp(manager.deletingIds[i], videoId) == 0) {
+         reserved = 1;
+         break;
+      }
+   }
+   unlock(&manager.mutex);
+   return reserved;
 }
 
 static void enqueueDownloadItem(const SearchResult *item, const char *audioTrackId,
@@ -1089,13 +1299,16 @@ static void enqueueDownloadItem(const SearchResult *item, const char *audioTrack
 {
    if (!dl.initialized || !item || !item->videoId[0]) return;
 
-   int spawn = 0, duplicate = 0, full = 0;
+   int spawn = 0, duplicate = 0, full = 0, deleteReserved = 0;
    lock(&dl.mutex);
+   // Lock order here is dl.mutex -> manager.mutex. The library worker never holds
+   // manager.mutex while acquiring dl.mutex, so reservations cannot deadlock.
+   deleteReserved = downloadIdDeleteReserved(item->videoId);
    if (dl.active && strcmp(dl.activeId, item->videoId) == 0) duplicate = 1;
    for (int i = 0; i < dl.count && !duplicate; i++)
       if (strcmp(dl.queue[i].videoId, item->videoId) == 0) duplicate = 1;
 
-   if (!dl.cancelAll && !duplicate) {
+   if (!dl.cancelAll && !duplicate && !deleteReserved) {
       if (dl.count >= MAX_QUEUE) full = 1;
       else {
          QueueItem *queued = &dl.queue[dl.count];
@@ -1117,7 +1330,8 @@ static void enqueueDownloadItem(const SearchResult *item, const char *audioTrack
    }
    unlock(&dl.mutex);
 
-   if (duplicate) logInfo("[dl] %s already queued or downloading, skipped\n", item->videoId);
+   if (deleteReserved) logInfo("[dl] %s is being deleted, download skipped\n", item->videoId);
+   else if (duplicate) logInfo("[dl] %s already queued or downloading, skipped\n", item->videoId);
    else if (full) logWarn("[dl] queue full, %s skipped\n", item->videoId);
    else if (!dl.cancelAll) {
       downloadToastShownAt = getTimeUs();
@@ -1306,47 +1520,369 @@ void drawDownloadOverlay(int screenWidth)
 
 // ---- lifecycle ----
 
-static void migrateStagedDownloads(void)
+static int downloadIdBusy(const char *videoId);
+
+static int migrateStagedDownloads(void)
 {
    const char *staging = getVideoStagingDir();
-   if (!staging || !staging[0] || strcmp(staging, DOWNLOAD_LIBRARY_DIR) == 0) return;
+   if (!staging || !staging[0] || strcmp(staging, DOWNLOAD_LIBRARY_DIR) == 0) return 1;
    VfsDir dir;
-   if (openDir(staging, &dir) != 0) return;
+   if (openDir(staging, &dir) != 0) return 0;
    uint8_t *buffer = (uint8_t *)malloc(64 * 1024);
-   if (!buffer) { closeDir(&dir); return; }
+   if (!buffer) { closeDir(&dir); return 0; }
    char name[256], source[MAX_PATH_LEN], destination[MAX_PATH_LEN];
    VfsEntryType type;
-   while (readDir(&dir, name, sizeof name, &type) > 0) {
-      if (type != VFS_ENTRY_FILE || strlen(name) != 15 || strcmp(name + 11, ".mp4") != 0) continue;
+   int readResult = 0;
+   int deferred = 0;
+   while (!manager.stop && (readResult = readDir(&dir, name, sizeof name, &type)) > 0) {
+      if (type != VFS_ENTRY_FILE || strlen(name) != 15 || strcmp(name + 11, ".mp4") != 0) {
+         sleepMs(2);
+         continue;
+      }
       name[11] = 0;
       if (!validDownloadId(name)) continue;
+      if (downloadIdBusy(name)) { deferred = 1; continue; }
       snprintf(source, sizeof source, "%s/%s.mp4", staging, name);
       snprintf(destination, sizeof destination, "%s/%s.mp4", DOWNLOAD_LIBRARY_DIR, name);
-      if (!fileExists(destination) && copyFile(source, destination, buffer, 64 * 1024) == 0) {
-         const char *extensions[] = { ".meta", ".jpg" };
-         for (int i = 0; i < 2; i++) {
-            snprintf(source, sizeof source, "%s/%s%s", staging, name, extensions[i]);
-            snprintf(destination, sizeof destination, "%s/%s%s", DOWNLOAD_LIBRARY_DIR, name, extensions[i]);
-            if (fileExists(source) && !fileExists(destination)) copyFile(source, destination, buffer, 64 * 1024);
+      if (!fileExists(destination)) {
+         char temporary[MAX_PATH_LEN];
+         snprintf(temporary, sizeof temporary, "%s/%s.migrate", DOWNLOAD_LIBRARY_DIR, name);
+         deleteFile(temporary);
+         if (copyFile(source, temporary, buffer, 64 * 1024) == 0 &&
+             renamePath(temporary, destination) == 0) {
+            const char *extensions[] = { ".meta", ".jpg" };
+            for (int i = 0; i < 2; i++) {
+               snprintf(source, sizeof source, "%s/%s%s", staging, name, extensions[i]);
+               snprintf(destination, sizeof destination, "%s/%s%s", DOWNLOAD_LIBRARY_DIR, name, extensions[i]);
+               if (fileExists(source) && !fileExists(destination))
+                  copyFile(source, destination, buffer, 64 * 1024);
+            }
+            logInfo("[dl] migrated existing download %s into library\n", name);
+         } else {
+            deleteFile(temporary);
          }
-         logInfo("[dl] migrated existing download %s into library\n", name);
       }
+      // Large MP4 copies are intentionally paced on this background worker.
+      sleepMs(5);
    }
    free(buffer);
    closeDir(&dir);
+   return !manager.stop && readResult == 0 && !deferred;
+}
+
+typedef struct {
+   char videoId[16];
+   int hasMp4;
+   int hasMetadata;
+   int hasFailureMarker;
+   uint64_t modifiedAt;
+} DownloadScanRecord;
+
+static int managerScanCancelled(void) { return manager.stop; }
+
+static int managerRecordIndex(DownloadScanRecord *records, int count, const char *id)
+{
+   for (int i = 0; i < count; i++)
+      if (strcmp(records[i].videoId, id) == 0) return i;
+   return -1;
+}
+
+static int compareManagerItems(const void *left, const void *right)
+{
+   const DownloadManagementItem *a = (const DownloadManagementItem *)left;
+   const DownloadManagementItem *b = (const DownloadManagementItem *)right;
+   if (a->modifiedAt < b->modifiedAt) return 1;
+   if (a->modifiedAt > b->modifiedAt) return -1;
+   return compareDownloadText(a->title, b->title);
+}
+
+static int downloadIdBusy(const char *videoId)
+{
+   int busy = 0;
+   lock(&dl.mutex);
+   if (dl.active && strcmp(dl.activeId, videoId) == 0) busy = 1;
+   for (int i = 0; i < dl.count && !busy; i++)
+      if (strcmp(dl.queue[i].videoId, videoId) == 0) busy = 1;
+   unlock(&dl.mutex);
+   return busy;
+}
+
+static int reserveDownloadDelete(const char *videoId)
+{
+   int reserved = 0;
+   lock(&manager.mutex);
+   if (manager.deletingCount < DOWNLOAD_MANAGEMENT_MAX_ITEMS) {
+      int exists = 0;
+      for (int i = 0; i < manager.deletingCount; i++)
+         if (strcmp(manager.deletingIds[i], videoId) == 0) { exists = 1; break; }
+      if (!exists) {
+         strCopy(manager.deletingIds[manager.deletingCount], 16, videoId);
+         manager.deletingCount++;
+         reserved = 1;
+      }
+   }
+   unlock(&manager.mutex);
+   return reserved;
+}
+
+static void releaseDownloadDelete(const char *videoId)
+{
+   lock(&manager.mutex);
+   for (int i = 0; i < manager.deletingCount; i++) {
+      if (strcmp(manager.deletingIds[i], videoId) != 0) continue;
+      for (int j = i + 1; j < manager.deletingCount; j++)
+         strCopy(manager.deletingIds[j - 1], 16, manager.deletingIds[j]);
+      manager.deletingCount--;
+      break;
+   }
+   unlock(&manager.mutex);
+}
+
+static void scanDownloadLibrary(void)
+{
+   DownloadScanRecord *records = (DownloadScanRecord *)calloc(
+      DOWNLOAD_MANAGEMENT_MAX_ITEMS, sizeof(DownloadScanRecord));
+   DownloadManagementItem *completed = (DownloadManagementItem *)calloc(
+      DOWNLOAD_MANAGEMENT_MAX_ITEMS, sizeof(DownloadManagementItem));
+   DownloadManagementItem *failed = (DownloadManagementItem *)calloc(
+      DOWNLOAD_MANAGEMENT_MAX_ITEMS, sizeof(DownloadManagementItem));
+   if (!records || !completed || !failed) {
+      free(records); free(completed); free(failed);
+      lock(&manager.mutex);
+      manager.loading = manager.refreshRequested || manager.deleteCount > 0;
+      manager.scanError = !manager.loading;
+      unlock(&manager.mutex);
+      logWarn("[dl-manager] scan skipped: out of memory\n");
+      return;
+   }
+
+   int recordCount = 0, completedCount = 0, failedCount = 0;
+   VfsDir dir;
+   makeDir(DOWNLOAD_LIBRARY_DIR);
+   if (openDir(DOWNLOAD_LIBRARY_DIR, &dir) != 0) {
+      free(records); free(completed); free(failed);
+      lock(&manager.mutex);
+      manager.loading = manager.refreshRequested || manager.deleteCount > 0;
+      manager.scanError = !manager.loading;
+      unlock(&manager.mutex);
+      logWarn("[dl-manager] library directory is unavailable\n");
+      return;
+   }
+   {
+      char name[256], path[MAX_PATH_LEN];
+      VfsEntryType type;
+      int readResult;
+      int scannedEntries = 0;
+      while (!manager.stop && (readResult = readDir(&dir, name, sizeof name, &type)) > 0) {
+         if ((++scannedEntries & 7) == 0) yieldThread();
+         if (type != VFS_ENTRY_FILE) continue;
+         size_t length = strlen(name);
+         if (length < 15 || name[11] != '.') continue;
+         char id[16];
+         memcpy(id, name, 11); id[11] = 0;
+         if (!validDownloadId(id)) continue;
+         const char *extension = name + 11;
+         if (strcmp(extension, ".mp4") != 0 && strcmp(extension, ".meta") != 0 &&
+             strcmp(extension, ".failed") != 0) continue;
+
+         int index = managerRecordIndex(records, recordCount, id);
+         if (index < 0) {
+            if (recordCount >= DOWNLOAD_MANAGEMENT_MAX_ITEMS) continue;
+            index = recordCount++;
+            strCopy(records[index].videoId, sizeof records[index].videoId, id);
+         }
+         if (strcmp(extension, ".mp4") == 0) {
+            records[index].hasMp4 = 1;
+            snprintf(path, sizeof path, "%s/%s", DOWNLOAD_LIBRARY_DIR, name);
+            VfsStat stat;
+            if (statPath(path, &stat) == 0) {
+               records[index].modifiedAt = stat.mtime;
+               if (stat.size == 0) {
+                  records[index].hasMp4 = 0;
+                  records[index].hasFailureMarker = 1;
+               }
+            }
+         } else if (strcmp(extension, ".meta") == 0) {
+            records[index].hasMetadata = 1;
+            snprintf(path, sizeof path, "%s/%s", DOWNLOAD_LIBRARY_DIR, name);
+            VfsStat stat;
+            if (statPath(path, &stat) == 0 && stat.mtime > records[index].modifiedAt)
+               records[index].modifiedAt = stat.mtime;
+         } else {
+            records[index].hasFailureMarker = 1;
+            snprintf(path, sizeof path, "%s/%s", DOWNLOAD_LIBRARY_DIR, name);
+            VfsStat stat;
+            if (statPath(path, &stat) == 0 && stat.mtime > records[index].modifiedAt)
+               records[index].modifiedAt = stat.mtime;
+         }
+      }
+      closeDir(&dir);
+   }
+
+   for (int i = 0; i < recordCount && !manager.stop; i++) {
+      DownloadScanRecord *record = &records[i];
+      // Hide IDs currently active/queued so stale sidecars cannot appear as Failed
+      // while a retry is in progress, and so a re-download is not duplicated.
+      if (downloadIdBusy(record->videoId)) continue;
+      DownloadManagementItem *entry;
+      char videoPath[MAX_PATH_LEN], sidecar[MAX_PATH_LEN];
+      snprintf(videoPath, sizeof videoPath, "%s/%s.mp4", DOWNLOAD_LIBRARY_DIR, record->videoId);
+      if (record->hasMp4) {
+         if (completedCount >= DOWNLOAD_MANAGEMENT_MAX_ITEMS) continue;
+         entry = &completed[completedCount++];
+      } else if (record->hasMetadata || record->hasFailureMarker) {
+         if (failedCount >= DOWNLOAD_MANAGEMENT_MAX_ITEMS) continue;
+         entry = &failed[failedCount++];
+      } else continue;
+
+      memset(entry, 0, sizeof *entry);
+      strCopy(entry->videoId, sizeof entry->videoId, record->videoId);
+      strCopy(entry->title, sizeof entry->title, record->videoId);
+      entry->modifiedAt = record->modifiedAt;
+      entry->failed = !record->hasMp4;
+
+      if (record->hasMetadata) {
+         char author[256], description[2048], published[24], views[32], likes[32];
+         loadDownloadedMetadata(videoPath, entry->title, sizeof entry->title,
+                                author, sizeof author, description, sizeof description,
+                                published, sizeof published, views, sizeof views, likes, sizeof likes);
+      } else if (!record->hasMp4 && record->hasFailureMarker) {
+         snprintf(sidecar, sizeof sidecar, "%s/%s.failed", DOWNLOAD_LIBRARY_DIR, record->videoId);
+         char reason[DOWNLOAD_MANAGEMENT_TITLE_LEN];
+         int length = readFile(sidecar, reason, sizeof reason - 1);
+         if (length > 0) {
+            reason[length] = 0;
+            char *newline = strpbrk(reason, "\r\n");
+            if (newline) *newline = 0;
+            if (reason[0]) strCopy(entry->title, sizeof entry->title, reason);
+         }
+      }
+   }
+
+   if (!manager.stop) {
+      qsort(completed, completedCount, sizeof completed[0], compareManagerItems);
+      qsort(failed, failedCount, sizeof failed[0], compareManagerItems);
+
+      // measureTree can recurse and touch every file. Keep it on this low-priority
+      // worker; never move it into updateHome(), drawHome(), or initDownloads().
+      uint64_t used = measureTree(DOWNLOAD_LIBRARY_DIR, managerScanCancelled);
+      uint64_t freeBytes = 0;
+      getFreeSpace("/dev_hdd0", &freeBytes, NULL);
+
+      lock(&manager.mutex);
+      memcpy(manager.completed, completed, sizeof(completed[0]) * completedCount);
+      memcpy(manager.failed, failed, sizeof(failed[0]) * failedCount);
+      manager.completedCount = completedCount;
+      manager.failedCount = failedCount;
+      manager.usedBytes = used;
+      manager.freeBytes = freeBytes;
+      manager.statsReady = !manager.stop;
+      manager.loading = manager.refreshRequested || manager.deleteCount > 0;
+      manager.scanError = 0;
+      unlock(&manager.mutex);
+      __sync_add_and_fetch(&dl.completionSerial, 1);
+   }
+
+   free(records);
+   free(completed);
+   free(failed);
+}
+
+static int ensureManagerWorker(void)
+{
+   int spawn = 0;
+   lock(&manager.mutex);
+   if (!manager.workerSpawned && !manager.stop) {
+      manager.workerSpawned = 1;
+      spawn = 1;
+   }
+   unlock(&manager.mutex);
+   if (!spawn) return 0;
+
+   if (spawnJoinableThread(&manager.worker, managerWorker, 0, THREAD_PRIORITY_LOW,
+                           THREAD_STACK_SIZE_64KB, "dl-library") != 0) {
+      lock(&manager.mutex);
+      manager.workerSpawned = 0;
+      manager.loading = manager.refreshRequested || manager.deleteCount > 0;
+      manager.scanError = 1;
+      unlock(&manager.mutex);
+      logError("[dl-manager] worker spawn failed\n");
+      return -1;
+   }
+   return 0;
+}
+
+static void managerWorker(uint64_t arg)
+{
+   (void)arg;
+   for (;;) {
+      if (manager.stop) break;
+      int refresh = 0, deleteCount = 0;
+      char deleteIds[DOWNLOAD_MANAGEMENT_MAX_ITEMS][16];
+
+      lock(&manager.mutex);
+      refresh = manager.refreshRequested;
+      manager.refreshRequested = 0;
+      deleteCount = manager.deleteCount;
+      if (refresh || deleteCount > 0) manager.loading = 1;
+      if (deleteCount > 0) {
+         memcpy(deleteIds, manager.deleteIds, sizeof(char[16]) * deleteCount);
+         manager.deleteCount = 0;
+      }
+      unlock(&manager.mutex);
+
+      if (!refresh && deleteCount == 0) {
+         sleepMs(100);
+         continue;
+      }
+      if (!manager.migrationDone) {
+         // Legacy XMB-staging migration can copy large MP4s. It is intentionally
+         // deferred until the first explicit library refresh, never app startup.
+         makeDir(DOWNLOAD_LIBRARY_DIR);
+         manager.migrationDone = migrateStagedDownloads();
+      }
+
+      for (int i = 0; i < deleteCount && !manager.stop; i++) {
+         if (reserveDownloadDelete(deleteIds[i])) {
+            if (!downloadIdBusy(deleteIds[i])) {
+               if (removeDownloadArtifacts(deleteIds[i]) != 0)
+                  logWarn("[dl-manager] could not delete %s\\n", deleteIds[i]);
+            }
+            releaseDownloadDelete(deleteIds[i]);
+         }
+         if ((i & 3) == 3) sleepMs(10);
+      }
+
+      if (refresh || deleteCount > 0) scanDownloadLibrary();
+   }
+   exitThread();
 }
 
 void initDownloads(void)
 {
+   // STARTUP SAFETY:
+   // This function runs on the app's initialization path. Keep it strictly bounded:
+   // initialize memory, locks and UI labels only. Never mkdir/openDir/readDir/stat,
+   // inspect metadata, measureTree, migrate/copy MP4s, spawn-and-wait, or join a
+   // worker here. HDD readiness and library size are not guaranteed during startup.
+   // Library work is requested lazily by the Downloads screen and performed by the
+   // low-priority manager worker. This prevents a slow HDD / large library from
+   // delaying the first frame or making the PS3 appear hard-locked.
    memset(&dl, 0, sizeof dl);
-   makeDir(DOWNLOAD_LIBRARY_DIR);
-   migrateStagedDownloads();
-   createLock(&dl.mutex);
+   memset(&manager, 0, sizeof manager);
+   if (createLock(&dl.mutex) != 0) {
+      logError("[dl] could not create download mutex; downloads disabled\n");
+      return;
+   }
+   if (createLock(&manager.mutex) != 0) {
+      destroyLock(&dl.mutex);
+      logError("[dl] could not create manager mutex; downloads disabled\n");
+      return;
+   }
    uiFont = openSystemFont(FONT_POP);
    initLabel(&overlayLabel, &uiFont, 0, 0, AUTO, AUTO, OVERLAY_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabel(&downloadToastLabel, &uiFont, 0, 0, 1200, AUTO, 23, activeTheme->textPrimary, TEXT_WRAP, "");
    downloadToastShownAt = 0;
-   /* Rasterize at the selected UI scale without scaling the screen-space anchor. */
    setLabelScaleWithUi(&overlayLabel, 1);
    setLabelScaleWithUi(&downloadToastLabel, 1);
    consumedCompletionSerial = 0;
@@ -1356,13 +1892,18 @@ void initDownloads(void)
 void shutdownDownloads(void)
 {
    if (!dl.initialized) return;
+   // Stop background workers before destroying their locks or cache storage.
+   // The library worker is lazy and may never have been created in this session.
    dl.cancelAll = 1;
+   manager.stop = 1;
    if (dl.workerSpawned) joinThread(dl.worker);
+   if (manager.workerSpawned) joinThread(manager.worker);
    dl.count = 0;
-   finishGfx();   // the overlay label may have been sampled last frame
+   finishGfx();
    freeLabel(&overlayLabel);
    freeLabel(&downloadToastLabel);
    closeFont(&uiFont);
+   destroyLock(&manager.mutex);
    destroyLock(&dl.mutex);
    dl.initialized = 0;
 }

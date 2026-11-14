@@ -6,14 +6,24 @@
 // progress shows at the lower-left below the browse-screen button hints. Everything runs off the UI
 // thread; the queue is cancelled and cleared on app exit.
 
+#include <stdint.h>
 #include "extractor.h"   // SearchResult / CaptionTrack
 #include "chapters.h"
 
-void initDownloads(void);       // set up the worker state + overlay; call after initFont
+// Startup-only, bounded initialization: locks + overlay labels. Must not touch HDD;
+// the library worker is started lazily by requestDownloadManagementRefresh().
+void initDownloads(void);       // call after initFont
 void shutdownDownloads(void);   // cancel + clear the queue, join the worker, free the overlay; call at exit
 
-#define DOWNLOAD_MANAGEMENT_MAX_ITEMS 17
+#define DOWNLOAD_MANAGEMENT_MAX_ITEMS 256
 #define DOWNLOAD_MANAGEMENT_TITLE_LEN 160
+#define DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS 7
+
+typedef enum {
+   DOWNLOAD_MANAGEMENT_ONGOING = 0,
+   DOWNLOAD_MANAGEMENT_COMPLETED = 1,
+   DOWNLOAD_MANAGEMENT_FAILED = 2
+} DownloadManagementCategory;
 typedef struct {
    char videoId[16];
    char title[DOWNLOAD_MANAGEMENT_TITLE_LEN];
@@ -21,9 +31,18 @@ typedef struct {
    int active;
    int cancelling;
    int finalizing;
+   int failed;
+   uint64_t modifiedAt;
 } DownloadManagementItem;
 
-int getDownloadManagementItems(DownloadManagementItem *out, int capacity);
+// Lazy library worker: all HDD enumeration, sidecar reads, migration and deletes
+// happen off the UI thread. Getters below only copy the in-memory cache.
+void requestDownloadManagementRefresh(void);
+int getDownloadManagementItems(int category, int offset, DownloadManagementItem *out,
+                               int capacity, int *total, int *loading);
+int getDownloadManagementIds(int category, char (*out)[16], int capacity);
+int queueDeleteManagedDownloads(const char *ids[], int count);
+int getDownloadLibraryStats(uint64_t *usedBytes, uint64_t *freeBytes, int *ready);
 // 0 = accepted, 1 = not found, -1 = already finalizing / cannot cancel.
 int cancelManagedDownload(const char *videoId);
 

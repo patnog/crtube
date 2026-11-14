@@ -23,7 +23,6 @@ extern void sysProcessExit(int status);
 #include "ui/button-hints.h"
 #include "ui/console-glyphs.h"
 #include "ui/icon-font.h"
-#include "vfs.h"                 // measureTree / getFreeSpace
 
 #include "gfx.h"
 #include "theme.h"
@@ -151,9 +150,10 @@ static struct {
    int       downloadManagerOpen;
    int       downloadManagerSelected;
    int       downloadManagerScroll;
+   int       downloadManagerCategory;
+   int       downloadManagerSelectedCount;
+   char      downloadManagerSelectedIds[DOWNLOAD_MANAGEMENT_MAX_ITEMS][16];
    int       downloadManagerConfirmOpen;
-   int       downloadManagerConfirmSelected;
-   char      downloadManagerTargetId[16];
    char      downloadManagerMessage[96];
    char      playlistDeleteId[64]; // YouTube playlist IDs are longer than local playlist IDs.
    int       createPlaylistOskDone;
@@ -197,9 +197,8 @@ static Label       titleLabel, statusLabel, playlistErrorLabel, playlistToastLab
 static Label       statusDotsLabel;
 static uint64_t    homeLoadingStartedUs;
 static Label       downloadSpacePrefixLabel, downloadSpaceAvailableLabel;
-static uint64_t    downloadSpaceStatsUpdatedUs;
 static int         downloadSpaceAvailableLow;
-static Label       downloadManagerTitle, downloadManagerRows[7], downloadManagerStatuses[7], downloadManagerFooter;
+static Label       downloadManagerTitle, downloadManagerRows[10], downloadManagerStatuses[7], downloadManagerFooter;
 static ButtonHints downloadManagerHints;
 static uint64_t    playlistToastShownAt;
 static int         playbackRestorePending;
@@ -418,10 +417,10 @@ static void refreshHomeThemeColors(void)
    setLabelColor(&downloadSpaceAvailableLabel,
                  downloadSpaceAvailableLow ? 0xFFFF4444 : activeTheme->textSecondary);
    setLabelColor(&downloadManagerTitle, activeTheme->textPrimary);
-   for (int i = 0; i < 7; i++) {
+   for (int i = 0; i < 10; i++)
       setLabelColor(&downloadManagerRows[i], activeTheme->textPrimary);
+   for (int i = 0; i < 7; i++)
       setLabelColor(&downloadManagerStatuses[i], activeTheme->textSecondary);
-   }
    setLabelColor(&downloadManagerFooter, activeTheme->textSecondary);
    setLabelColor(&panelTitle, activeTheme->textPrimary);
    setLabelColor(&panelLine1, activeTheme->textSecondary);
@@ -823,7 +822,11 @@ static void switchToCategory(int category)
        category == home.category) return;
    cacheCurrent();
    home.category = category;
-   if (category == HOME_DOWNLOADS) downloadSpaceStatsUpdatedUs = 0;
+   if (category == HOME_DOWNLOADS) {
+      // Only request work here; HDD enumeration and legacy-file migration happen
+      // on the low-priority library worker, never on the screen transition path.
+      requestDownloadManagementRefresh();
+   }
    loadCategory();
    setSidebarForCategory();
    updateHomeSortHint();
@@ -2434,7 +2437,6 @@ static void drawPlaylistShuffleBadge(void)
    drawShuffleCurve(cx, cy, -1, ink, outline);
 }
 
-#define DOWNLOAD_SPACE_REFRESH_US (15ULL * 1000000ULL)
 #define DOWNLOAD_SPACE_LOW_BYTES  (1024ULL * 1024ULL * 1024ULL)
 
 static void formatDownloadSpace(uint64_t bytes, char *out, int capacity)
@@ -2449,32 +2451,26 @@ static void formatDownloadSpace(uint64_t bytes, char *out, int capacity)
 
 static void updateDownloadSpaceStats(void)
 {
-   uint64_t now = getTimeUs();
-   if (downloadSpaceStatsUpdatedUs && now - downloadSpaceStatsUpdatedUs < DOWNLOAD_SPACE_REFRESH_US)
-      return;
-
-   char downloadsPath[MAX_PATH_LEN];
-   snprintf(downloadsPath, sizeof downloadsPath, "%s/downloads", CRTUBE_DATA_DIR);
-   makeDir(downloadsPath);
-
-   uint64_t usedBytes = measureTree(downloadsPath, NULL);
-   uint64_t availableBytes = 0;
-   int availableOk = getFreeSpace("/dev_hdd0", &availableBytes, NULL) == 0;
+   // Read only the manager's in-memory snapshot here. measureTree(), getFreeSpace()
+   // and all directory traversal run on the low-priority library worker.
+   uint64_t usedBytes = 0, availableBytes = 0;
+   int ready = 0;
+   getDownloadLibraryStats(&usedBytes, &availableBytes, &ready);
 
    char usedText[24], availableValue[24], availableText[48], prefix[96];
-   formatDownloadSpace(usedBytes, usedText, sizeof usedText);
-   if (availableOk) {
+   if (ready) {
+      formatDownloadSpace(usedBytes, usedText, sizeof usedText);
       formatDownloadSpace(availableBytes, availableValue, sizeof availableValue);
       snprintf(availableText, sizeof availableText, " Available: %s", availableValue);
       downloadSpaceAvailableLow = availableBytes <= DOWNLOAD_SPACE_LOW_BYTES;
+      snprintf(prefix, sizeof prefix, "Used: %s /", usedText);
    } else {
-      strCopy(availableText, sizeof availableText, " Available: N/A");
+      strCopy(prefix, sizeof prefix, "Used: -- /");
+      strCopy(availableText, sizeof availableText, " Available: --");
       downloadSpaceAvailableLow = 0;
    }
-   snprintf(prefix, sizeof prefix, "Used: %s /", usedText);
-   setLabelText(&downloadSpacePrefixLabel, prefix);
-   setLabelText(&downloadSpaceAvailableLabel, availableText);
-   downloadSpaceStatsUpdatedUs = now;
+   setLabelIfChanged(&downloadSpacePrefixLabel, prefix);
+   setLabelIfChanged(&downloadSpaceAvailableLabel, availableText);
 }
 
 static void drawDownloadSpaceStatus(void)
@@ -2757,9 +2753,9 @@ static void initHome(void)
    home.downloadManagerOpen = 0;
    home.downloadManagerSelected = 0;
    home.downloadManagerScroll = 0;
+   home.downloadManagerCategory = DOWNLOAD_MANAGEMENT_COMPLETED;
+   home.downloadManagerSelectedCount = 0;
    home.downloadManagerConfirmOpen = 0;
-   home.downloadManagerConfirmSelected = 1;
-   home.downloadManagerTargetId[0] = 0;
    home.downloadManagerMessage[0] = 0;
    home.playlistDeleteId[0] = 0;
    home.playlistReturnToSearch = 0;
@@ -2821,7 +2817,6 @@ static void initHome(void)
              activeTheme->textSecondary, TEXT_NOWRAP, " Available: --");
    setLabelScaleWithUi(&downloadSpacePrefixLabel, 1);
    setLabelScaleWithUi(&downloadSpaceAvailableLabel, 1);
-   downloadSpaceStatsUpdatedUs = 0;
    downloadSpaceAvailableLow = 0;
    initLabel(&statusLabel, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, AUTO, 21, activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
    initLabel(&statusDotsLabel, &uiFont, MARGIN_X, gridTop, 48, AUTO, 21,
@@ -2834,28 +2829,30 @@ static void initHome(void)
    int downloadPanelW = getDownloadManagerPanelWidth();
    initLabel(&downloadManagerTitle, &uiFont, 0, 0, downloadPanelW - 64, AUTO, 29,
              activeTheme->textPrimary, TEXT_NOWRAP, "Download management");
-   for (int i = 0; i < 7; i++) {
+   for (int i = 0; i < 10; i++) {
       initLabel(&downloadManagerRows[i], &uiFont, 0, 0, downloadPanelW - 220, AUTO, 22,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
+      setLabelScaleWithUi(&downloadManagerRows[i], 1);
+   }
+   for (int i = 0; i < 7; i++) {
       initLabel(&downloadManagerStatuses[i], &uiFont, 0, 0, 128, AUTO, 21,
                 activeTheme->textSecondary, TEXT_NOWRAP, "");
+      setLabelScaleWithUi(&downloadManagerStatuses[i], 1);
    }
    initLabel(&downloadManagerFooter, &uiFont, 0, 0, downloadPanelW - 64, AUTO, 18,
              activeTheme->textSecondary, TEXT_NOWRAP, "");
    initButtonHints(&downloadManagerHints, &uiFont, 0, 20, 18, activeTheme->textSecondary);
-   setButtonHintGap(&downloadManagerHints, 18);
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_DPAD_UP), NULL);
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Select");
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_CROSS), "Cancel");
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_CIRCLE), NULL);
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_R3), "Close");
+   setButtonHintGap(&downloadManagerHints, 14);
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_DPAD_UP), "Move");
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_CROSS), "Select");
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_TRIANGLE), "All");
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_SQUARE), "Manage");
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_L1), "L1/R1 Tabs");
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
+
    setLabelScaleWithUi(&playlistErrorLabel, 1);
    setLabelScaleWithUi(&playlistToastLabel, 1);
    setLabelScaleWithUi(&downloadManagerTitle, 1);
-   for (int i = 0; i < 7; i++) {
-      setLabelScaleWithUi(&downloadManagerRows[i], 1);
-      setLabelScaleWithUi(&downloadManagerStatuses[i], 1);
-   }
    setLabelScaleWithUi(&downloadManagerFooter, 1);
    playlistToastShownAt = 0;
    // Home heading/status grow by rerasterising their font, while retaining their
@@ -3184,36 +3181,126 @@ static int handleHomeSquareAction(const SearchResult *selected)
    return 1;
 }
 
+static int downloadManagerIsSelected(const char *videoId)
+{
+   for (int i = 0; i < home.downloadManagerSelectedCount; i++)
+      if (strcmp(home.downloadManagerSelectedIds[i], videoId) == 0) return 1;
+   return 0;
+}
+
+static void downloadManagerClearSelection(void)
+{
+   home.downloadManagerSelectedCount = 0;
+}
+
+static void downloadManagerToggleSelection(const char *videoId)
+{
+   for (int i = 0; i < home.downloadManagerSelectedCount; i++) {
+      if (strcmp(home.downloadManagerSelectedIds[i], videoId) == 0) {
+         for (int j = i + 1; j < home.downloadManagerSelectedCount; j++)
+            strCopy(home.downloadManagerSelectedIds[j - 1], 16, home.downloadManagerSelectedIds[j]);
+         home.downloadManagerSelectedCount--;
+         return;
+      }
+   }
+   if (home.downloadManagerSelectedCount < DOWNLOAD_MANAGEMENT_MAX_ITEMS) {
+      strCopy(home.downloadManagerSelectedIds[home.downloadManagerSelectedCount], 16, videoId);
+      home.downloadManagerSelectedCount++;
+   }
+}
+
+static void downloadManagerSelectAll(void)
+{
+   char ids[DOWNLOAD_MANAGEMENT_MAX_ITEMS][16];
+   int count = getDownloadManagementIds(home.downloadManagerCategory, ids,
+                                        DOWNLOAD_MANAGEMENT_MAX_ITEMS);
+   int allSelected = count == home.downloadManagerSelectedCount;
+   for (int i = 0; i < count && allSelected; i++) {
+      int found = 0;
+      for (int j = 0; j < home.downloadManagerSelectedCount; j++)
+         if (strcmp(ids[i], home.downloadManagerSelectedIds[j]) == 0) { found = 1; break; }
+      if (!found) allSelected = 0;
+   }
+   if (allSelected) {
+      downloadManagerClearSelection();
+      return;
+   }
+   home.downloadManagerSelectedCount = count;
+   for (int i = 0; i < count; i++)
+      strCopy(home.downloadManagerSelectedIds[i], 16, ids[i]);
+}
+
+static void downloadManagerConfirmAction(void)
+{
+   int requested = home.downloadManagerSelectedCount;
+   if (requested <= 0) {
+      home.downloadManagerConfirmOpen = 0;
+      return;
+   }
+
+   if (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING) {
+      int accepted = 0, rejected = 0;
+      for (int i = 0; i < requested; i++) {
+         int rc = cancelManagedDownload(home.downloadManagerSelectedIds[i]);
+         if (rc == 0) accepted++;
+         else rejected++;
+      }
+      snprintf(home.downloadManagerMessage, sizeof home.downloadManagerMessage,
+               rejected ? "Cancel requested: %d, unavailable: %d" : "Cancellation requested for %d",
+               accepted, rejected);
+   } else {
+      const char *ids[DOWNLOAD_MANAGEMENT_MAX_ITEMS];
+      for (int i = 0; i < requested; i++) ids[i] = home.downloadManagerSelectedIds[i];
+      if (queueDeleteManagedDownloads(ids, requested) == 0) {
+         snprintf(home.downloadManagerMessage, sizeof home.downloadManagerMessage,
+                  "Deleting %d item%s...", requested, requested == 1 ? "" : "s");
+      } else {
+         strCopy(home.downloadManagerMessage, sizeof home.downloadManagerMessage,
+                 "Could not queue deletion");
+      }
+   }
+
+   downloadManagerClearSelection();
+   home.downloadManagerConfirmOpen = 0;
+}
+
 static void updateDownloadManagement(void)
 {
-   DownloadManagementItem items[DOWNLOAD_MANAGEMENT_MAX_ITEMS];
-   int count = getDownloadManagementItems(items, DOWNLOAD_MANAGEMENT_MAX_ITEMS);
+   // This callback is on the UI thread: only copy bounded cache/queue snapshots,
+   // mutate selection state, and enqueue operations. Never add VFS calls here.
+   // A download may be paused at its disk-space confirmation while this modal is
+   // open. Keep servicing that prompt so the download worker cannot wait forever.
+   updateDownloadOverlay();
+   if (isDownloadSpacePromptOpen()) return;
+
+   DownloadManagementItem items[DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS];
+   int count = 0, loading = 0;
+   int visible = getDownloadManagementItems(home.downloadManagerCategory,
+                                             home.downloadManagerScroll, items,
+                                             DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS,
+                                             &count, &loading);
+   if (loading && home.downloadManagerCategory != DOWNLOAD_MANAGEMENT_ONGOING)
+      downloadManagerClearSelection();
    if (count <= 0) home.downloadManagerSelected = home.downloadManagerScroll = 0;
    else {
       if (home.downloadManagerSelected >= count) home.downloadManagerSelected = count - 1;
       if (home.downloadManagerSelected < 0) home.downloadManagerSelected = 0;
+      int maxScroll = count > DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS ?
+                      count - DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS : 0;
+      if (home.downloadManagerScroll > maxScroll) home.downloadManagerScroll = maxScroll;
       if (home.downloadManagerSelected < home.downloadManagerScroll)
          home.downloadManagerScroll = home.downloadManagerSelected;
-      if (home.downloadManagerSelected >= home.downloadManagerScroll + 7)
-         home.downloadManagerScroll = home.downloadManagerSelected - 6;
+      if (home.downloadManagerSelected >= home.downloadManagerScroll + DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS)
+         home.downloadManagerScroll = home.downloadManagerSelected - DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS + 1;
    }
 
    if (home.downloadManagerConfirmOpen) {
-      if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.downloadManagerConfirmOpen = 0; return; }
-      if (isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_LEFT)) ||
-          isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_RIGHT)) ||
-          isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_UP)) ||
-          isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
-         home.downloadManagerConfirmSelected = 1 - home.downloadManagerConfirmSelected;
-      if (isPadButtonPressed(PAD_BTN_CROSS)) {
-         if (home.downloadManagerConfirmSelected == 0) {
-            int rc = cancelManagedDownload(home.downloadManagerTargetId);
-            if (rc == 0) home.downloadManagerMessage[0] = 0;
-            else strCopy(home.downloadManagerMessage, sizeof home.downloadManagerMessage,
-                         rc < 0 ? "Download is already finishing" : "Download is no longer queued");
-         }
+      if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
          home.downloadManagerConfirmOpen = 0;
+         return;
       }
+      if (isPadButtonPressed(PAD_BTN_CROSS))
+         downloadManagerConfirmAction();
       return;
    }
 
@@ -3221,22 +3308,72 @@ static void updateDownloadManagement(void)
       home.downloadManagerOpen = 0;
       return;
    }
+
+   if (isPadButtonPressed(PAD_BTN_L1) || isPadButtonPressed(PAD_BTN_R1)) {
+      int direction = isPadButtonPressed(PAD_BTN_R1) ? 1 : -1;
+      home.downloadManagerCategory =
+         (home.downloadManagerCategory + 3 + direction) % 3;
+      home.downloadManagerSelected = home.downloadManagerScroll = 0;
+      downloadManagerClearSelection();
+      home.downloadManagerMessage[0] = 0;
+      return;
+   }
+
+   int previousScroll = home.downloadManagerScroll;
    if (isRepeatDue(&regionNavigateRepeat, getPadButtonState(PAD_BTN_UP))) {
       if (home.downloadManagerSelected > 0) home.downloadManagerSelected--;
    } else if (isRepeatDue(&regionNavigateRepeat, getPadButtonState(PAD_BTN_DOWN))) {
       if (home.downloadManagerSelected + 1 < count) home.downloadManagerSelected++;
    }
-   if (isPadButtonPressed(PAD_BTN_CROSS) && count > 0) {
-      DownloadManagementItem *item = &items[home.downloadManagerSelected];
-      if (item->finalizing) {
-         strCopy(home.downloadManagerMessage, sizeof home.downloadManagerMessage, "Download is already finishing");
-      } else {
-         strCopy(home.downloadManagerTargetId, sizeof home.downloadManagerTargetId, item->videoId);
-         home.downloadManagerConfirmOpen = 1;
-         home.downloadManagerConfirmSelected = 1;
-         exitConfirmNavigateRepeat.timer = exitConfirmNavigateRepeat.repeats = 0;
+   if (home.downloadManagerSelected < home.downloadManagerScroll)
+      home.downloadManagerScroll = home.downloadManagerSelected;
+   else if (home.downloadManagerSelected >= home.downloadManagerScroll + DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS)
+      home.downloadManagerScroll = home.downloadManagerSelected - DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS + 1;
+   if (previousScroll != home.downloadManagerScroll)
+      visible = getDownloadManagementItems(home.downloadManagerCategory,
+                                            home.downloadManagerScroll, items,
+                                            DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS,
+                                            &count, &loading);
+
+   int canMutate = !loading || home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING;
+   if (canMutate && isPadButtonPressed(PAD_BTN_TRIANGLE)) {
+      downloadManagerSelectAll();
+      home.downloadManagerMessage[0] = 0;
+   }
+
+   if (canMutate && isPadButtonPressed(PAD_BTN_CROSS) && home.downloadManagerSelected >= home.downloadManagerScroll &&
+       home.downloadManagerSelected < home.downloadManagerScroll + visible) {
+      int row = home.downloadManagerSelected - home.downloadManagerScroll;
+      if (items[row].videoId[0]) {
+         downloadManagerToggleSelection(items[row].videoId);
+         home.downloadManagerMessage[0] = 0;
       }
    }
+
+   if (canMutate && isPadButtonPressed(PAD_BTN_SQUARE)) {
+      if (home.downloadManagerSelectedCount == 0 &&
+          home.downloadManagerSelected >= home.downloadManagerScroll &&
+          home.downloadManagerSelected < home.downloadManagerScroll + visible) {
+         int row = home.downloadManagerSelected - home.downloadManagerScroll;
+         if (items[row].videoId[0]) downloadManagerToggleSelection(items[row].videoId);
+      }
+      if (home.downloadManagerSelectedCount > 0) {
+         home.downloadManagerConfirmOpen = 1;
+               exitConfirmNavigateRepeat.timer = exitConfirmNavigateRepeat.repeats = 0;
+      }
+   }
+
+   if (loading == 2)
+      strCopy(home.downloadManagerMessage, sizeof home.downloadManagerMessage, "Library unavailable");
+   else if (loading == 1 &&
+            (!home.downloadManagerMessage[0] ||
+             strcmp(home.downloadManagerMessage, "Library unavailable") == 0))
+      strCopy(home.downloadManagerMessage, sizeof home.downloadManagerMessage, "Loading library...");
+   else if (!loading &&
+            (strcmp(home.downloadManagerMessage, "Loading library...") == 0 ||
+             strcmp(home.downloadManagerMessage, "Library unavailable") == 0 ||
+             strncmp(home.downloadManagerMessage, "Deleting ", 9) == 0))
+      home.downloadManagerMessage[0] = 0;
 }
 
 static void updateHome(void)
@@ -3335,7 +3472,6 @@ static void updateHome(void)
    if (downloadRevision != downloadLibraryRevisionSeen) {
       downloadLibraryRevisionSeen = downloadRevision;
       if (home.category == HOME_DOWNLOADS) {
-         downloadSpaceStatsUpdatedUs = 0;
          loadCategory();
          return;
       }
@@ -3411,8 +3547,8 @@ static void updateHome(void)
                playlistWatchLaterRevisionSeen = getPlaylistWatchLaterRevision();
                categoryCached[HOME_LOCAL_PLAYLISTS] = 0;
             } else if (home.playlistDeleteFromWatchLater == 2) {
-               if (deleteDownloadedVideo(home.playlistDeleteId) == 0)
-                  downloadSpaceStatsUpdatedUs = 0;
+               const char *deleteIds[1] = { home.playlistDeleteId };
+               queueDeleteManagedDownloads(deleteIds, 1);
             } else {
                deleteLocalPlaylist(home.playlistDeleteId);
                localPlaylistRevisionSeen = getLocalPlaylistRevision();
@@ -3425,10 +3561,18 @@ static void updateHome(void)
       return;
    }
    if (home.category == HOME_DOWNLOADS && isPadButtonPressed(PAD_BTN_R3)) {
+      DownloadManagementItem firstOngoing;
+      int ongoingCount = 0, managerLoading = 0;
+      getDownloadManagementItems(DOWNLOAD_MANAGEMENT_ONGOING, 0, &firstOngoing, 1,
+                                 &ongoingCount, &managerLoading);
       home.downloadManagerOpen = 1;
+      home.downloadManagerCategory = ongoingCount > 0 ?
+         DOWNLOAD_MANAGEMENT_ONGOING : DOWNLOAD_MANAGEMENT_COMPLETED;
       home.downloadManagerSelected = 0;
       home.downloadManagerScroll = 0;
+      home.downloadManagerSelectedCount = 0;
       home.downloadManagerMessage[0] = 0;
+      requestDownloadManagementRefresh();
       regionNavigateRepeat.timer = regionNavigateRepeat.repeats = 0;
       return;
    }
@@ -3790,123 +3934,189 @@ static void updateHome(void)
 
 static void drawDownloadManagement(void)
 {
-   DownloadManagementItem items[DOWNLOAD_MANAGEMENT_MAX_ITEMS];
-   int count = getDownloadManagementItems(items, DOWNLOAD_MANAGEMENT_MAX_ITEMS);
+   DownloadManagementItem items[DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS];
+   int totalCount = 0, loading = 0;
+   int visible = getDownloadManagementItems(home.downloadManagerCategory,
+                                             home.downloadManagerScroll, items,
+                                             DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS,
+                                             &totalCount, &loading);
+   int counts[3] = {0, 0, 0};
+   DownloadManagementItem countItem;
+   for (int category = 0; category < 3; category++) {
+      int ignoredLoading = 0;
+      getDownloadManagementItems(category, 0, &countItem, 1,
+                                 &counts[category], &ignoredLoading);
+   }
+
    int panelW = getDownloadManagerPanelWidth();
    int panelH = home.screenH - 32;
    if (panelH > 430) panelH = 430;
    if (panelH < 360) panelH = home.screenH - 16;
-   int rowH = (panelH - 130) / 7;
-   if (rowH < 36) rowH = 36;
-   int listTop = 70;
+   int rowH = (panelH - 174) / DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS;
+   if (rowH < 30) rowH = 30;
+   int listTop = 112;
+   int listH = rowH * DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS;
    int x = (home.screenW - panelW) / 2;
    int y = (home.screenH - panelH) / 2;
 
    fillGfxRectangleFixed(0, 0, home.screenW, home.screenH, activeTheme->scrim);
    fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+   setLabelText(&downloadManagerTitle, "Download management");
    refreshLabelScale(&downloadManagerTitle);
-   drawLabelAt(&downloadManagerTitle, x + 30, y + 16);
+   drawLabelAt(&downloadManagerTitle, x + 30, y + 14);
 
-   for (int row = 0; row < 7; row++) {
+   static const char *categoryNames[3] = { "Ongoing", "Completed", "Failed" };
+   int tabGap = 8;
+   int tabW = (panelW - 48 - tabGap * 2) / 3;
+   int tabY = y + 52;
+   for (int i = 0; i < 3; i++) {
+      int tabX = x + 24 + i * (tabW + tabGap);
+      int selected = i == home.downloadManagerCategory;
+      char tabText[48];
+      snprintf(tabText, sizeof tabText, "%s (%d)", categoryNames[i], counts[i]);
+      fillGfxRoundedRectangleFixed(tabX, tabY, tabW, 34, 7,
+                                   selected ? activeTheme->accent : activeTheme->surface);
+      setLabelText(&downloadManagerRows[i], tabText);
+      setLabelColor(&downloadManagerRows[i], selected ? activeTheme->appBg : activeTheme->textSecondary);
+      refreshLabelScale(&downloadManagerRows[i]);
+      moveLabel(&downloadManagerRows[i],
+                tabX + (tabW - downloadManagerRows[i].tt.tex.w) / 2,
+                getCenteredLabelY(&downloadManagerRows[i], tabY, 34));
+      drawLabel(&downloadManagerRows[i]);
+   }
+
+   for (int row = 0; row < DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS; row++) {
       int index = home.downloadManagerScroll + row;
       int rowY = y + listTop + row * rowH;
-      if (index < count) {
-         DownloadManagementItem *item = &items[index];
-         char status[24];
+      if (row < visible) {
+         DownloadManagementItem *item = &items[row];
+         int selected = index == home.downloadManagerSelected;
+         int checked = downloadManagerIsSelected(item->videoId);
+         char status[32];
          if (item->active) {
             int percent = item->percent;
             if (percent < 0) percent = 0;
             if (percent > 100) percent = 100;
-            snprintf(status, sizeof status, "[%d%%]", percent);
+            snprintf(status, sizeof status, "%s%d%%",
+                     item->cancelling ? "Cancelling " : "", percent);
+         } else if (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING) {
+            strCopy(status, sizeof status, "Queued");
+         } else if (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_COMPLETED) {
+            strCopy(status, sizeof status, "Downloaded");
          } else {
-            strCopy(status, sizeof status, "[Queued]");
+            strCopy(status, sizeof status, "Failed");
          }
 
-         if (index == home.downloadManagerSelected)
-            fillGfxRoundedRectangleFixed(x + 16, rowY + 2, panelW - 32, rowH - 4,
-                                         7, activeTheme->rowHighlight);
+         if (selected)
+            fillGfxRoundedRectangleFixed(x + 14, rowY + 1, panelW - 28, rowH - 2,
+                                         6, activeTheme->rowHighlight);
 
-         setLabelColor(&downloadManagerRows[row], index == home.downloadManagerSelected ?
+         // Selection checkbox is a filled square only when selected. No filesystem
+         // work or thumbnail decode occurs while drawing this list.
+         fillGfxRoundedRectangleFixed(x + 25, rowY + (rowH - 16) / 2, 16, 16, 3,
+                                      checked ? activeTheme->accent : activeTheme->surface);
+         if (checked)
+            fillGfxRoundedRectangleFixed(x + 30, rowY + (rowH - 6) / 2, 6, 6, 2,
+                                         activeTheme->appBg);
+
+         setLabelColor(&downloadManagerRows[row + 3], selected ?
                        activeTheme->textPrimary : activeTheme->textSecondary);
-         setLabelColor(&downloadManagerStatuses[row], index == home.downloadManagerSelected ?
+         setLabelColor(&downloadManagerStatuses[row], selected ?
                        activeTheme->textPrimary : activeTheme->textSecondary);
-         setLabelText(&downloadManagerRows[row], item->title);
+         setLabelText(&downloadManagerRows[row + 3], item->title);
          setLabelText(&downloadManagerStatuses[row], status);
-         refreshLabelScale(&downloadManagerRows[row]);
+         refreshLabelScale(&downloadManagerRows[row + 3]);
          refreshLabelScale(&downloadManagerStatuses[row]);
 
-         int titleX = x + 34;
-         int titleY = getCenteredLabelY(&downloadManagerRows[row], rowY, rowH);
+         int titleX = x + 52;
+         int titleY = getCenteredLabelY(&downloadManagerRows[row + 3], rowY, rowH);
          int statusX = x + panelW - 34 - downloadManagerStatuses[row].tt.tex.w;
-         drawLabelAt(&downloadManagerRows[row], titleX, titleY);
+         drawLabelAt(&downloadManagerRows[row + 3], titleX, titleY);
          drawLabelAt(&downloadManagerStatuses[row], statusX,
                      getCenteredLabelY(&downloadManagerStatuses[row], rowY, rowH));
       } else {
-         setLabelText(&downloadManagerRows[row], "");
+         setLabelText(&downloadManagerRows[row + 3], "");
          setLabelText(&downloadManagerStatuses[row], "");
       }
    }
 
-   if (home.downloadManagerMessage[0]) {
-      setLabelText(&downloadManagerFooter, home.downloadManagerMessage);
+   if (totalCount > DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS) {
+      int trackX = x + panelW - 12;
+      int trackY = y + listTop;
+      fillGfxRoundedRectangleFixed(trackX, trackY, 4, listH, 2, activeTheme->surface);
+      int thumbH = listH * DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS / totalCount;
+      if (thumbH < 18) thumbH = 18;
+      int maxScroll = totalCount - DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS;
+      int thumbY = trackY + (listH - thumbH) * home.downloadManagerScroll / maxScroll;
+      fillGfxRoundedRectangleFixed(trackX, thumbY, 4, thumbH, 2, activeTheme->accent);
+   }
+
+   if (home.downloadManagerMessage[0] || loading || totalCount == 0) {
+      const char *message = home.downloadManagerMessage[0] ? home.downloadManagerMessage :
+         (loading ? "Loading library..." :
+          (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING ? "No ongoing downloads" :
+           (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_COMPLETED ?
+            "No completed downloads" : "No failed downloads")));
+      setLabelText(&downloadManagerFooter, message);
       refreshLabelScale(&downloadManagerFooter);
-      drawLabelAt(&downloadManagerFooter, x + 30, y + panelH - 34);
-   } else {
-      downloadManagerHints.y = y + panelH - 30;
-      int total = 0;
+      drawLabelAt(&downloadManagerFooter, x + 28, y + panelH - 54);
+      downloadManagerHints.y = y + panelH - 26;
+      int hintsWidth = 0;
       for (int i = 0; i < downloadManagerHints.count; i++) {
          ButtonHint *hint = &downloadManagerHints.hints[i];
-         total += hint->drawWidth;
-         if (!hint->pairNext) total += 8 + hint->caption.tt.tex.w;
+         hintsWidth += hint->drawWidth;
+         if (!hint->pairNext) hintsWidth += 8 + hint->caption.tt.tex.w;
          if (i + 1 < downloadManagerHints.count)
-            total += hint->pairNext ? 8 : downloadManagerHints.gap;
+            hintsWidth += hint->pairNext ? 8 : downloadManagerHints.gap;
       }
-      drawButtonHintsAt(&downloadManagerHints, x + (panelW - total) / 2);
+      drawButtonHintsAt(&downloadManagerHints, x + (panelW - hintsWidth) / 2);
+   } else {
+      downloadManagerHints.y = y + panelH - 30;
+      int hintsWidth = 0;
+      for (int i = 0; i < downloadManagerHints.count; i++) {
+         ButtonHint *hint = &downloadManagerHints.hints[i];
+         hintsWidth += hint->drawWidth;
+         if (!hint->pairNext) hintsWidth += 8 + hint->caption.tt.tex.w;
+         if (i + 1 < downloadManagerHints.count)
+            hintsWidth += hint->pairNext ? 8 : downloadManagerHints.gap;
+      }
+      drawButtonHintsAt(&downloadManagerHints, x + (panelW - hintsWidth) / 2);
    }
 
    if (home.downloadManagerConfirmOpen) {
       float uiScale = getGfxUiScaleFactor();
       if (uiScale < 1.0f) uiScale = 1.0f;
       fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, 0x50000000);
-
-      int confirmW = (int)(320 * uiScale + 0.5f);
-      int confirmH = (int)(132 * uiScale + 0.5f);
+      int confirmW = (int)(430 * uiScale + 0.5f);
+      int confirmH = (int)(148 * uiScale + 0.5f);
       if (confirmW > home.screenW - 48) confirmW = home.screenW - 48;
       if (confirmH > home.screenH - 48) confirmH = home.screenH - 48;
       int cx = (home.screenW - confirmW) / 2;
       int cy = (home.screenH - confirmH) / 2;
-      int choiceW = (int)(104 * uiScale + 0.5f);
-      int choiceH = (int)(38 * uiScale + 0.5f);
-      int gap = (int)(18 * uiScale + 0.5f);
-      int choiceY = cy + (int)(76 * uiScale + 0.5f);
-      int choicesX = home.screenW / 2 - choiceW - gap / 2;
-
       fillGfxRoundedRectangleFixed(cx, cy, confirmW, confirmH, 10, activeTheme->appBg);
       fillGfxRoundedRectangleFixed(cx, cy, confirmW, 4, 2, activeTheme->accent);
-      setLabelText(&downloadManagerTitle, "Cancel download?");
+
+      char prompt[DOWNLOAD_MANAGEMENT_TITLE_LEN];
+      if (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING)
+         snprintf(prompt, sizeof prompt, "Cancel %d download%s?", home.downloadManagerSelectedCount,
+                  home.downloadManagerSelectedCount == 1 ? "" : "s");
+      else
+         snprintf(prompt, sizeof prompt, "Delete %d %s item%s?", home.downloadManagerSelectedCount,
+                  home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_FAILED ? "failed" : "downloaded",
+                  home.downloadManagerSelectedCount == 1 ? "" : "s");
+      setLabelText(&downloadManagerTitle, prompt);
       refreshLabelScale(&downloadManagerTitle);
-      moveLabel(&downloadManagerTitle,
-                home.screenW / 2 - downloadManagerTitle.tt.tex.w / 2,
-                cy + (int)(24 * uiScale + 0.5f));
+      moveLabel(&downloadManagerTitle, home.screenW / 2 - downloadManagerTitle.tt.tex.w / 2,
+                cy + (int)(34 * uiScale + 0.5f));
       drawLabel(&downloadManagerTitle);
 
-      for (int i = 0; i < 2; i++) {
-         Label *label = &downloadManagerRows[i];
-         int bx = choicesX + i * (choiceW + gap);
-         int selected = i == home.downloadManagerConfirmSelected;
-         setLabelText(label, i == 0 ? "Yes" : "No");
-         refreshLabelScale(label);
-         fillGfxRoundedRectangleFixed(bx, choiceY, choiceW, choiceH, 8,
-                                      selected ? activeTheme->accent : activeTheme->surface);
-         setLabelColor(label, selected ? activeTheme->appBg : activeTheme->textPrimary);
-         moveLabel(label, bx + (choiceW - label->tt.tex.w) / 2,
-                   getCenteredLabelY(label, choiceY, choiceH));
-         drawLabel(label);
-      }
+      setLabelText(&downloadManagerFooter, "X Confirm                         O Cancel");
+      refreshLabelScale(&downloadManagerFooter);
+      moveLabel(&downloadManagerFooter, home.screenW / 2 - downloadManagerFooter.tt.tex.w / 2,
+                cy + (int)(94 * uiScale + 0.5f));
+      drawLabel(&downloadManagerFooter);
       setLabelText(&downloadManagerTitle, "Download management");
-      setLabelColor(&downloadManagerRows[0], activeTheme->textPrimary);
-      setLabelColor(&downloadManagerRows[1], activeTheme->textPrimary);
    }
 }
 
@@ -3996,7 +4206,11 @@ static void drawHome(void)
       setLabelText(&exitConfirmTitle, "Exit CRTube");
       setLabelText(&exitConfirmMessage, "Are you sure you want to close the app?");
    }
-   if (home.downloadManagerOpen) drawDownloadManagement();
+   if (home.downloadManagerOpen) {
+      drawDownloadManagement();
+      // The disk-space prompt must remain the topmost modal even over Downloads.
+      if (isDownloadSpacePromptOpen()) drawDownloadOverlay(home.screenW);
+   }
 }
 
 static void suspendHome(void)
@@ -4044,7 +4258,7 @@ static void resumeHome(void)
 {
    playbackRestorePending = 1;
    if (home.category == HOME_DOWNLOADS) {
-      downloadSpaceStatsUpdatedUs = 0;
+      requestDownloadManagementRefresh();
       loadCategory();
       return;
    }
@@ -4101,10 +4315,8 @@ static void termHome(void)
    freeLabel(&playlistErrorLabel);
    freeLabel(&playlistToastLabel);
    freeLabel(&downloadManagerTitle);
-   for (int i = 0; i < 7; i++) {
-      freeLabel(&downloadManagerRows[i]);
-      freeLabel(&downloadManagerStatuses[i]);
-   }
+   for (int i = 0; i < 10; i++) freeLabel(&downloadManagerRows[i]);
+   for (int i = 0; i < 7; i++) freeLabel(&downloadManagerStatuses[i]);
    freeLabel(&downloadManagerFooter);
    freeLabel(&panelTitle);
    freeLabel(&panelLine1);
