@@ -42,7 +42,7 @@
 #define MAX_FETCH_FAILURES 5                    // stop a source instead of retrying forever
 #define PREFETCH_IDLE_MS   8                    // buffered far enough ahead: brief idle
 #define READ_WAIT_MS       2                    // reader has nothing buffered yet: let the prefetch catch up
-#define SPEC_FETCH_CAP     (12 * 1024 * 1024)    // bounded staging buffer for one speculative video segment
+#define SPEC_FETCH_CAP     (12 * 1024 * 1024)    // bounded staging buffer for one speculative segment
 
 // googlevideo segment urls are signed, so any user-agent is accepted.
 static const char *SEGMENT_UA = "Mozilla/5.0 (PLAYSTATION 3; 4.9)";
@@ -163,6 +163,7 @@ typedef struct {
    int status;
    int result;
    long sq;
+   int isAudio;
    sys_ppu_thread_t thread;
    uint64_t startedUs;
    uint64_t finishedUs;
@@ -176,11 +177,13 @@ static void liveSpecFetchThread(uint64_t arg)
    char contentLength[24];
    HttpHeaderCapture whole = { "content-length", contentLength, sizeof contentLength };
    job->startedUs = sys_time_get_system_time();
-   __sync_add_and_fetch(&g_liveVideoFetches, 1);
+   if (job->isAudio) __sync_add_and_fetch(&g_liveAudioFetches, 1);
+   else __sync_add_and_fetch(&g_liveVideoFetches, 1);
    job->result = fetchHttpCapturing("GET", job->url, headers, 2, NULL, 0,
                                     (char *)job->buffer, job->capacity, &job->length,
                                     &job->status, &whole);
-   __sync_sub_and_fetch(&g_liveVideoFetches, 1);
+   if (job->isAudio) __sync_sub_and_fetch(&g_liveAudioFetches, 1);
+   else __sync_sub_and_fetch(&g_liveVideoFetches, 1);
    job->finishedUs = sys_time_get_system_time();
    __sync_synchronize();
    job->done = 1;   // last access to the stack-owned job before this worker exits
@@ -220,7 +223,7 @@ static int fetchNextSegment(LiveSource *source)
    int length = 0, status = 0, rc;
    uint8_t *at;
    uint64_t fetchStartUs = sys_time_get_system_time();
-   if (!source->isAudio && source->firstDone) {
+   if (source->firstDone) {
       int wantedSpecCapacity = source->largest + FETCH_MARGIN;
       if (wantedSpecCapacity > SPEC_FETCH_CAP) wantedSpecCapacity = SPEC_FETCH_CAP;
       if (wantedSpecCapacity > source->specCapacity) {
@@ -251,7 +254,7 @@ static int fetchNextSegment(LiveSource *source)
       uint64_t aheadNow = source->windowStart + (uint64_t)source->windowLen > source->position
                         ? source->windowStart + (uint64_t)source->windowLen - source->position : 0;
       int segmentsNow = segmentsAhead(source);
-      int canSpeculate = !source->isAudio && source->firstDone &&
+      int canSpeculate = source->firstDone &&
                          (!source->ended || source->nextSq < source->edgeSq) && source->specBuffer &&
                          source->largest > 0 &&
                          source->specCapacity >= (source->largest + FETCH_MARGIN > SPEC_FETCH_CAP
@@ -269,11 +272,12 @@ static int fetchNextSegment(LiveSource *source)
          spec.buffer = source->specBuffer;
          spec.capacity = source->specCapacity;
          spec.sq = source->nextSq + 1;
+         spec.isAudio = source->isAudio;
          if (spawnJoinableThread(&spec.thread, liveSpecFetchThread, (uint64_t)(uintptr_t)&spec,
                                  THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "live-spec-fetch") == 0) {
             specStarted = 1;
-            logInfo("[live-prefetch-parallel] start currentSq=%ld speculativeSq=%ld capKB=%d\n",
-                    source->nextSq, spec.sq, spec.capacity / 1024);
+            logInfo("[live-prefetch-parallel] type=%s start currentSq=%ld speculativeSq=%ld capKB=%d\n",
+                    source->isAudio ? "audio" : "video", source->nextSq, spec.sq, spec.capacity / 1024);
          }
       }
 
@@ -320,8 +324,8 @@ static int fetchNextSegment(LiveSource *source)
                   rc == 0 && (status == 200 || status == 206) && length > 0 &&
                   spec.result == 0 && (spec.status == 200 || spec.status == 206) &&
                   spec.length > 0 && spec.length < spec.capacity - 1;
-      logInfo("[live-prefetch-parallel] currentSq=%ld speculativeSq=%ld currentResult=%d currentStatus=%d speculativeResult=%d speculativeStatus=%d speculativeBytes=%d speculativeMs=%llu accepted=%d\n",
-              source->nextSq, spec.sq, rc, status, spec.result, spec.status, spec.length,
+      logInfo("[live-prefetch-parallel] type=%s currentSq=%ld speculativeSq=%ld currentResult=%d currentStatus=%d speculativeResult=%d speculativeStatus=%d speculativeBytes=%d speculativeMs=%llu accepted=%d\n",
+              source->isAudio ? "audio" : "video", source->nextSq, spec.sq, rc, status, spec.result, spec.status, spec.length,
               (unsigned long long)((spec.finishedUs > spec.startedUs ? spec.finishedUs-spec.startedUs : 0)/1000ull),
               specReady);
    }
@@ -445,8 +449,8 @@ static int fetchNextSegment(LiveSource *source)
             source->totalFetchUs += spec.finishedUs - spec.startedUs;
             source->diagLastFetchSuccessUs = spec.finishedUs;
             source->nextSq++;
-            logInfo("[live-prefetch-parallel] published sq=%ld bytes=%d payload=%d aheadKB=%llu\n",
-                    spec.sq, spec.length, specPayload,
+            logInfo("[live-prefetch-parallel] type=%s published sq=%ld bytes=%d payload=%d aheadKB=%llu\n",
+                    source->isAudio ? "audio" : "video", spec.sq, spec.length, specPayload,
                     (unsigned long long)((source->windowStart + source->windowLen > source->position
                        ? source->windowStart + source->windowLen - source->position : 0) / 1024ull));
          } else {

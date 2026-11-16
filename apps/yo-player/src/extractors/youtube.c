@@ -786,7 +786,7 @@ static int fetchPlayerClient(const char *clientFields, const char *userAgent,
 }
 
 static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
-                                           int *respLen, StreamInfo *out)
+                                           int *respLen, StreamInfo *out, int liveMode)
 {
    const struct {
       const char *name;
@@ -816,8 +816,14 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
         "\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"" LIVE_VERSION "\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"hl\":\"en\",\"gl\":\"US\"" },
    };
    const int count = (int)(sizeof clients / sizeof clients[0]);
-   for (int i = 0; i < count; i++) {
-      logInfo("[yt] UNPLAYABLE; retrying video=%s with client=%s\n", videoId, clients[i].name);
+   // The initial LIVE request already used ANDROID_VR. Retry other identities first;
+   // keep the VOD order unchanged so this recovery path does not alter normal playback.
+   static const int liveOrder[] = { 8, 4, 3, 2, 1, 0, 5, 6, 7 };
+   const int attempts = liveMode ? (int)(sizeof liveOrder / sizeof liveOrder[0]) : count;
+   for (int attempt = 0; attempt < attempts; attempt++) {
+      int i = liveMode ? liveOrder[attempt] : attempt;
+      logInfo("[yt] UNPLAYABLE; retrying video=%s with client=%s mode=%s\n",
+              videoId, clients[i].name, liveMode ? "LIVE" : "VOD");
       int rc = fetchPlayerClient(clients[i].fields, clients[i].ua,
                                  (i == 0 ? "1" : i == 1 ? "3" : i == 2 ? "5" :
                                   i == 3 ? "56" : i == 4 ? "85" : i == 5 ? "67" :
@@ -838,12 +844,31 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
 
       out->formatCount = 0;
       parseFormats(resp, end, out);
+      if (liveMode) {
+         // A LIVE retry is useful only when it exposes the DASH segment timeline
+         // consumed by live-source. Plain HLS/progressive URLs are not substitutes.
+         parseLiveManifest(resp, end, out, "dashseg");
+         int kept = 0;
+         for (int j = 0; j < out->formatCount; j++) {
+            if (!out->formats[j].isLiveSegmented) continue;
+            if (kept != j) out->formats[kept] = out->formats[j];
+            kept++;
+         }
+         out->formatCount = kept;
+         if (out->formatCount > 0) {
+            out->isLive = 1;
+            out->liveDvr = strstr(resp, "\"isLiveDvrEnabled\":true") != NULL;
+            const char *streaming = strstr(resp, "\"streamingData\"");
+            jsonInt(streaming ? streaming : resp, end, "targetDurationSec", &out->liveSegmentSec);
+            jsonInt(streaming ? streaming : resp, end, "maxDvrDurationSec", &out->liveWindowSec);
+         }
+      }
 
       // Some clients expose adaptive URLs that require a PoToken unavailable here.
       // Keep only progressive muxed formats for these clients.
-      if (strcmp(clients[i].name, "WEB") == 0 ||
+      if (!liveMode && (strcmp(clients[i].name, "WEB") == 0 ||
           strcmp(clients[i].name, "ANDROID") == 0 ||
-          strcmp(clients[i].name, "MWEB") == 0) {
+          strcmp(clients[i].name, "MWEB") == 0)) {
          int kept = 0;
          for (int j = 0; j < out->formatCount; j++) {
             StreamFormat *format = &out->formats[j];
@@ -868,13 +893,15 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
          }
          parseVideoMetadata(resp, end, out);
          if (out->captionCount == 0) parseCaptionTracks(resp, end, out);
-         logInfo("[yt] retry succeeded client=%s formats=%d\n",
-                 clients[i].name, out->formatCount);
+         logInfo("[yt] retry succeeded client=%s mode=%s formats=%d\n",
+                 clients[i].name, liveMode ? "LIVE" : "VOD", out->formatCount);
          return 1;
       }
-      logInfo("[yt] retry client=%s returned no supported formats\n", clients[i].name);
+      logInfo("[yt] retry client=%s mode=%s returned no supported formats\n",
+              clients[i].name, liveMode ? "LIVE" : "VOD");
    }
-   logError("[yt] all alternative clients failed for video=%s\n", videoId);
+   logError("[yt] all alternative %s clients failed for video=%s\n",
+            liveMode ? "LIVE" : "VOD", videoId);
    return 0;
 }
 
@@ -1230,7 +1257,9 @@ static int extract(const char *input, StreamInfo *out)
    }
 
    // Active LIVE and the short post-live DVR recording are both numbered DASH segment streams.
-   int liveNow = strstr(resp, "\"isLive\":true") != NULL;
+   int liveNow = strstr(resp, "\"isLive\":true") != NULL ||
+                 strstr(resp, "\"isLiveContent\":true") != NULL ||
+                 strstr(input, "/live/") != NULL;
    int postLive = !liveNow && strstr(resp, "\"isPostLiveDvr\":true") != NULL;
    if ((liveNow || postLive) && !strstr(resp, "\"dashManifestUrl\"")) {
       if (fetchPlayer(LIVE_BODY_FMT, LIVE_UA, "28", LIVE_VERSION, videoId, resp, &respLen) == 0)
@@ -1251,6 +1280,13 @@ static int extract(const char *input, StreamInfo *out)
               strstr(resp, "\"dashManifestUrl\"") ? 1 : 0, out->formatCount, out->durationSeconds,
               out->liveDvr ? "on" : "off", out->liveSegmentSec, out->liveWindowSec);
       parseLiveManifest(resp, end, out, postLive ? "dashvod" : "dashseg");
+      int kept = 0;
+      for (int i = 0; i < out->formatCount; i++) {
+         if (!out->formats[i].isLiveSegmented) continue;
+         if (kept != i) out->formats[kept] = out->formats[i];
+         kept++;
+      }
+      out->formatCount = kept;
    }
 
    int membersOnly = isMembersOnlyResponse(resp);
@@ -1305,16 +1341,17 @@ static int extract(const char *input, StreamInfo *out)
       }
       if (visitorFromDisk && strcmp(statusText, "LOGIN_REQUIRED") == 0) dropVisitorData();   // stale session
 
-      // Only retry VOD requests explicitly rejected by VISIONOS. Keep the normal
-      // VISIONOS path unchanged for every other response, and never route live
-      // requests through the VOD client fallback.
-      if (!liveNow && !strstr(input, "/live/") &&
-          !strstr(resp, "\"isLiveContent\":true") &&
-          strcmp(statusText, "UNPLAYABLE") == 0) {
-         logInfo("[yt] VISIONOS returned UNPLAYABLE; trying alternate VOD clients\n");
-         if (retryUnplayableWithOtherClients(videoId, resp, &respLen, out) > 0) {
-            logInfo("[yt] resolved videoId=%s with alternate client formats=%d\n",
-                    videoId, out->formatCount);
+      // Retry explicit UNPLAYABLE responses. LIVE also retries when its initial
+      // client returns no usable formats, and requires an alternative DASH timeline.
+      int liveRequest = liveNow || postLive || strstr(input, "/live/") != NULL ||
+                        strstr(resp, "\"isLiveContent\":true") != NULL;
+      if (strcmp(statusText, "UNPLAYABLE") == 0 || liveRequest) {
+         logInfo("[yt] player has no usable stream; trying alternate %s clients\n",
+                 liveRequest ? "LIVE" : "VOD");
+         if (retryUnplayableWithOtherClients(videoId, resp, &respLen, out, liveRequest) > 0) {
+            logInfo("[yt] resolved videoId=%s with alternate client formats=%d live=%d\n",
+                    videoId, out->formatCount, liveRequest);
+            if (liveRequest) out->isLive = 1;
             if (!visitorFromDisk) { saveVisitorData(); visitorFromDisk = 1; }
          }
       }
