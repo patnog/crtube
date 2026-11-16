@@ -65,6 +65,8 @@ int deleteDownloadedVideo(const char *videoId);
 int getDownloadedSubtitleTracks(const char *videoPath, CaptionTrack *out, int capacity);
 int loadDownloadedChapters(const char *videoPath, ChapterList *chapters);
 int getDownloadedVideoPath(const char *videoId, char *path, int cap);
+int loadDownloadedChannelId(const char *videoPath, char *channelId, int channelIdCap);
+int saveDownloadedChannelId(const char *videoPath, const char *channelId);
 int loadDownloadedMetadata(const char *videoPath, char *title, int titleCap,
                            char *author, int authorCap, char *description, int descriptionCap,
                            char *publishedDate, int publishedCap,

@@ -397,6 +397,8 @@ static Label localPlaylistTabLabels[2];
 static int homeSortHint = -1;
 static int homeSquareHint = -1;
 static int homeDownloadHint = -1;
+static int homeL1Hint = -1;
+static int homeR1Hint = -1;
 static int homeNewPlaylistHint = -1;
 static SearchResult squarePendingItem;
 static uint64_t squarePressedAt;
@@ -602,6 +604,12 @@ static void channelLookupWorker(uint64_t arg)
    home.channelLookupResult = getVideoChannelId(home.channelLookupItem.videoId,
                                                  home.channelLookupItem.channelId,
                                                  sizeof home.channelLookupItem.channelId);
+   if (home.channelLookupResult == 0 && home.channelLookupItem.channelId[0] &&
+       home.channelLookupItem.isLocalDownload) {
+      char path[MAX_PATH_LEN];
+      if (getDownloadedVideoPath(home.channelLookupItem.videoId, path, sizeof path) == 0)
+         saveDownloadedChannelId(path, home.channelLookupItem.channelId);
+   }
    __sync_synchronize();
    setHttpRequestGroup(NULL);
    home.channelLookupDone = 1;
@@ -632,6 +640,8 @@ static int homeFetch(const char *token, SearchResults *out, void *user)
             char path[MAX_PATH_LEN];
             if (getDownloadedVideoPath(out->items[i].videoId, path, sizeof path) == 0) {
                out->items[i].isLocalDownload = 1;
+               if (!out->items[i].channelId[0])
+                  loadDownloadedChannelId(path, out->items[i].channelId, sizeof out->items[i].channelId);
                out->items[kept++] = out->items[i];
             }
          }
@@ -2596,6 +2606,9 @@ static void drawShuffleCurve(int x, int y, int direction, uint32_t color, uint32
       drawShuffleStrokePoint(tipX - 5 + i, tipY - 5 + i, color, outline);
       drawShuffleStrokePoint(tipX - 5 + i, tipY + 5 - i, color, outline);
    }
+   // Close the arrowhead tip with foreground pixels; diagonal outlined blocks
+   // otherwise leave a single contrasting pixel at the point on light themes.
+   fillGfxRectangleFixed(tipX - 2, tipY - 2, 5, 5, color);
 }
 
 static void drawPlaylistShuffleBadge(void)
@@ -3378,8 +3391,8 @@ static void initHome(void)
    homeNewPlaylistHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L3), "New playlist");
    addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT), "Search");
    addButtonHint(&hints, getConsoleGlyph(GLYPH_START), "Settings");
-   addButtonHint(&hints, getConsoleGlyph(GLYPH_L1), "");
-   addButtonHint(&hints, getConsoleGlyph(GLYPH_R1), "Category");
+   homeL1Hint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L1), "");
+   homeR1Hint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R1), "Category");
    addButtonHint(&hints, getConsoleGlyph(GLYPH_R2), "Refresh");
    homeSortHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L2), "Sort");
    // Reserve footer space for the longer playlist-page caption as well.
@@ -4298,8 +4311,7 @@ static void updateHome(void)
                        home.category == HOME_DOWNLOADS)) showDownload = 1;
       setButtonHintShown(&hints, homeDownloadHint, showDownload);
       setButtonHintCaption(&hints, homeDownloadHint,
-                           home.category == HOME_DOWNLOADS ?
-                           (hintItem && hintItem->isPlaylist ? "Download playlist" : "Manage downloads") :
+                           home.category == HOME_DOWNLOADS ? "Manage downloads" :
                            (hintItem && hintItem->isPlaylist ? "Download playlist" : "Download"));
    }
    if (homeSquareHint >= 0) {
@@ -4562,7 +4574,34 @@ static void updateHome(void)
       setButtonHintCaption(&hints, homeSquareHint, "Watch Later / Playlist (hold)");
       setButtonHintShown(&hints, homeSquareHint, 1);
    }
+
+   // Downloaded playlist contents have no category tabs and no download action.
+   int inDownloadedPlaylist = home.category == HOME_LOCAL_PLAYLIST_CONTENTS &&
+                              home.playlistReturnCategory == HOME_DOWNLOADS;
+   if (homeL1Hint >= 0) setButtonHintShown(&hints, homeL1Hint, !inDownloadedPlaylist);
+   if (homeR1Hint >= 0) setButtonHintShown(&hints, homeR1Hint, !inDownloadedPlaylist);
+   if (homeDownloadHint >= 0 && inDownloadedPlaylist) {
+      setButtonHintCaption(&hints, homeDownloadHint, "Manage downloads");
+      setButtonHintShown(&hints, homeDownloadHint, 1);
+   }
+
    if (handleHomeSquareAction(selected)) return;
+   if (inDownloadedPlaylist && isPadButtonPressed(PAD_BTN_R3)) {
+      DownloadManagementItem firstOngoing;
+      int ongoingCount = 0, managerLoading = 0;
+      getDownloadManagementItems(DOWNLOAD_MANAGEMENT_ONGOING, 0, &firstOngoing, 1,
+                                 &ongoingCount, &managerLoading);
+      home.downloadManagerOpen = 1;
+      home.downloadManagerCategory = ongoingCount > 0 ?
+         DOWNLOAD_MANAGEMENT_ONGOING : DOWNLOAD_MANAGEMENT_COMPLETED;
+      home.downloadManagerSelected = 0;
+      home.downloadManagerScroll = 0;
+      home.downloadManagerSelectedCount = 0;
+      home.downloadManagerMessage[0] = 0;
+      requestDownloadManagementRefresh();
+      regionNavigateRepeat.timer = regionNavigateRepeat.repeats = 0;
+      return;
+   }
    if (isPadButtonPressed(PAD_BTN_R3)) {
       if (selected->isPlaylist) openDownloadPlaylistConfirmation(selected);
       else if (!selected->isLive && selected->videoId[0]) {

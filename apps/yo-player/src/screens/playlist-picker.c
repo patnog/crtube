@@ -188,7 +188,7 @@ static void drawPicker(void)
    fillGfxRoundedRectangleFixed(x, y, picker.panelW, picker.panelH, 12, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x + 1, y + 1, picker.panelW - 2, picker.panelH - 2, 11,
                                 activeTheme->surface);
-   fillGfxRectangle(x, y, picker.panelW, 4, activeTheme->accent);
+   fillGfxRectangleFixed(x, y, picker.panelW, 4, activeTheme->accent);
    moveLabel(&pickerTitle, x + 24, y + 18);
    drawLabel(&pickerTitle);
 
@@ -199,7 +199,7 @@ static void drawPicker(void)
       // Create playlist is an action, not a destination playlist. Separate it
       // visually from the playlist rows with a divider and a little breathing room.
       if (index == picker.count - 1) {
-         fillGfxRectangle(x + 20, rowY + 1, picker.panelW - 40, 1, activeTheme->textSecondary);
+         fillGfxRectangleFixed(x + 20, rowY + 1, picker.panelW - 40, 1, activeTheme->textSecondary);
          rowY += 5;
       }
       if (index == picker.selected)

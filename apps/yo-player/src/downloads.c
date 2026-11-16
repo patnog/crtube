@@ -40,6 +40,7 @@
 typedef struct {
    char videoId[16];
    char title[160];
+   char channelId[32];
    char audioTrackId[40];
    char activeSubtitleLanguage[16];
    int playbackAudioOverride;
@@ -344,15 +345,17 @@ static int compareDownloadText(const char *a, const char *b)
 }
 
 static void saveDownloadMetadata(const char *videoPath, const StreamInfo *info, const char *fallbackTitle,
-                                 const char *publishedDate, const char *viewCount, const char *likeCount)
+                                 const char *publishedDate, const char *viewCount, const char *likeCount,
+                                 const char *channelId)
 {
    char path[MAX_PATH_LEN], data[3000];
    buildSidecarPath(path, sizeof path, videoPath, ".meta");
    const char *title = info->title[0] ? info->title : fallbackTitle;
-   int length = snprintf(data, sizeof data, "%s\n%s\n#CRTMETA2\n%s\n%s\n%s\n%d\n%s",
+   int length = snprintf(data, sizeof data, "%s\n%s\n#CRTMETA3\n%s\n%s\n%s\n%d\n%s\n%s",
                          title, info->author, publishedDate ? publishedDate : "",
                          viewCount ? viewCount : "", likeCount ? likeCount : "Offline",
-                         info->durationSeconds > 0 ? info->durationSeconds : 0, info->description);
+                         info->durationSeconds > 0 ? info->durationSeconds : 0,
+                         channelId ? channelId : "", info->description);
    if (length > 0 && length < (int)sizeof data) {
       if (writeFile(path, data, (uint64_t)length) != 0)
          logWarn("[dl] metadata write failed for %s\n", videoPath);
@@ -432,6 +435,30 @@ static void saveDownloadThumbnail(const char *videoPath, const char *videoId)
    free(jpeg);
 }
 
+int loadDownloadedChannelId(const char *videoPath, char *channelId, int channelIdCap)
+{
+   if (!videoPath || !channelId || channelIdCap <= 0) return -1;
+   channelId[0] = 0;
+   char path[MAX_PATH_LEN], data[3000];
+   buildSidecarPath(path, sizeof path, videoPath, ".meta");
+   int length = readFile(path, data, sizeof data - 1);
+   if (length <= 0) return -1;
+   data[length] = 0;
+   char *marker = strstr(data, "#CRTMETA3\n");
+   if (!marker) return -1;
+   char *line = marker + 10;
+   for (int i = 0; i < 4; i++) {
+      line = strchr(line, '\n');
+      if (!line) return -1;
+      line++;
+   }
+   char *end = strchr(line, '\n');
+   if (end) *end = 0;
+   if (!line[0]) return -1;
+   strCopy(channelId, channelIdCap, line);
+   return channelId[0] ? 0 : -1;
+}
+
 int loadDownloadedMetadata(const char *videoPath, char *title, int titleCap,
                            char *author, int authorCap, char *description, int descriptionCap,
                            char *publishedDate, int publishedCap,
@@ -453,7 +480,9 @@ int loadDownloadedMetadata(const char *videoPath, char *title, int titleCap,
    *second++ = 0;
    if (data[0] && title && titleCap > 0) strCopy(title, titleCap, data);
    if (first[0] && author && authorCap > 0) strCopy(author, authorCap, first);
-   if (strncmp(second, "#CRTMETA2\n", 10) == 0) {
+   if (strncmp(second, "#CRTMETA3\n", 10) == 0 ||
+       strncmp(second, "#CRTMETA2\n", 10) == 0) {
+      int hasChannelId = strncmp(second, "#CRTMETA3\n", 10) == 0;
       char *line = second + 10;
       char *publishedEnd = strchr(line, '\n');
       if (!publishedEnd) return -1;
@@ -467,6 +496,11 @@ int loadDownloadedMetadata(const char *videoPath, char *title, int titleCap,
       char *durationEnd = strchr(likesEnd, '\n');
       if (!durationEnd) return -1;
       *durationEnd++ = 0;
+      if (hasChannelId) {
+         char *descriptionStart = strchr(durationEnd, '\n');
+         if (descriptionStart) durationEnd = descriptionStart + 1;
+         else durationEnd += strlen(durationEnd);
+      }
       if (publishedDate && publishedCap > 0 && line[0]) strCopy(publishedDate, publishedCap, line);
       if (viewCount && viewsCap > 0 && publishedEnd[0]) strCopy(viewCount, viewsCap, publishedEnd);
       if (likeCount && likesCap > 0 && viewsEnd[0]) strCopy(likeCount, likesCap, viewsEnd);
@@ -587,7 +621,7 @@ static int loadDownloadedDuration(const char *videoPath)
       data[length] = 0;
       char *first = strchr(data, '\n');
       char *second = first ? strchr(first + 1, '\n') : NULL;
-      if (second && strncmp(second + 1, "#CRTMETA2\n", 10) == 0) {
+      if (second && (strncmp(second + 1, "#CRTMETA2\n", 10) == 0 || strncmp(second + 1, "#CRTMETA3\n", 10) == 0)) {
          char *line = second + 11;
          for (int i = 0; i < 3; i++) {
             line = strchr(line, '\n');
@@ -611,6 +645,25 @@ static int loadDownloadedDuration(const char *videoPath)
       writeFile(path, value, (uint64_t)strlen(value));
    }
    return duration;
+}
+
+int saveDownloadedChannelId(const char *videoPath, const char *channelId)
+{
+   if (!videoPath || !channelId || !channelId[0]) return -1;
+   char title[256] = "", author[128] = "", description[2048] = "";
+   char published[24] = "", views[32] = "", likes[32] = "Offline";
+   if (loadDownloadedMetadata(videoPath, title, sizeof title, author, sizeof author,
+                              description, sizeof description, published, sizeof published,
+                              views, sizeof views, likes, sizeof likes) != 0)
+      return -1;
+   int duration = loadDownloadedDuration(videoPath);
+   char path[MAX_PATH_LEN], data[3000];
+   buildSidecarPath(path, sizeof path, videoPath, ".meta");
+   int length = snprintf(data, sizeof data, "%s\n%s\n#CRTMETA3\n%s\n%s\n%s\n%d\n%s\n%s",
+                         title, author, published, views, likes, duration,
+                         channelId, description);
+   if (length <= 0 || length >= (int)sizeof data) return -1;
+   return writeFile(path, data, (uint64_t)length);
 }
 
 unsigned int getDownloadLibraryRevision(void)
@@ -656,6 +709,7 @@ int getDownloadedVideos(SearchResults *out, int sortAZ)
                              item->author, sizeof item->author,
                              description, sizeof description,
                              published, sizeof published, views, sizeof views, likes, sizeof likes);
+      loadDownloadedChannelId(path, item->channelId, sizeof item->channelId);
    }
    closeDir(&dir);
    for (int i = 1; i < out->count; i++) {
@@ -1152,7 +1206,12 @@ static void runOneDownload(const QueueItem *item)
       }
    }
    if (downloadCancellationRequested()) goto cancelled;
-   saveDownloadMetadata(finalPath, info, item->title, metadataPublished, metadataViews, metadataLikes);
+   char resolvedChannelId[32];
+   strCopy(resolvedChannelId, sizeof resolvedChannelId, item->channelId);
+   if (!resolvedChannelId[0])
+      getVideoChannelId(item->videoId, resolvedChannelId, sizeof resolvedChannelId);
+   saveDownloadMetadata(finalPath, info, item->title, metadataPublished, metadataViews,
+                        metadataLikes, resolvedChannelId);
    if (downloadCancellationRequested()) goto cancelled;
    ChapterList downloadedChapters;
    if (fetchChapters(item->videoId, &downloadedChapters) > 0)
@@ -1478,6 +1537,7 @@ static void enqueueDownloadItem(const SearchResult *item, const char *audioTrack
          memset(queued, 0, sizeof *queued);
          strCopy(queued->videoId, sizeof queued->videoId, item->videoId);
          strCopy(queued->title, sizeof queued->title, item->title);
+         strCopy(queued->channelId, sizeof queued->channelId, item->channelId);
          if (playbackOverride) {
             strCopy(queued->audioTrackId, sizeof queued->audioTrackId,
                     audioTrackId && audioTrackId[0] ? audioTrackId : "original");
@@ -1531,6 +1591,7 @@ int enqueueDownloadBatch(const SearchResult *items, int count)
       memset(queued, 0, sizeof *queued);
       strCopy(queued->videoId, sizeof queued->videoId, item->videoId);
       strCopy(queued->title, sizeof queued->title, item->title);
+      strCopy(queued->channelId, sizeof queued->channelId, item->channelId);
       added++;
    }
    if (added && !dl.workerSpawned) { dl.workerSpawned = 1; spawn = 1; }
