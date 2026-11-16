@@ -18,6 +18,9 @@
 #define PLAYLISTS_DIR       DATA_DIR "/playlists"
 #define LOCAL_PLAYLISTS_DIR PLAYLISTS_DIR "/ps3"
 #define LOCAL_PLAYLIST_INDEX_PATH LOCAL_PLAYLISTS_DIR "/index.txt"
+#define DOWNLOAD_LIBRARY_DIR DATA_DIR "/downloads"
+#define DOWNLOAD_PLAYLISTS_DIR DATA_DIR "/downloads/playlists"
+#define DOWNLOAD_PLAYLIST_INDEX_PATH DOWNLOAD_PLAYLISTS_DIR "/index.txt"
 #define PLAYLIST_WATCH_LATER_PATH PLAYLISTS_DIR "/watch-later.txt"
 
 #define MAX_WATCHLATER          200
@@ -33,10 +36,12 @@
 #define LOCAL_HISTORY_BUFFER_BYTES (LOCAL_HISTORY_CAP * LOCAL_HISTORY_LINE_MAX + 16)
 #define SEARCH_HISTORY_BUFFER_BYTES (MAX_SEARCH_HISTORY * (SEARCH_QUERY_LEN + 1) + 1)
 #define LOCAL_PLAYLIST_CAP          64
-#define LOCAL_PLAYLIST_VIDEO_CAP    200
+#define LOCAL_PLAYLIST_VIDEO_CAP    500
 #define LOCAL_PLAYLIST_INDEX_BYTES  (LOCAL_PLAYLIST_CAP * (LOCAL_PLAYLIST_ID_LEN + LOCAL_PLAYLIST_NAME_LEN + 32) + 1)
 #define LOCAL_PLAYLIST_LINE_MAX     WATCHLATER_LINE_MAX
 #define LOCAL_PLAYLIST_BUFFER_BYTES (LOCAL_PLAYLIST_VIDEO_CAP * LOCAL_PLAYLIST_LINE_MAX + 1)
+#define DOWNLOAD_PLAYLIST_INDEX_BYTES  (LOCAL_PLAYLIST_CAP * (LOCAL_PLAYLIST_ID_LEN + LOCAL_PLAYLIST_NAME_LEN + 64) + 1)
+#define DOWNLOAD_PLAYLIST_BUFFER_BYTES LOCAL_PLAYLIST_BUFFER_BYTES
 #define PLAYLIST_WATCH_LATER_CAP    64
 #define PLAYLIST_WATCH_LATER_LINE   420
 #define PLAYLIST_WATCH_LATER_BYTES  (PLAYLIST_WATCH_LATER_CAP * PLAYLIST_WATCH_LATER_LINE + 1)
@@ -147,6 +152,14 @@ void clearSearchHistory(void)
 {
    searchHistoryCount = 0;
    saveSearchHistory();
+}
+
+int removeSearchHistoryAt(int index)
+{
+   if (index < 0 || index >= searchHistoryCount) return -1;
+   dropSearchHistoryAt(index);
+   saveSearchHistory();
+   return 0;
 }
 
 static int isDownloadProgressKey(const char *id)
@@ -791,6 +804,35 @@ int createEmptyLocalPlaylist(const char *name, char *playlistIdOut, int playlist
    return createLocalPlaylist(name, NULL, playlistIdOut, playlistIdCapacity);
 }
 
+int createLocalPlaylistFromResults(const char *name, const SearchResult *items, int count,
+                                   char *playlistIdOut, int playlistIdCapacity)
+{
+   if (!name || !name[0] || !items || count <= 0) return -1;
+   loadLocalPlaylistIndex();
+   if (localPlaylistCount >= LOCAL_PLAYLIST_CAP) return -1;
+   char cleanName[LOCAL_PLAYLIST_NAME_LEN];
+   copyHistoryText(cleanName, sizeof cleanName, name);
+   if (!cleanName[0]) return -1;
+   if (count > LOCAL_PLAYLIST_VIDEO_CAP) count = LOCAL_PLAYLIST_VIDEO_CAP;
+   char id[LOCAL_PLAYLIST_ID_LEN], path[160];
+   do {
+      snprintf(id, sizeof id, "pl%04d", localPlaylistNextId++);
+      localPlaylistPath(id, path, sizeof path);
+   } while (fileExists(path));
+   if (writeLocalPlaylist(id, items, count) != 0) return -1;
+   LocalPlaylistMeta *meta = &localPlaylists[localPlaylistCount++];
+   memset(meta, 0, sizeof *meta);
+   strCopy(meta->id, sizeof meta->id, id);
+   strCopy(meta->name, sizeof meta->name, cleanName);
+   meta->count = count;
+   strCopy(meta->newestVideoId, sizeof meta->newestVideoId, items[0].videoId);
+   saveLocalPlaylistIndex();
+   localPlaylistRevision++;
+   if (playlistIdOut && playlistIdCapacity > 0)
+      strCopy(playlistIdOut, (size_t)playlistIdCapacity, id);
+   return 0;
+}
+
 int removeVideoFromLocalPlaylist(const char *playlistId, const char *videoId)
 {
    if (!validLocalPlaylistId(playlistId) || !videoId || !videoId[0]) return -1;
@@ -844,6 +886,491 @@ int renameLocalPlaylist(const char *playlistId, const char *name)
          strCopy(localPlaylists[i].name, sizeof localPlaylists[i].name, cleanName);
          saveLocalPlaylistIndex();
          localPlaylistRevision++;
+         return 0;
+      }
+   }
+   return -1;
+}
+
+
+// Downloads owns an independent playlist namespace; PS3 > Playlists > PS3 never reads these files.
+typedef struct {
+   char id[LOCAL_PLAYLIST_ID_LEN];
+   char name[LOCAL_PLAYLIST_NAME_LEN];
+   int count;
+   char newestVideoId[16];
+   uint64_t createdAt;
+} DownloadPlaylistMeta;
+
+static DownloadPlaylistMeta downloadPlaylists[LOCAL_PLAYLIST_CAP];
+static int downloadPlaylistCount;
+static int downloadPlaylistNextId = 1;
+static int downloadPlaylistIndexLoaded;
+static int downloadPlaylistRevision;
+
+static int validDownloadPlaylistId(const char *id)
+{
+   if (!id || strncmp(id, "dp", 2) != 0 || !id[2]) return 0;
+   for (int i = 2; id[i]; i++)
+      if (id[i] < '0' || id[i] > '9') return 0;
+   return 1;
+}
+
+static void downloadPlaylistPath(const char *id, char *path, int capacity)
+{
+   snprintf(path, capacity, DOWNLOAD_PLAYLISTS_DIR "/%s.txt", id);
+}
+
+static uint64_t newestDownloadedVideoMtime(void)
+{
+   VfsDir dir;
+   if (openDir(DOWNLOAD_LIBRARY_DIR, &dir) != 0) return 0;
+   uint64_t newest = 0;
+   char name[256], path[MAX_PATH_LEN];
+   VfsEntryType type;
+   while (readDir(&dir, name, sizeof name, &type) > 0) {
+      size_t length = strlen(name);
+      if (type != VFS_ENTRY_FILE || length != 15 || strcmp(name + 11, ".mp4") != 0) continue;
+      snprintf(path, sizeof path, "%s/%s", DOWNLOAD_LIBRARY_DIR, name);
+      VfsStat stat;
+      if (statPath(path, &stat) == 0 && stat.mtime > newest) newest = stat.mtime;
+   }
+   closeDir(&dir);
+   return newest;
+}
+
+static uint64_t nextDownloadPlaylistCreatedAt(void)
+{
+   uint64_t newest = newestDownloadedVideoMtime();
+   for (int i = 0; i < downloadPlaylistCount; i++)
+      if (downloadPlaylists[i].createdAt > newest) newest = downloadPlaylists[i].createdAt;
+   return newest + 1;
+}
+
+static void saveDownloadPlaylistIndex(void)
+{
+   char *buffer = malloc(DOWNLOAD_PLAYLIST_INDEX_BYTES);
+   if (!buffer) return;
+   int length = 0;
+   for (int i = 0; i < downloadPlaylistCount; i++) {
+      int remaining = DOWNLOAD_PLAYLIST_INDEX_BYTES - length;
+      if (remaining <= 1) break;
+      int written = snprintf(buffer + length, remaining, "%s\t%s\t%d\t%s\t%llu\n",
+                             downloadPlaylists[i].id, downloadPlaylists[i].name,
+                             downloadPlaylists[i].count, downloadPlaylists[i].newestVideoId,
+                             (unsigned long long)downloadPlaylists[i].createdAt);
+      if (written < 0 || written >= remaining) break;
+      length += written;
+   }
+   writeFile(DOWNLOAD_PLAYLIST_INDEX_PATH, buffer, (uint64_t)length);
+   free(buffer);
+}
+
+static void loadDownloadPlaylistIndex(void)
+{
+   if (downloadPlaylistIndexLoaded) return;
+   downloadPlaylistIndexLoaded = 1;
+   char *buffer = malloc(DOWNLOAD_PLAYLIST_INDEX_BYTES);
+   if (!buffer) return;
+   int length = readFile(DOWNLOAD_PLAYLIST_INDEX_PATH, buffer, DOWNLOAD_PLAYLIST_INDEX_BYTES - 1);
+   if (length > 0) {
+      buffer[length] = 0;
+      for (char *line = strtok(buffer, "\r\n"); line && downloadPlaylistCount < LOCAL_PLAYLIST_CAP;
+           line = strtok(NULL, "\r\n")) {
+         char *name = strchr(line, '\t');
+         if (!name) continue;
+         *name++ = 0;
+         char *countText = strchr(name, '\t');
+         if (countText) *countText++ = 0;
+         char *newestId = countText ? strchr(countText, '\t') : NULL;
+         if (newestId) *newestId++ = 0;
+         char *createdAtText = newestId ? strchr(newestId, '\t') : NULL;
+         if (createdAtText) *createdAtText++ = 0;
+         if (!validDownloadPlaylistId(line) || !name[0]) continue;
+         int duplicate = 0;
+         for (int i = 0; i < downloadPlaylistCount; i++)
+            if (strcmp(downloadPlaylists[i].id, line) == 0) { duplicate = 1; break; }
+         if (duplicate) continue;
+         DownloadPlaylistMeta *meta = &downloadPlaylists[downloadPlaylistCount];
+         memset(meta, 0, sizeof *meta);
+         strCopy(meta->id, sizeof meta->id, line);
+         copyHistoryText(meta->name, sizeof meta->name, name);
+         meta->count = countText ? atoi(countText) : -1;
+         if (meta->count < 0 || meta->count > LOCAL_PLAYLIST_VIDEO_CAP) meta->count = -1;
+         if (newestId) strCopy(meta->newestVideoId, sizeof meta->newestVideoId, newestId);
+         if (createdAtText) meta->createdAt = (uint64_t)strtoull(createdAtText, NULL, 10);
+         int number = atoi(line + 2);
+         if (number >= downloadPlaylistNextId) downloadPlaylistNextId = number + 1;
+         downloadPlaylistCount++;
+      }
+   }
+   free(buffer);
+}
+
+static void serializeDownloadVideo(char *out, int capacity, const SearchResult *item)
+{
+   char videoId[16], channelId[32], title[160], duration[24], author[48], views[24], published[24];
+   copyHistoryText(videoId, sizeof videoId, item->videoId);
+   copyHistoryText(channelId, sizeof channelId, item->channelId);
+   copyHistoryText(title, sizeof title, item->title);
+   copyHistoryText(duration, sizeof duration, item->duration);
+   copyHistoryText(author, sizeof author, item->author);
+   copyHistoryText(views, sizeof views, item->views);
+   copyHistoryText(published, sizeof published, item->published);
+   snprintf(out, capacity, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n",
+            videoId, channelId, title, duration, author, views, published, item->isLive ? 1 : 0);
+}
+
+static int readDownloadPlaylist(const char *id, SearchResult *items, int maxItems)
+{
+   if (!validDownloadPlaylistId(id) || !items || maxItems <= 0) return -1;
+   char path[160];
+   downloadPlaylistPath(id, path, sizeof path);
+   char *buffer = malloc(DOWNLOAD_PLAYLIST_BUFFER_BYTES);
+   if (!buffer) return -1;
+   int length = readFile(path, buffer, DOWNLOAD_PLAYLIST_BUFFER_BYTES - 1);
+   int count = 0;
+   if (length > 0) {
+      buffer[length] = 0;
+      for (char *line = strtok(buffer, "\r\n"); line && count < maxItems; line = strtok(NULL, "\r\n"))
+         if (parseWatchLater(line, &items[count])) count++;
+   }
+   free(buffer);
+   return count;
+}
+
+static int writeDownloadPlaylist(const char *id, const SearchResult *items, int count)
+{
+   if (!validDownloadPlaylistId(id) || (count > 0 && !items) || count < 0 || count > LOCAL_PLAYLIST_VIDEO_CAP) return -1;
+   char path[160];
+   downloadPlaylistPath(id, path, sizeof path);
+   char *buffer = malloc(DOWNLOAD_PLAYLIST_BUFFER_BYTES);
+   if (!buffer) return -1;
+   int length = 0;
+   for (int i = 0; i < count; i++) {
+      char line[LOCAL_PLAYLIST_LINE_MAX + 1];
+      serializeDownloadVideo(line, sizeof line, &items[i]);
+      int lineLength = (int)strlen(line);
+      if (length + lineLength >= DOWNLOAD_PLAYLIST_BUFFER_BYTES) break;
+      memcpy(buffer + length, line, (size_t)lineLength);
+      length += lineLength;
+   }
+   int result = writeFile(path, buffer, (uint64_t)length);
+   free(buffer);
+   return result;
+}
+
+int getDownloadPlaylistCount(void)
+{
+   loadDownloadPlaylistIndex();
+   return downloadPlaylistCount;
+}
+
+int getDownloadPlaylistInfo(int newestIndex, char *idOut, int idCapacity,
+                         char *nameOut, int nameCapacity)
+{
+   loadDownloadPlaylistIndex();
+   if (newestIndex < 0 || newestIndex >= downloadPlaylistCount) return -1;
+   DownloadPlaylistMeta *meta = &downloadPlaylists[downloadPlaylistCount - 1 - newestIndex];
+   if (idOut && idCapacity > 0) strCopy(idOut, (size_t)idCapacity, meta->id);
+   if (nameOut && nameCapacity > 0) strCopy(nameOut, (size_t)nameCapacity, meta->name);
+   return 0;
+}
+
+int getDownloadPlaylistRevision(void) { return downloadPlaylistRevision; }
+
+int getDownloadPlaylists(SearchResults *out)
+{
+   if (!out) return -1;
+   loadDownloadPlaylistIndex();
+   memset(out, 0, sizeof *out);
+   char *buffer = NULL;
+   int migrated = 0;
+   int migrationFailed = 0;
+   for (int i = downloadPlaylistCount - 1; i >= 0 && out->count < MAX_SEARCH_RESULTS; i--) {
+      DownloadPlaylistMeta *meta = &downloadPlaylists[i];
+      if (meta->count < 0) {
+         if (!buffer) buffer = (char *)malloc(DOWNLOAD_PLAYLIST_BUFFER_BYTES);
+         if (buffer) {
+            migrated = 1;
+            char path[160];
+            downloadPlaylistPath(meta->id, path, sizeof path);
+            int length = readFile(path, buffer, DOWNLOAD_PLAYLIST_BUFFER_BYTES - 1);
+            meta->count = 0;
+            meta->newestVideoId[0] = 0;
+            if (length > 0) {
+               buffer[length] = 0;
+               char *line = buffer;
+               char *end = buffer + length;
+               while (line < end) {
+                  char *next = strchr(line, '\n');
+                  if (next) *next = 0;
+                  if (*line) {
+                     if (meta->count == 0) {
+                        SearchResult first;
+                        if (parseWatchLater(line, &first))
+                           strCopy(meta->newestVideoId, sizeof meta->newestVideoId, first.videoId);
+                     }
+                     meta->count++;
+                  }
+                  if (!next) break;
+                  line = next + 1;
+               }
+            }
+         } else {
+            migrationFailed = 1;
+         }
+      }
+      int displayCount = meta->count >= 0 ? meta->count : 0;
+      SearchResult *tile = &out->items[out->count++];
+      memset(tile, 0, sizeof *tile);
+      tile->isPlaylist = 1;
+      tile->isLocalPlaylist = 1;
+      strCopy(tile->localPlaylistId, sizeof tile->localPlaylistId, meta->id);
+      strCopy(tile->title, sizeof tile->title, meta->name);
+      strCopy(tile->author, sizeof tile->author, "Downloads");
+      snprintf(tile->duration, sizeof tile->duration, "%d video%s", displayCount,
+               displayCount == 1 ? "" : "s");
+      strCopy(tile->published, sizeof tile->published, "Local download");
+      strCopy(tile->thumbnailVideoId, sizeof tile->thumbnailVideoId, meta->newestVideoId);
+      if (!meta->createdAt) {
+         char path[160]; VfsStat stat;
+         downloadPlaylistPath(meta->id, path, sizeof path);
+         if (statPath(path, &stat) == 0) meta->createdAt = stat.mtime;
+         if (!meta->createdAt) meta->createdAt = nextDownloadPlaylistCreatedAt();
+         migrated = 1;
+      }
+      tile->downloadedAt = meta->createdAt;
+   }
+   free(buffer);
+   if (migrated && !migrationFailed) saveDownloadPlaylistIndex();
+   return out->count;
+}
+
+int markDownloadPlaylistMembership(SearchResults *videos)
+{
+   if (!videos) return -1;
+   loadDownloadPlaylistIndex();
+   SearchResult *entries = (SearchResult *)malloc(sizeof(SearchResult) * LOCAL_PLAYLIST_VIDEO_CAP);
+   if (!entries) return -1;
+   for (int p = 0; p < downloadPlaylistCount; p++) {
+      int count = readDownloadPlaylist(downloadPlaylists[p].id, entries, LOCAL_PLAYLIST_VIDEO_CAP);
+      if (count < 0) { free(entries); return -1; }
+      for (int i = 0; i < count; i++) {
+         if (!entries[i].videoId[0]) continue;
+         for (int v = 0; v < videos->count; v++)
+            if (videos->items[v].videoId[0] && !strcmp(videos->items[v].videoId, entries[i].videoId))
+               videos->items[v].isDownloadPlaylistVideo = 1;
+      }
+   }
+   free(entries);
+   return 0;
+}
+
+int markOtherDownloadPlaylistMembership(SearchResults *videos, const char *excludedPlaylistId)
+{
+   if (!videos) return -1;
+   loadDownloadPlaylistIndex();
+   SearchResult *entries = (SearchResult *)malloc(sizeof(SearchResult) * LOCAL_PLAYLIST_VIDEO_CAP);
+   if (!entries) return -1;
+   for (int p = 0; p < downloadPlaylistCount; p++) {
+      if (excludedPlaylistId && !strcmp(downloadPlaylists[p].id, excludedPlaylistId)) continue;
+      int count = readDownloadPlaylist(downloadPlaylists[p].id, entries, LOCAL_PLAYLIST_VIDEO_CAP);
+      if (count < 0) continue;
+      for (int i = 0; i < count; i++) {
+         if (!entries[i].videoId[0]) continue;
+         for (int v = 0; v < videos->count; v++)
+            if (videos->items[v].videoId[0] && !strcmp(videos->items[v].videoId, entries[i].videoId))
+               videos->items[v].isDownloadPlaylistVideo = 1;
+      }
+   }
+   free(entries);
+   return 0;
+}
+
+int getDownloadPlaylistVideos(const char *playlistId, SearchResults *out)
+{
+   if (!out) return -1;
+   memset(out, 0, sizeof *out);
+   int count = readDownloadPlaylist(playlistId, out->items, MAX_SEARCH_RESULTS);
+   if (count < 0) return -1;
+   out->count = count;
+   return count;
+}
+
+int addVideoToDownloadPlaylist(const char *playlistId, const SearchResult *item)
+{
+   if (!validDownloadPlaylistId(playlistId) || !item || !item->videoId[0] || item->isPlaylist) return -1;
+   SearchResult *items = (SearchResult *)malloc(sizeof(SearchResult) * LOCAL_PLAYLIST_VIDEO_CAP);
+   if (!items) return -1;
+   int count = readDownloadPlaylist(playlistId, items, LOCAL_PLAYLIST_VIDEO_CAP);
+   if (count < 0) { free(items); return -1; }
+   for (int i = 0; i < count; i++) {
+      if (strcmp(items[i].videoId, item->videoId) == 0) {
+         if (i > 0) memmove(items + 1, items, (size_t)i * sizeof items[0]);
+         items[0] = *item;
+         int result = writeDownloadPlaylist(playlistId, items, count);
+         free(items);
+         if (result == 0) {
+            loadDownloadPlaylistIndex();
+            for (int n = 0; n < downloadPlaylistCount; n++) if (strcmp(downloadPlaylists[n].id, playlistId) == 0) {
+               strCopy(downloadPlaylists[n].newestVideoId, sizeof downloadPlaylists[n].newestVideoId, item->videoId);
+               saveDownloadPlaylistIndex();
+               break;
+            }
+            downloadPlaylistRevision++;
+         }
+         return result;
+      }
+   }
+   if (count == LOCAL_PLAYLIST_VIDEO_CAP) count--;
+   if (count > 0) memmove(items + 1, items, (size_t)count * sizeof items[0]);
+   items[0] = *item;
+   count++;
+   int result = writeDownloadPlaylist(playlistId, items, count);
+   free(items);
+   if (result == 0) {
+      loadDownloadPlaylistIndex();
+      for (int n = 0; n < downloadPlaylistCount; n++) if (strcmp(downloadPlaylists[n].id, playlistId) == 0) {
+         downloadPlaylists[n].count = count;
+         strCopy(downloadPlaylists[n].newestVideoId, sizeof downloadPlaylists[n].newestVideoId, item->videoId);
+         saveDownloadPlaylistIndex();
+         break;
+      }
+      downloadPlaylistRevision++;
+   }
+   return result;
+}
+
+int createDownloadPlaylist(const char *name, const SearchResult *firstVideo,
+                        char *playlistIdOut, int playlistIdCapacity)
+{
+   if (!name || !name[0] || (firstVideo && (!firstVideo->videoId[0] || firstVideo->isPlaylist))) return -1;
+   loadDownloadPlaylistIndex();
+   if (downloadPlaylistCount >= LOCAL_PLAYLIST_CAP) return -1;
+   char cleanName[LOCAL_PLAYLIST_NAME_LEN];
+   copyHistoryText(cleanName, sizeof cleanName, name);
+   if (!cleanName[0]) return -1;
+   char id[LOCAL_PLAYLIST_ID_LEN], path[160];
+   do {
+      snprintf(id, sizeof id, "dp%04d", downloadPlaylistNextId++);
+      downloadPlaylistPath(id, path, sizeof path);
+   } while (fileExists(path));
+   if (writeDownloadPlaylist(id, firstVideo, firstVideo ? 1 : 0) != 0) return -1;
+   memset(&downloadPlaylists[downloadPlaylistCount], 0, sizeof downloadPlaylists[downloadPlaylistCount]);
+   strCopy(downloadPlaylists[downloadPlaylistCount].id, LOCAL_PLAYLIST_ID_LEN, id);
+   strCopy(downloadPlaylists[downloadPlaylistCount].name, LOCAL_PLAYLIST_NAME_LEN, cleanName);
+   downloadPlaylists[downloadPlaylistCount].count = firstVideo ? 1 : 0;
+   if (firstVideo) strCopy(downloadPlaylists[downloadPlaylistCount].newestVideoId, sizeof downloadPlaylists[downloadPlaylistCount].newestVideoId, firstVideo->videoId);
+   downloadPlaylists[downloadPlaylistCount].createdAt = nextDownloadPlaylistCreatedAt();
+   downloadPlaylistCount++;
+   saveDownloadPlaylistIndex();
+   downloadPlaylistRevision++;
+   if (playlistIdOut && playlistIdCapacity > 0) strCopy(playlistIdOut, (size_t)playlistIdCapacity, id);
+   return 0;
+}
+
+int createEmptyDownloadPlaylist(const char *name, char *playlistIdOut, int playlistIdCapacity)
+{
+   return createDownloadPlaylist(name, NULL, playlistIdOut, playlistIdCapacity);
+}
+
+int createDownloadPlaylistFromResults(const char *name, const SearchResult *items, int count,
+                                   char *playlistIdOut, int playlistIdCapacity)
+{
+   if (!name || !name[0] || !items || count <= 0) return -1;
+   loadDownloadPlaylistIndex();
+   if (downloadPlaylistCount >= LOCAL_PLAYLIST_CAP) return -1;
+   char cleanName[LOCAL_PLAYLIST_NAME_LEN];
+   copyHistoryText(cleanName, sizeof cleanName, name);
+   if (!cleanName[0]) return -1;
+   if (count > LOCAL_PLAYLIST_VIDEO_CAP) count = LOCAL_PLAYLIST_VIDEO_CAP;
+   char id[LOCAL_PLAYLIST_ID_LEN], path[160];
+   do {
+      snprintf(id, sizeof id, "dp%04d", downloadPlaylistNextId++);
+      downloadPlaylistPath(id, path, sizeof path);
+   } while (fileExists(path));
+   if (writeDownloadPlaylist(id, items, count) != 0) return -1;
+   DownloadPlaylistMeta *meta = &downloadPlaylists[downloadPlaylistCount++];
+   memset(meta, 0, sizeof *meta);
+   strCopy(meta->id, sizeof meta->id, id);
+   strCopy(meta->name, sizeof meta->name, cleanName);
+   meta->count = count;
+   strCopy(meta->newestVideoId, sizeof meta->newestVideoId, items[0].videoId);
+   meta->createdAt = nextDownloadPlaylistCreatedAt();
+   saveDownloadPlaylistIndex();
+   downloadPlaylistRevision++;
+   if (playlistIdOut && playlistIdCapacity > 0)
+      strCopy(playlistIdOut, (size_t)playlistIdCapacity, id);
+   return 0;
+}
+
+int removeVideoFromDownloadPlaylist(const char *playlistId, const char *videoId)
+{
+   if (!validDownloadPlaylistId(playlistId) || !videoId || !videoId[0]) return -1;
+   SearchResult *items = (SearchResult *)malloc(sizeof(SearchResult) * LOCAL_PLAYLIST_VIDEO_CAP);
+   if (!items) return -1;
+   int count = readDownloadPlaylist(playlistId, items, LOCAL_PLAYLIST_VIDEO_CAP);
+   if (count < 0) { free(items); return -1; }
+   int found = -1;
+   for (int i = 0; i < count; i++) if (!strcmp(items[i].videoId, videoId)) { found = i; break; }
+   if (found < 0) { free(items); return 0; }
+   if (found + 1 < count) memmove(items + found, items + found + 1, (size_t)(count - found - 1) * sizeof items[0]);
+   count--;
+   char newestVideoId[16] = "";
+   if (count > 0) strCopy(newestVideoId, sizeof newestVideoId, items[0].videoId);
+   int rc = writeDownloadPlaylist(playlistId, items, count);
+   free(items);
+   if (rc == 0) {
+      loadDownloadPlaylistIndex();
+      for (int i = 0; i < downloadPlaylistCount; i++) if (!strcmp(downloadPlaylists[i].id, playlistId)) {
+         downloadPlaylists[i].count = count;
+         strCopy(downloadPlaylists[i].newestVideoId, sizeof downloadPlaylists[i].newestVideoId, newestVideoId);
+         break;
+      }
+      saveDownloadPlaylistIndex(); downloadPlaylistRevision++;
+   }
+   return rc == 0 ? 1 : -1;
+}
+
+int removeVideoFromAllDownloadPlaylists(const char *videoId)
+{
+   if (!videoId || !videoId[0]) return -1;
+   loadDownloadPlaylistIndex();
+   char ids[LOCAL_PLAYLIST_CAP][LOCAL_PLAYLIST_ID_LEN];
+   int count = downloadPlaylistCount;
+   for (int i = 0; i < count; i++) strCopy(ids[i], sizeof ids[i], downloadPlaylists[i].id);
+   int removed = 0;
+   for (int i = 0; i < count; i++)
+      if (removeVideoFromDownloadPlaylist(ids[i], videoId) > 0) removed++;
+   return removed;
+}
+
+int deleteDownloadPlaylist(const char *playlistId)
+{
+   if (!validDownloadPlaylistId(playlistId)) return -1;
+   loadDownloadPlaylistIndex();
+   int index = -1;
+   for (int i = 0; i < downloadPlaylistCount; i++) if (!strcmp(downloadPlaylists[i].id, playlistId)) { index = i; break; }
+   if (index < 0) return 0;
+   char path[160]; downloadPlaylistPath(playlistId, path, sizeof path); deleteFile(path);
+   if (index + 1 < downloadPlaylistCount) memmove(&downloadPlaylists[index], &downloadPlaylists[index + 1], (size_t)(downloadPlaylistCount - index - 1) * sizeof downloadPlaylists[0]);
+   downloadPlaylistCount--; saveDownloadPlaylistIndex(); downloadPlaylistRevision++;
+   return 0;
+}
+
+int renameDownloadPlaylist(const char *playlistId, const char *name)
+{
+   if (!validDownloadPlaylistId(playlistId) || !name || !name[0]) return -1;
+   loadDownloadPlaylistIndex();
+   char cleanName[LOCAL_PLAYLIST_NAME_LEN];
+   copyHistoryText(cleanName, sizeof cleanName, name);
+   if (!cleanName[0]) return -1;
+   for (int i = 0; i < downloadPlaylistCount; i++) {
+      if (!strcmp(downloadPlaylists[i].id, playlistId)) {
+         strCopy(downloadPlaylists[i].name, sizeof downloadPlaylists[i].name, cleanName);
+         saveDownloadPlaylistIndex();
+         downloadPlaylistRevision++;
          return 0;
       }
    }
@@ -963,7 +1490,10 @@ void initStorage(void)
    makeDir(DATA_DIR);
    makeDir(PLAYLISTS_DIR);
    makeDir(LOCAL_PLAYLISTS_DIR);
+   makeDir(DATA_DIR "/downloads");
+   makeDir(DOWNLOAD_PLAYLISTS_DIR);
    loadLocalPlaylistIndex();
+   loadDownloadPlaylistIndex();
    loadPlaylistWatchLater();
    loadHistory();
    loadDownloadedProgress();

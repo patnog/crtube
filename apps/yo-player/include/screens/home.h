@@ -1,5 +1,6 @@
 #pragma once
 #include "screen-manager.h"
+#include "extractor.h"
 
 // home - the landing screen: trending categories (L1/R1) in a VideoGrid. SELECT or Search in the sidebar
 // opens the search page; Triangle opens a channel and CROSS plays.
@@ -8,6 +9,7 @@ void openHome(void);
 void openHomeSettingsPanel(void);
 void openHomeSettingsPanelFromSearch(void);
 void openHomePlaylist(const char *playlistId, const char *title);
+void openHomeDownloadPlaylistConfirmation(const SearchResult *playlist);
 void openHomePlaylistFromSearch(const char *playlistId, const char *title, const char *query, int sort,
                                 const char *channelId, const char *channelName, int channelCategory);
 

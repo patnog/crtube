@@ -123,6 +123,7 @@ static struct {
    LiveCategory liveCategory;
    uint64_t  liveLoadedUs;
    int       screenW, screenH;
+   float     uiScale;
    int       accountOpen;   // the sign-in / account panel is showing
    int       settingsOpen;  // the settings window is showing
    int       settingsSelected;
@@ -148,10 +149,17 @@ static struct {
    int       downloadManagerSelected;
    int       downloadManagerScroll;
    int       downloadManagerCategory;
+   int       downloadCategory; // 0 = All, 1 = Videos, 2 = Playlists
    int       downloadManagerSelectedCount;
    char      downloadManagerSelectedIds[DOWNLOAD_MANAGEMENT_MAX_ITEMS][16];
    int       downloadManagerConfirmOpen;
    char      downloadManagerMessage[96];
+   int       downloadPlaylistConfirmOpen;
+   SearchResult downloadPlaylistPending;
+   uint64_t  downloadPlaylistEstimatedBytes;
+   int       downloadPlaylistEstimateUnknown;
+   uint64_t  playlistDeleteBytes;
+   int       playlistDeleteVideoCount;
    char      playlistDeleteId[64]; // YouTube playlist IDs are longer than local playlist IDs.
    int       createPlaylistOskDone;
    int       playlistNameAction; // 1 = create, 2 = rename
@@ -195,9 +203,19 @@ static uint64_t    homeLoadingStartedUs;
 static Label       downloadSpacePrefixLabel, downloadSpaceAvailableLabel;
 static int         downloadSpaceAvailableLow;
 static Label       downloadManagerTitle, downloadManagerRows[10], downloadManagerStatuses[7], downloadManagerFooter;
+static Label       downloadCategoryLabels[3], downloadPlaylistConfirmTitle, downloadPlaylistConfirmFooter;
 static ButtonHints downloadManagerHints;
+static int downloadManagerSquareHint = -1;
 static uint64_t    playlistToastShownAt;
 static int         playbackRestorePending;
+static sys_ppu_thread_t downloadPlaylistThread;
+static volatile int downloadPlaylistThreadActive, downloadPlaylistThreadDone;
+static volatile int downloadPlaylistThreadResult;
+static SearchResult *downloadPlaylistResults;
+static int downloadPlaylistOverlayRunning; // confirmation overlay is on the screen stack
+static int downloadPlaylistPreparing;
+static int downloadPlaylistPreparedCount;
+static int downloadPlaylistMissingCount;
 static void restoreHomePlaybackSelection(void);
 static ButtonHints hints;
 
@@ -210,6 +228,11 @@ static void termSearchSettingsOverlay(void);
 static Screen searchSettingsOverlayScreen = { initSearchSettingsOverlay, NULL,
    updateSearchSettingsOverlay, drawSearchSettingsOverlay, NULL,
    termSearchSettingsOverlay, SCREEN_TERMINATED };
+static void initDownloadPlaylistConfirmOverlay(void);
+static void updateDownloadPlaylistConfirmOverlay(void);
+static void drawDownloadPlaylistConfirmOverlay(void);
+static Screen downloadPlaylistConfirmOverlayScreen = { initDownloadPlaylistConfirmOverlay, NULL,
+   updateDownloadPlaylistConfirmOverlay, drawDownloadPlaylistConfirmOverlay, NULL, NULL, SCREEN_TERMINATED };
 static int         sdHintsTwoRows;
 static int         homeFooterBottomY;
 static int         homeFooterRows;
@@ -423,6 +446,9 @@ static void refreshHomeThemeColors(void)
    setLabelColor(&downloadSpaceAvailableLabel,
                  downloadSpaceAvailableLow ? 0xFFFF4444 : activeTheme->textSecondary);
    setLabelColor(&downloadManagerTitle, activeTheme->textPrimary);
+   setLabelColor(&downloadPlaylistConfirmTitle, activeTheme->textPrimary);
+   setLabelColor(&downloadPlaylistConfirmFooter, activeTheme->textSecondary);
+   for (int i = 0; i < 3; i++) setLabelColor(&downloadCategoryLabels[i], activeTheme->textSecondary);
    for (int i = 0; i < 10; i++)
       setLabelColor(&downloadManagerRows[i], activeTheme->textPrimary);
    for (int i = 0; i < 7; i++)
@@ -594,10 +620,75 @@ static int homeFetch(const char *token, SearchResults *out, void *user)
    if (home.category == HOME_PLAYLISTS) return getAccountPlaylists(token, out);
    if (home.category == HOME_LOCAL_PLAYLISTS)
       return (home.localPlaylistTab == 0 ? getPlaylistWatchLater(out) : getLocalPlaylists(out)) >= 0 ? 0 : -1;
-   if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS)
-      return getLocalPlaylistVideos(home.localPlaylistId, out) >= 0 ? 0 : -1;
-   if (home.category == HOME_DOWNLOADS)
-      return getDownloadedVideos(out, home.playlistSort == PLAYLIST_SORT_AZ) >= 0 ? 0 : -1;
+   if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS) {
+      int playlistRead = home.playlistReturnCategory == HOME_DOWNLOADS ?
+         getDownloadPlaylistVideos(home.localPlaylistId, out) :
+         getLocalPlaylistVideos(home.localPlaylistId, out);
+      if (playlistRead < 0) return -1;
+      if (home.playlistReturnCategory == HOME_DOWNLOADS) {
+         int kept = 0;
+         for (int i = 0; i < out->count; i++) {
+            char path[MAX_PATH_LEN];
+            if (getDownloadedVideoPath(out->items[i].videoId, path, sizeof path) == 0) {
+               out->items[i].isLocalDownload = 1;
+               out->items[kept++] = out->items[i];
+            }
+         }
+         out->count = kept;
+      }
+      return 0;
+   }
+   if (home.category == HOME_DOWNLOADS) {
+      if (home.downloadCategory == 2) return getDownloadPlaylists(out) >= 0 ? 0 : -1;
+      if (getDownloadedVideos(out, home.playlistSort == PLAYLIST_SORT_AZ) < 0) return -1;
+      markDownloadPlaylistMembership(out);
+      if (home.downloadCategory == 1) return 0; // Videos includes both loose and playlist-owned downloads.
+
+      // All shows only loose videos plus playlist tiles. Videos that belong to a
+      // Downloads playlist remain in Videos and inside their playlist, not twice in All.
+      int kept = 0;
+      for (int i = 0; i < out->count; i++)
+         if (!out->items[i].isDownloadPlaylistVideo) out->items[kept++] = out->items[i];
+      out->count = kept;
+
+      SearchResults *playlists = (SearchResults *)malloc(sizeof *playlists);
+      if (playlists) {
+         if (getDownloadPlaylists(playlists) >= 0) {
+            for (int i = 0; i < playlists->count && out->count < MAX_SEARCH_RESULTS; i++)
+               out->items[out->count++] = playlists->items[i];
+         }
+         free(playlists);
+      }
+
+      // Sort the mixed list as one timeline, so playlist downloads participate in Newest.
+      for (int i = 1; i < out->count; i++) {
+         SearchResult item = out->items[i];
+         int j = i;
+         while (j > 0) {
+            int before;
+            if (home.playlistSort == PLAYLIST_SORT_AZ) {
+               const unsigned char *a = (const unsigned char *)item.title;
+               const unsigned char *b = (const unsigned char *)out->items[j - 1].title;
+               int comparison = 0;
+               while (*a && *b) {
+                  unsigned char ca = *a++, cb = *b++;
+                  if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca - 'A' + 'a');
+                  if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb - 'A' + 'a');
+                  if (ca != cb) { comparison = ca < cb ? -1 : 1; break; }
+               }
+               if (!comparison) comparison = (*a != 0) - (*b != 0);
+               before = comparison < 0;
+            } else {
+               before = item.downloadedAt > out->items[j - 1].downloadedAt;
+            }
+            if (!before) break;
+            out->items[j] = out->items[j - 1];
+            j--;
+         }
+         out->items[j] = item;
+      }
+      return 0;
+   }
    if (home.category == HOME_PLAYLIST_CONTENTS) {
       int firstPage = token == NULL || token[0] == 0;
       int rc = getAccountPlaylistVideos(home.playlistId, token, out);
@@ -716,6 +807,7 @@ static void loadCategory(void)
 {
    home.grid.suppressWatchLaterBadge = (home.category == HOME_WATCHLATER ||
       home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER ||
+      home.category == HOME_DOWNLOADS ||
       (home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 0));
    if (homeSupportsSort()) home.sort = (SortOrder)getSortPreference(currentFeedSortPreference());
    if (homeSupportsPlaylistSort() && home.category != HOME_DOWNLOADS)
@@ -785,7 +877,8 @@ static void openAccountPanel(void);
 
 static void setSidebarForCategory(void)
 {
-   if (home.category == HOME_DOWNLOADS) setSidebarCurrent(SIDEBAR_DOWNLOADS);
+   if (home.category == HOME_DOWNLOADS ||
+       (home.category == HOME_LOCAL_PLAYLIST_CONTENTS && home.playlistReturnCategory == HOME_DOWNLOADS)) setSidebarCurrent(SIDEBAR_DOWNLOADS);
    else if (home.category == HOME_LOCAL_PLAYLISTS || home.category == HOME_LOCAL_PLAYLIST_CONTENTS) setSidebarCurrent(SIDEBAR_PS3_PLAYLISTS);
    else if (home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS) setSidebarCurrent(SIDEBAR_PLAYLISTS);
    else if (home.category == HOME_LIVE) setSidebarCurrent(SIDEBAR_LIVE);
@@ -886,6 +979,12 @@ void openHomePlaylistFromSearch(const char *playlistId, const char *title, const
 
 static void switchCategory(int delta)
 {
+   if (home.category == HOME_DOWNLOADS) {
+      home.downloadCategory = (home.downloadCategory + 3 + delta) % 3;
+      loadCategory();
+      updateHomeSortHint();
+      return;
+   }
    if (home.category == HOME_LOCAL_PLAYLISTS) {
       home.localPlaylistTab = 1 - home.localPlaylistTab;
       loadCategory();
@@ -2527,7 +2626,7 @@ static void formatDownloadSpace(uint64_t bytes, char *out, int capacity)
    const char *suffix = bytes >= gb ? "GB" : "MB";
    unsigned long long whole = (unsigned long long)(bytes / unit);
    unsigned long long fraction = (unsigned long long)((bytes % unit) * 100ULL / unit);
-   snprintf(out, capacity, "%llu.%02llu %s", whole, fraction, suffix);
+   snprintf(out, capacity, "%llu.%02llu%s", whole, fraction, suffix);
 }
 
 static void updateDownloadSpaceStats(void)
@@ -2542,39 +2641,36 @@ static void updateDownloadSpaceStats(void)
    if (ready) {
       formatDownloadSpace(usedBytes, usedText, sizeof usedText);
       formatDownloadSpace(availableBytes, availableValue, sizeof availableValue);
-      snprintf(availableText, sizeof availableText, " Available: %s", availableValue);
+      snprintf(availableText, sizeof availableText, "Available:%s", availableValue);
       downloadSpaceAvailableLow = availableBytes <= DOWNLOAD_SPACE_LOW_BYTES;
-      snprintf(prefix, sizeof prefix, "Used: %s /", usedText);
+      snprintf(prefix, sizeof prefix, "Used:%s / ", usedText);
    } else {
-      strCopy(prefix, sizeof prefix, "Used: -- /");
-      strCopy(availableText, sizeof availableText, " Available: --");
+      strCopy(prefix, sizeof prefix, "Used:-- / ");
+      strCopy(availableText, sizeof availableText, "Available:--");
       downloadSpaceAvailableLow = 0;
    }
    setLabelIfChanged(&downloadSpacePrefixLabel, prefix);
    setLabelIfChanged(&downloadSpaceAvailableLabel, availableText);
 }
 
+static int downloadSpaceStatusX, downloadSpaceStatusY;
+
+static void setDownloadHeaderLabelScale(Label *label, float factor)
+{
+   float scale = getGfxUiScaleFactor() * factor;
+   if (scale < 0.65f) scale = 0.65f;
+   setLabelFixedRenderScale(label, scale, 0);
+}
+
 static void drawDownloadSpaceStatus(void)
 {
    if (home.category != HOME_DOWNLOADS) return;
-   refreshLabelScale(&downloadSpacePrefixLabel);
-   refreshLabelScale(&downloadSpaceAvailableLabel);
-
-   // Right-align the status immediately before the sort badges.
-   int right = homeSortGroupLeft() - 18;
-   int totalWidth = downloadSpacePrefixLabel.tt.tex.w + downloadSpaceAvailableLabel.tt.tex.w;
-   int x = right - totalWidth;
-
-   int textHeight = downloadSpacePrefixLabel.tt.tex.h;
-   if (downloadSpaceAvailableLabel.tt.tex.h > textHeight)
-      textHeight = downloadSpaceAvailableLabel.tt.tex.h;
-   int y = titleLabel.y + (titleLabel.tt.tex.h - textHeight) / 2;
-
    setLabelColor(&downloadSpacePrefixLabel, activeTheme->textSecondary);
    setLabelColor(&downloadSpaceAvailableLabel,
                  downloadSpaceAvailableLow ? 0xFFFF4444 : activeTheme->textSecondary);
-   drawLabelAt(&downloadSpacePrefixLabel, x, y);
-   drawLabelAt(&downloadSpaceAvailableLabel, x + downloadSpacePrefixLabel.tt.tex.w, y);
+   drawLabelAt(&downloadSpacePrefixLabel, downloadSpaceStatusX, downloadSpaceStatusY);
+   drawLabelAt(&downloadSpaceAvailableLabel,
+               downloadSpaceStatusX + downloadSpacePrefixLabel.tt.tex.w, downloadSpaceStatusY);
 }
 
 static void drawHomeSortPills(void)
@@ -2602,6 +2698,320 @@ static void drawHomeSortPills(void)
       setLabelColor(label, selected ? 0xFFFFFFFF : 0xFFAAAAAA);
       drawLabelAt(label, textX, textY);
       x += width + HOME_SORT_GAP;
+   }
+}
+
+static SearchResult downloadPlaylistJob;
+static volatile int downloadPlaylistEstimateProgress, downloadPlaylistEstimateTotal;
+
+static void downloadPlaylistWorker(uint64_t unused)
+{
+   (void)unused;
+   const int capacity = 2048;
+   int found = 0, failed = 0;
+   uint64_t estimatedBytes = 0;
+   int unknownSizes = 0;
+   downloadPlaylistEstimateProgress = 0;
+   downloadPlaylistEstimateTotal = 0;
+   SearchResult *items = (SearchResult *)malloc(sizeof *items * capacity);
+   if (!items) {
+      downloadPlaylistThreadResult = -1;
+      downloadPlaylistThreadDone = 1;
+      return;
+   }
+
+   if (downloadPlaylistJob.isLocalPlaylist) {
+      SearchResults *videos = (SearchResults *)malloc(sizeof *videos);
+      int playlistRead = videos ?
+         (strncmp(downloadPlaylistJob.localPlaylistId, "dp", 2) == 0 ?
+            getDownloadPlaylistVideos(downloadPlaylistJob.localPlaylistId, videos) :
+            getLocalPlaylistVideos(downloadPlaylistJob.localPlaylistId, videos)) : -1;
+      if (!videos || playlistRead < 0) {
+         failed = 1;
+      } else {
+         for (int i = 0; i < videos->count && found < capacity; i++) {
+            SearchResult *item = &videos->items[i];
+            if (!item->videoId[0] || item->isLive || item->isPlaylist) continue;
+            items[found++] = *item;
+         }
+      }
+      free(videos);
+   } else if (downloadPlaylistJob.playlistId[0]) {
+      char continuation[MAX_CONTINUATION] = "";
+      SearchResults *page = (SearchResults *)malloc(sizeof *page);
+      if (!page) failed = 1;
+      else for (int pageIndex = 0; pageIndex < 64 && found < capacity; pageIndex++) {
+         int rc = getAccountPlaylistVideos(downloadPlaylistJob.playlistId,
+                                           continuation[0] ? continuation : NULL, page);
+         if (rc != 0) { if (!found) failed = 1; break; }
+         for (int i = 0; i < page->count && found < capacity; i++) {
+            SearchResult *item = &page->items[i];
+            if (!item->videoId[0] || item->isLive || item->isPlaylist) continue;
+            items[found++] = *item;
+         }
+         if (!page->continuation[0] || !page->count) break;
+         strCopy(continuation, sizeof continuation, page->continuation);
+      }
+      free(page);
+   } else failed = 1;
+
+   // Resolve each missing video's selected streams; playlist durations and
+   // bitrates vary too widely for one resolution-based average to be useful.
+   downloadPlaylistEstimateTotal = found;
+   for (int i = 0; i < found; i++) {
+      char path[MAX_PATH_LEN];
+      if (getDownloadedVideoPath(items[i].videoId, path, sizeof path) != 0) {
+         uint64_t itemBytes = 0;
+         if (estimateDownloadSizeForVideo(&items[i], &itemBytes) == 0) estimatedBytes += itemBytes;
+         else unknownSizes++;
+      }
+      downloadPlaylistEstimateProgress = i + 1;
+   }
+   home.downloadPlaylistEstimatedBytes = estimatedBytes;
+   home.downloadPlaylistEstimateUnknown = unknownSizes;
+   __sync_synchronize();
+   downloadPlaylistResults = items;
+   downloadPlaylistThreadResult = failed && !found ? -1 : found;
+   downloadPlaylistThreadDone = 1;
+}
+
+static void finishDownloadPlaylistPreparation(void)
+{
+   if (!downloadPlaylistThreadActive || !downloadPlaylistThreadDone) return;
+   joinThread(downloadPlaylistThread);
+   downloadPlaylistThreadActive = 0;
+   downloadPlaylistPreparing = 0;
+   resumeVideoGrid(&home.grid);
+
+   int found = (int)downloadPlaylistThreadResult;
+   downloadPlaylistPreparedCount = found;
+   downloadPlaylistMissingCount = 0;
+   __sync_synchronize();
+   if (found > 0 && downloadPlaylistResults) {
+      for (int i = 0; i < found; i++) {
+         char path[MAX_PATH_LEN];
+         if (getDownloadedVideoPath(downloadPlaylistResults[i].videoId, path, sizeof path) != 0)
+            downloadPlaylistMissingCount++;
+      }
+   }
+
+   if (found < 0) {
+      setLabelText(&downloadPlaylistConfirmTitle, "Could not read playlist");
+      setLabelText(&downloadPlaylistConfirmFooter, "O Close");
+      return;
+   }
+   if (found == 0) {
+      setLabelText(&downloadPlaylistConfirmTitle, "Playlist contains no downloadable videos");
+      setLabelText(&downloadPlaylistConfirmFooter, "O Close");
+      return;
+   }
+   if (downloadPlaylistMissingCount == 0) {
+      setLabelText(&downloadPlaylistConfirmTitle, "All playlist videos are already downloaded");
+      setLabelText(&downloadPlaylistConfirmFooter, "X Save playlist   O Cancel");
+      return;
+   }
+
+   char estimate[48], prompt[256];
+   formatDownloadSpace(home.downloadPlaylistEstimatedBytes, estimate, sizeof estimate);
+   if (home.downloadPlaylistEstimateUnknown > 0 && home.downloadPlaylistEstimatedBytes == 0)
+      snprintf(prompt, sizeof prompt, "Download %s?\n%d videos, size unavailable for %d",
+               downloadPlaylistJob.title, downloadPlaylistMissingCount,
+               home.downloadPlaylistEstimateUnknown);
+   else if (home.downloadPlaylistEstimateUnknown > 0)
+      snprintf(prompt, sizeof prompt, "Download %s?\n%d videos, approximately %s (%d unknown)",
+               downloadPlaylistJob.title, downloadPlaylistMissingCount, estimate,
+               home.downloadPlaylistEstimateUnknown);
+   else
+      snprintf(prompt, sizeof prompt, "Download %s?\n%d videos, approximately %s",
+               downloadPlaylistJob.title, downloadPlaylistMissingCount, estimate);
+   setLabelText(&downloadPlaylistConfirmTitle, prompt);
+   setLabelText(&downloadPlaylistConfirmFooter, "X Download    O Cancel");
+}
+
+static void openDownloadPlaylistConfirmation(const SearchResult *playlist)
+{
+   if (!playlist || !playlist->isPlaylist || downloadPlaylistThreadActive) return;
+   free(downloadPlaylistResults);
+   downloadPlaylistResults = NULL;
+   home.downloadPlaylistPending = *playlist;
+   downloadPlaylistJob = *playlist;
+   downloadPlaylistThreadDone = 0;
+   downloadPlaylistThreadResult = 0;
+   downloadPlaylistPreparedCount = -1;
+   downloadPlaylistMissingCount = 0;
+   home.downloadPlaylistEstimatedBytes = 0;
+   home.downloadPlaylistEstimateUnknown = 0;
+   home.downloadPlaylistConfirmOpen = 1;
+   downloadPlaylistPreparing = 1;
+   downloadPlaylistOverlayRunning = 0;
+   setLabelText(&downloadPlaylistConfirmTitle, "Preparing playlist estimate...");
+   setLabelText(&downloadPlaylistConfirmFooter, "Please wait");
+   pauseVideoGrid(&home.grid);
+   if (spawnJoinableThread(&downloadPlaylistThread, downloadPlaylistWorker, 0,
+                           THREAD_PRIORITY_LOW, THREAD_STACK_SIZE_64KB,
+                           "yt-playlist-est") == 0) {
+      downloadPlaylistThreadActive = 1;
+   } else {
+      downloadPlaylistPreparing = 0;
+      home.downloadPlaylistConfirmOpen = 0;
+      resumeVideoGrid(&home.grid);
+      setLabelText(&playlistToastLabel, "Could not start playlist lookup");
+      playlistToastShownAt = getTimeUs();
+   }
+}
+
+static void closeDownloadPlaylistConfirmation(int popOverlay)
+{
+   home.downloadPlaylistConfirmOpen = 0;
+   downloadPlaylistPreparing = 0;
+   downloadPlaylistPreparedCount = -1;
+   downloadPlaylistMissingCount = 0;
+   free(downloadPlaylistResults);
+   downloadPlaylistResults = NULL;
+   if (popOverlay && downloadPlaylistOverlayRunning) popScreen();
+   downloadPlaylistOverlayRunning = 0;
+}
+
+static void submitPreparedDownloadPlaylist(int popOverlay)
+{
+   int found = downloadPlaylistPreparedCount;
+   int playlistSaved = 0;
+   if (found > 0 && downloadPlaylistResults &&
+       (!downloadPlaylistJob.isLocalPlaylist || strncmp(downloadPlaylistJob.localPlaylistId, "dp", 2) != 0)) {
+      char localId[LOCAL_PLAYLIST_ID_LEN];
+      if (createDownloadPlaylistFromResults(downloadPlaylistJob.title, downloadPlaylistResults,
+                                            found, localId, sizeof localId) == 0)
+         playlistSaved = 1;
+   }
+
+   int missing = 0;
+   for (int i = 0; downloadPlaylistResults && i < found; i++) {
+      char path[MAX_PATH_LEN];
+      if (getDownloadedVideoPath(downloadPlaylistResults[i].videoId, path, sizeof path) != 0)
+         downloadPlaylistResults[missing++] = downloadPlaylistResults[i];
+   }
+   int queued = downloadPlaylistResults && missing > 0 ?
+                enqueueDownloadBatch(downloadPlaylistResults, missing) : 0;
+   free(downloadPlaylistResults);
+   downloadPlaylistResults = NULL;
+
+   if (found < 0) setLabelText(&playlistToastLabel, "Could not read playlist");
+   else if (queued == -1) setLabelText(&playlistToastLabel, "Could not start playlist downloads");
+   else if (queued == -2) setLabelText(&playlistToastLabel, "Download queue is full");
+   else if (queued == 0 && playlistSaved) setLabelText(&playlistToastLabel, "Playlist saved; no new downloads");
+   else if (queued == 0) setLabelText(&playlistToastLabel, "No new videos to download");
+   else {
+      char toast[96];
+      snprintf(toast, sizeof toast, "Queued %d playlist video%s", queued, queued == 1 ? "" : "s");
+      setLabelText(&playlistToastLabel, toast);
+   }
+   playlistToastShownAt = getTimeUs();
+   home.downloadPlaylistConfirmOpen = 0;
+   downloadPlaylistPreparedCount = -1;
+   downloadPlaylistMissingCount = 0;
+   if (home.category == HOME_DOWNLOADS) loadCategory();
+   if (popOverlay && downloadPlaylistOverlayRunning) popScreen();
+   downloadPlaylistOverlayRunning = 0;
+}
+
+static void initDownloadPlaylistConfirmOverlay(void)
+{
+   // The Search/channel screen underneath remains on the stack and resumes unchanged.
+   downloadPlaylistOverlayRunning = 1;
+}
+
+static void updateDownloadPlaylistConfirmOverlay(void)
+{
+   updateDownloadOverlay();
+   if (downloadPlaylistPreparing && downloadPlaylistThreadActive && !downloadPlaylistThreadDone && downloadPlaylistEstimateTotal > 0) {
+      char progress[128];
+      snprintf(progress, sizeof progress, "Estimating download size: %d/%d", downloadPlaylistEstimateProgress, downloadPlaylistEstimateTotal);
+      setLabelText(&downloadPlaylistConfirmTitle, progress);
+   }
+   if (downloadPlaylistPreparing && downloadPlaylistThreadActive && downloadPlaylistThreadDone)
+      finishDownloadPlaylistPreparation();
+   if (!home.downloadPlaylistConfirmOpen || downloadPlaylistPreparing) return;
+   if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+      closeDownloadPlaylistConfirmation(1);
+      return;
+   }
+   if (isPadButtonPressed(PAD_BTN_CROSS)) {
+      if (downloadPlaylistPreparedCount < 0) return;
+      submitPreparedDownloadPlaylist(1);
+   }
+}
+
+static void drawDownloadPlaylistConfirmOverlay(void)
+{
+   if (!home.downloadPlaylistConfirmOpen) return;
+   int screenW = getGfxScreenWidth(), screenH = getGfxScreenHeight();
+   int panelW = screenW * 90 / 100;
+   if (panelW > 1200) panelW = 1200;
+   int panelH = (int)(260 * home.uiScale);
+   int x = (screenW - panelW) / 2, y = (screenH - panelH) / 2;
+   fillGfxRectangle(0, 0, screenW, screenH, activeTheme->scrim);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+   refreshLabelScale(&downloadPlaylistConfirmTitle);
+   refreshLabelScale(&downloadPlaylistConfirmFooter);
+   moveLabel(&downloadPlaylistConfirmTitle, x + 28, y + (int)(48 * home.uiScale));
+   moveLabel(&downloadPlaylistConfirmFooter, x + 28, y + panelH - (int)(58 * home.uiScale));
+   drawLabel(&downloadPlaylistConfirmTitle);
+   drawLabel(&downloadPlaylistConfirmFooter);
+}
+
+void openHomeDownloadPlaylistConfirmation(const SearchResult *playlist)
+{
+   openDownloadPlaylistConfirmation(playlist);
+   if (home.downloadPlaylistConfirmOpen) {
+      downloadPlaylistOverlayRunning = 1;
+      pushScreen(&downloadPlaylistConfirmOverlayScreen);
+   }
+}
+
+static void drawDownloadCategoryTabs(void)
+{
+   int x = titleLabel.x + titleLabel.tt.tex.w + 14;
+   int right = homeSortGroupLeft() - 12;
+   int pad = TREND_CHIP_PAD_X, gap = TREND_CHIP_GAP;
+   float statusFactor = 1.0f, categoryFactor = 1.0f;
+
+   // Keep the three category pills beside Downloads. Shrink secondary disk text
+   // first, then pill text, rather than allowing either group to overlap at 1.5x.
+   for (int pass = 0; pass < 24; pass++) {
+      for (int i = 0; i < 3; i++) setDownloadHeaderLabelScale(&downloadCategoryLabels[i], categoryFactor);
+      setDownloadHeaderLabelScale(&downloadSpacePrefixLabel, statusFactor);
+      setDownloadHeaderLabelScale(&downloadSpaceAvailableLabel, statusFactor);
+      int categoryWidth = gap * 2;
+      for (int i = 0; i < 3; i++) categoryWidth += downloadCategoryLabels[i].tt.tex.w + 2 * pad;
+      int statusWidth = downloadSpacePrefixLabel.tt.tex.w + downloadSpaceAvailableLabel.tt.tex.w;
+      if (x + categoryWidth + 12 + statusWidth <= right) break;
+      if (statusFactor > 0.62f) statusFactor -= 0.04f;
+      else if (categoryFactor > 0.70f) categoryFactor -= 0.04f;
+      else if (pad > 3) pad--;
+      else if (gap > 2) gap--;
+      else break;
+   }
+
+   int statusWidth = downloadSpacePrefixLabel.tt.tex.w + downloadSpaceAvailableLabel.tt.tex.w;
+   downloadSpaceStatusX = right - statusWidth;
+   int textHeight = downloadSpacePrefixLabel.tt.tex.h > downloadSpaceAvailableLabel.tt.tex.h ?
+                    downloadSpacePrefixLabel.tt.tex.h : downloadSpaceAvailableLabel.tt.tex.h;
+   downloadSpaceStatusY = titleLabel.y + (titleLabel.tt.tex.h - textHeight) / 2;
+
+   int y = titleLabel.y + (titleLabel.tt.tex.h - TREND_CHIP_HEIGHT) / 2;
+   for (int i = 0; i < 3; i++) {
+      Label *label = &downloadCategoryLabels[i];
+      int width = label->tt.tex.w + 2 * pad;
+      int active = i == home.downloadCategory;
+      uint32_t edge = active ? activeTheme->accent : activeTheme->rowHighlight;
+      uint32_t fill = active ? activeTheme->rowHighlight : activeTheme->surface;
+      fillGfxRoundedRectangleFixed(x, y, width, TREND_CHIP_HEIGHT, TREND_CHIP_HEIGHT / 2, edge);
+      fillGfxRoundedRectangleFixed(x + 1, y + 1, width - 2, TREND_CHIP_HEIGHT - 2,
+                                   TREND_CHIP_HEIGHT / 2 - 1, fill);
+      setLabelColor(label, active ? activeTheme->textPrimary : activeTheme->textSecondary);
+      drawLabelAt(label, x + pad, getCenteredLabelY(label, y, TREND_CHIP_HEIGHT));
+      x += width + gap;
    }
 }
 
@@ -2835,6 +3245,11 @@ static void initHome(void)
    home.downloadManagerSelected = 0;
    home.downloadManagerScroll = 0;
    home.downloadManagerCategory = DOWNLOAD_MANAGEMENT_COMPLETED;
+   home.downloadCategory = 0;
+   home.downloadPlaylistConfirmOpen = 0;
+   downloadPlaylistThreadActive = downloadPlaylistThreadDone = 0;
+   downloadPlaylistThreadResult = 0;
+   downloadPlaylistResults = NULL;
    home.downloadManagerSelectedCount = 0;
    home.downloadManagerConfirmOpen = 0;
    home.downloadManagerMessage[0] = 0;
@@ -2880,6 +3295,8 @@ static void initHome(void)
    loadSdScale();
    home.screenW = getGfxScreenWidth();
    home.screenH = getGfxScreenHeight();
+   home.uiScale = getGfxUiScaleFactor();
+   if (home.uiScale < 1.0f) home.uiScale = 1.0f;
    sdHintsTwoRows = isGfxSdVideoOutput();
    int headerY = sdHintsTwoRows ? SD_HEADER_Y : HEADER_Y;
    int gridTop = sdHintsTwoRows ? SD_GRID_TOP : GRID_TOP;
@@ -2906,7 +3323,7 @@ static void initHome(void)
    initLabel(&downloadManagerTitle, &uiFont, 0, 0, downloadPanelW - 64, AUTO, 29,
              activeTheme->textPrimary, TEXT_NOWRAP, "Download management");
    for (int i = 0; i < 10; i++) {
-      initLabel(&downloadManagerRows[i], &uiFont, 0, 0, downloadPanelW - 220, AUTO, 22,
+      initLabel(&downloadManagerRows[i], &uiFont, 0, 0, downloadPanelW - 220, AUTO, 23,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
       setLabelScaleWithUi(&downloadManagerRows[i], 1);
    }
@@ -2922,8 +3339,9 @@ static void initHome(void)
    addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_DPAD_UP), "Move");
    addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_CROSS), "Select");
    addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_TRIANGLE), "All");
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_SQUARE), "Manage");
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_L1), "L1/R1 Tabs");
+   downloadManagerSquareHint = addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_SQUARE), "Delete");
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_L1), "/");
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_R1), "Tabs");
    addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
 
    setLabelScaleWithUi(&playlistErrorLabel, 1);
@@ -2934,6 +3352,21 @@ static void initHome(void)
    // Home heading/status grow by rerasterising their font, while retaining their
    // original anchors instead of being pushed off the 4:3 safe area.
    setLabelScaleWithUi(&titleLabel, 1);
+   static const char *downloadCategoryNames[3] = { "All", "Videos", "Playlists" };
+   for (int i = 0; i < 3; i++) {
+      initLabel(&downloadCategoryLabels[i], &uiFont, 0, 0, AUTO, AUTO, 18,
+                activeTheme->textSecondary, TEXT_NOWRAP, downloadCategoryNames[i]);
+      setLabelScaleWithUi(&downloadCategoryLabels[i], 1);
+   }
+   int downloadConfirmWidth = (int)((home.screenW * 0.90f - 56) / home.uiScale);
+   if (downloadConfirmWidth > 760) downloadConfirmWidth = 760;
+   if (downloadConfirmWidth < 320) downloadConfirmWidth = 320;
+   initLabel(&downloadPlaylistConfirmTitle, &uiFont, 0, 0, downloadConfirmWidth, AUTO, 25,
+             activeTheme->textPrimary, TEXT_WRAP, "Download playlist?");
+   initLabel(&downloadPlaylistConfirmFooter, &uiFont, 0, 0, downloadConfirmWidth, AUTO, 19,
+             activeTheme->textSecondary, TEXT_NOWRAP, "X Download    O Cancel");
+   setLabelScaleWithUi(&downloadPlaylistConfirmTitle, 1);
+   setLabelScaleWithUi(&downloadPlaylistConfirmFooter, 1);
    setLabelScaleWithUi(&statusLabel, 1);
 
    initButtonHints(&hints, &uiFont, 0, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
@@ -3203,6 +3636,7 @@ static void initHome(void)
    setGridPlaylistWatchLaterPredicate(&home.grid, isPlaylistWatchLater);
    home.grid.suppressWatchLaterBadge = (home.category == HOME_WATCHLATER ||
       home.category == HOME_ACCOUNT + ACCOUNT_FEED_WATCH_LATER ||
+      home.category == HOME_DOWNLOADS ||
       (home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 0));
 
    subsRevisionSeen = getSubscriptionsRevision();
@@ -3228,14 +3662,22 @@ static int handleHomeSquareAction(const SearchResult *selected)
          return 1;
       }
       if (isPadButtonReleased(PAD_BTN_SQUARE)) {
-         toggleWatchLater(&squarePendingItem);
-         watchLaterRevisionSeen = getWatchLaterRevision();
-         categoryCached[HOME_WATCHLATER] = 0;
          if (home.category == HOME_WATCHLATER) {
-            home.restoreGridAfterWatchLater = 1;
-            home.restoreGridSelection = home.grid.selected;
-            home.restoreGridScrollRow = home.grid.scrollRow;
-            loadCategory();
+            strCopy(home.playlistDeleteId, sizeof home.playlistDeleteId, squarePendingItem.videoId);
+            home.playlistDeleteFromWatchLater = 3;
+            home.playlistDeleteConfirmOpen = 1;
+            home.playlistDeleteConfirmSelected = 1;
+            exitConfirmNavigateRepeat.timer = exitConfirmNavigateRepeat.repeats = 0;
+         } else {
+            toggleWatchLater(&squarePendingItem);
+            watchLaterRevisionSeen = getWatchLaterRevision();
+            categoryCached[HOME_WATCHLATER] = 0;
+            if (home.category == HOME_WATCHLATER) {
+               home.restoreGridAfterWatchLater = 1;
+               home.restoreGridSelection = home.grid.selected;
+               home.restoreGridScrollRow = home.grid.scrollRow;
+               loadCategory();
+            }
          }
          squarePressedAt = 0;
          return 1;
@@ -3328,6 +3770,8 @@ static void downloadManagerConfirmAction(void)
       const char *ids[DOWNLOAD_MANAGEMENT_MAX_ITEMS];
       for (int i = 0; i < requested; i++) ids[i] = home.downloadManagerSelectedIds[i];
       if (queueDeleteManagedDownloads(ids, requested) == 0) {
+         for (int i = 0; i < requested; i++)
+            removeVideoFromAllDownloadPlaylists(home.downloadManagerSelectedIds[i]);
          snprintf(home.downloadManagerMessage, sizeof home.downloadManagerMessage,
                   "Deleting %d item%s...", requested, requested == 1 ? "" : "s");
       } else {
@@ -3369,6 +3813,10 @@ static void updateDownloadManagement(void)
       if (home.downloadManagerSelected >= home.downloadManagerScroll + DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS)
          home.downloadManagerScroll = home.downloadManagerSelected - DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS + 1;
    }
+
+   if (downloadManagerSquareHint >= 0)
+      setButtonHintCaption(&downloadManagerHints, downloadManagerSquareHint,
+         home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING ? "Cancel" : "Delete");
 
    if (home.downloadManagerConfirmOpen) {
       if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
@@ -3556,7 +4004,8 @@ static void updateHome(void)
    unsigned int downloadRevision = getDownloadLibraryRevision();
    if (downloadRevision != downloadLibraryRevisionSeen) {
       downloadLibraryRevisionSeen = downloadRevision;
-      if (home.category == HOME_DOWNLOADS) {
+      if (home.category == HOME_DOWNLOADS ||
+          (home.category == HOME_LOCAL_PLAYLIST_CONTENTS && home.playlistReturnCategory == HOME_DOWNLOADS)) {
          loadCategory();
          return;
       }
@@ -3626,6 +4075,25 @@ static void updateHome(void)
       joinThread(home.channelLookupTid);
       home.channelLookupActive = 0;
    }
+   if (downloadPlaylistPreparing && downloadPlaylistThreadActive && !downloadPlaylistThreadDone && downloadPlaylistEstimateTotal > 0) {
+      char progress[128];
+      snprintf(progress, sizeof progress, "Estimating download size: %d/%d", downloadPlaylistEstimateProgress, downloadPlaylistEstimateTotal);
+      setLabelText(&downloadPlaylistConfirmTitle, progress);
+   }
+   if (downloadPlaylistPreparing && downloadPlaylistThreadActive && downloadPlaylistThreadDone)
+      finishDownloadPlaylistPreparation();
+   if (home.downloadPlaylistConfirmOpen) {
+      if (downloadPlaylistPreparing) return;
+      if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+         closeDownloadPlaylistConfirmation(0);
+         return;
+      }
+      if (isPadButtonPressed(PAD_BTN_CROSS)) {
+         if (downloadPlaylistPreparedCount >= 0) submitPreparedDownloadPlaylist(0);
+         return;
+      }
+      return;
+   }
    if (home.downloadManagerOpen) { updateDownloadManagement(); return; }
    if (home.accountOpen) { updateAccountPanel(); return; }
    if (home.settingsOpen) { updateSettingsPanel(); return; }
@@ -3640,14 +4108,44 @@ static void updateHome(void)
             if (home.playlistDeleteFromWatchLater == 1) {
                removePlaylistFromWatchLater(home.playlistDeleteId);
                playlistWatchLaterRevisionSeen = getPlaylistWatchLaterRevision();
-               categoryCached[HOME_LOCAL_PLAYLISTS] = 0;
             } else if (home.playlistDeleteFromWatchLater == 2) {
                const char *deleteIds[1] = { home.playlistDeleteId };
-               queueDeleteManagedDownloads(deleteIds, 1);
+               int deleteQueued = queueDeleteManagedDownloads(deleteIds, 1);
+               if (deleteQueued == 0)
+                  removeVideoFromAllDownloadPlaylists(home.playlistDeleteId);
+            } else if (home.playlistDeleteFromWatchLater == 3) {
+               SearchResult item; memset(&item, 0, sizeof item);
+               strCopy(item.videoId, sizeof item.videoId, home.playlistDeleteId);
+               toggleWatchLater(&item);
+               watchLaterRevisionSeen = getWatchLaterRevision();
+               categoryCached[HOME_WATCHLATER] = 0;
+            } else if (home.playlistDeleteFromWatchLater == 4) {
+               removeVideoFromLocalPlaylist(home.localPlaylistId, home.playlistDeleteId);
+               localPlaylistRevisionSeen = getLocalPlaylistRevision();
+            } else if (home.playlistDeleteFromWatchLater == 5) {
+               uint64_t currentBytes = 0;
+               int currentCount = 0;
+               if (getDownloadPlaylistDeleteInfo(home.playlistDeleteId, &currentBytes, &currentCount) < 0) {
+                  setLabelText(&playlistToastLabel, "Could not measure playlist files");
+                  playlistToastShownAt = getTimeUs();
+                  home.playlistDeleteConfirmOpen = 0;
+                  return;
+               }
+               if (currentBytes != home.playlistDeleteBytes || currentCount != home.playlistDeleteVideoCount) {
+                  home.playlistDeleteBytes = currentBytes;
+                  home.playlistDeleteVideoCount = currentCount;
+                  return;
+               }
+               if (deleteDownloadPlaylistAndVideos(home.playlistDeleteId) == 0) {
+                  setLabelText(&playlistToastLabel, "Playlist and its videos deleted");
+                  playlistToastShownAt = getTimeUs();
+               } else {
+                  setLabelText(&playlistToastLabel, "Could not delete download playlist");
+                  playlistToastShownAt = getTimeUs();
+               }
             } else {
                deleteLocalPlaylist(home.playlistDeleteId);
                localPlaylistRevisionSeen = getLocalPlaylistRevision();
-               categoryCached[HOME_LOCAL_PLAYLISTS] = 0;
             }
             loadCategory();
          }
@@ -3676,14 +4174,20 @@ static void updateHome(void)
       if (home.createPlaylistName[0]) {
          int result = -1;
          if (home.playlistNameAction == 2) {
-            result = renameLocalPlaylist(home.playlistNameTargetId, home.createPlaylistName);
+            result = strncmp(home.playlistNameTargetId, "dp", 2) == 0 ?
+               renameDownloadPlaylist(home.playlistNameTargetId, home.createPlaylistName) :
+               renameLocalPlaylist(home.playlistNameTargetId, home.createPlaylistName);
          } else if (home.playlistNameAction == 1) {
             char id[LOCAL_PLAYLIST_ID_LEN];
-            result = createEmptyLocalPlaylist(home.createPlaylistName, id, sizeof id);
+            result = home.category == HOME_DOWNLOADS ?
+               createEmptyDownloadPlaylist(home.createPlaylistName, id, sizeof id) :
+               createEmptyLocalPlaylist(home.createPlaylistName, id, sizeof id);
          }
          if (result == 0) {
-            localPlaylistRevisionSeen = getLocalPlaylistRevision();
-            categoryCached[HOME_LOCAL_PLAYLISTS] = 0;
+            if (home.category != HOME_DOWNLOADS) {
+               localPlaylistRevisionSeen = getLocalPlaylistRevision();
+            } else {
+            }
             loadCategory();
          }
       }
@@ -3699,7 +4203,7 @@ static void updateHome(void)
    if (!isSidebarActive()) {
       if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
          if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS) {
-            switchToCategory(HOME_LOCAL_PLAYLISTS);
+            switchToCategory(home.playlistReturnCategory == HOME_DOWNLOADS ? HOME_DOWNLOADS : HOME_LOCAL_PLAYLISTS);
             return;
          }
          if (home.category == HOME_PLAYLIST_CONTENTS) {
@@ -3785,17 +4289,28 @@ static void updateHome(void)
                       home.category == HOME_LOCAL_PLAYLISTS || home.category == HOME_LOCAL_PLAYLIST_CONTENTS ||
                       home.category == HOME_DOWNLOADS;
    if (homeDownloadHint >= 0) {
-      setButtonHintShown(&hints, homeDownloadHint, !playlistPage || home.category == HOME_DOWNLOADS);
+      const SearchResult *hintItem = gridSelected(&home.grid);
+      int showDownload = !playlistPage || home.category == HOME_DOWNLOADS ||
+                         home.category == HOME_PLAYLIST_CONTENTS || home.category == HOME_LOCAL_PLAYLIST_CONTENTS;
+      if (hintItem && (home.category == HOME_PLAYLISTS || home.category == HOME_LOCAL_PLAYLISTS ||
+                       home.category == HOME_DOWNLOADS)) showDownload = 1;
+      setButtonHintShown(&hints, homeDownloadHint, showDownload);
       setButtonHintCaption(&hints, homeDownloadHint,
-                           home.category == HOME_DOWNLOADS ? "Manage downloads" : "Download");
+                           home.category == HOME_DOWNLOADS ?
+                           (hintItem && hintItem->isPlaylist ? "Download playlist" : "Manage downloads") :
+                           (hintItem && hintItem->isPlaylist ? "Download playlist" : "Download"));
    }
    if (homeSquareHint >= 0) {
       if (home.category == HOME_WATCHLATER)
-         setButtonHintCaption(&hints, homeSquareHint, "Remove / Playlist (hold)");
+         setButtonHintCaption(&hints, homeSquareHint, "Remove (confirm) / Playlist (hold)");
       else if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS)
-         setButtonHintCaption(&hints, homeSquareHint, "Remove");
-      else if (home.category == HOME_DOWNLOADS)
-         setButtonHintCaption(&hints, homeSquareHint, "Delete (hold)");
+         setButtonHintCaption(&hints, homeSquareHint,
+            home.playlistReturnCategory == HOME_DOWNLOADS ? "Add to playlist / Delete (hold)" : "Remove (confirm)");
+      else if (home.category == HOME_DOWNLOADS) {
+         const SearchResult *downloadHintItem = gridSelected(&home.grid);
+         setButtonHintCaption(&hints, homeSquareHint,
+            downloadHintItem && downloadHintItem->isPlaylist ? "Rename / Delete (hold)" : "Add to playlist / Delete (hold)");
+      }
       else if (home.category == HOME_LOCAL_PLAYLISTS)
          setButtonHintCaption(&hints, homeSquareHint,
                               home.localPlaylistTab == 0 ? "Remove (hold)" : "Rename / Delete (hold)");
@@ -3804,9 +4319,14 @@ static void updateHome(void)
       else
          setButtonHintCaption(&hints, homeSquareHint, "Watch Later / Playlist (hold)");
    }
+   if (home.category == HOME_DOWNLOADS && homeSquareHint >= 0) {
+      const SearchResult *squareItem = gridSelected(&home.grid);
+      setButtonHintShown(&hints, homeSquareHint, !squareItem || !squareItem->isPlaylist || squareItem->isLocalPlaylist);
+   }
    if (homeNewPlaylistHint >= 0)
       setButtonHintShown(&hints, homeNewPlaylistHint,
-                         home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 1);
+                         (home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 1) ||
+                         (home.category == HOME_DOWNLOADS && home.downloadCategory != 1));
    if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY &&
        gridStage(&home.grid) == GRID_READY && !home.grid.threadActive) {
       int feed = home.category - HOME_ACCOUNT;
@@ -3817,17 +4337,60 @@ static void updateHome(void)
          return;
       }
    }
-   if (gridStage(&home.grid) != GRID_READY) return;
-   if (homeNewPlaylistHint >= 0) setButtonHintShown(&hints, homeNewPlaylistHint, home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 1);
-   if (home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 1 && isPadButtonPressed(PAD_BTN_L3)) {
-      char defaultName[LOCAL_PLAYLIST_NAME_LEN]; snprintf(defaultName, sizeof defaultName, "Playlist %d", getLocalPlaylistCount() + 1);
+   if (((home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 1) ||
+        (home.category == HOME_DOWNLOADS && home.downloadCategory != 1)) && isPadButtonPressed(PAD_BTN_L3)) {
+      char defaultName[LOCAL_PLAYLIST_NAME_LEN]; snprintf(defaultName, sizeof defaultName, "Playlist %d",
+               (home.category == HOME_DOWNLOADS ? getDownloadPlaylistCount() : getLocalPlaylistCount()) + 1);
       home.playlistNameAction = 1;
       home.playlistNameTargetId[0] = 0;
       oskInputBegin("New playlist", defaultName, onHomePlaylistNameEntered); return;
    }
+   if (gridStage(&home.grid) != GRID_READY) return;
+   if (homeNewPlaylistHint >= 0) setButtonHintShown(&hints, homeNewPlaylistHint,
+      (home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 1) ||
+      (home.category == HOME_DOWNLOADS && home.downloadCategory != 1));
    const SearchResult *selected = gridSelected(&home.grid);
    if (!selected) return;
-   if (home.category == HOME_DOWNLOADS && selected->isLocalDownload) {
+   if (home.category == HOME_DOWNLOADS && selected->isPlaylist && selected->isLocalPlaylist) {
+      if (squarePressedAt) {
+         if (isPadButtonDown(PAD_BTN_SQUARE) && getTimeUs() - squarePressedAt >= SQUARE_HOLD_US) {
+            squarePressedAt = 0;
+            strCopy(home.playlistDeleteId, sizeof home.playlistDeleteId, selected->localPlaylistId);
+            home.playlistDeleteFromWatchLater = 5;
+            if (getDownloadPlaylistDeleteInfo(home.playlistDeleteId, &home.playlistDeleteBytes,
+                                              &home.playlistDeleteVideoCount) < 0) {
+               setLabelText(&playlistToastLabel, "Could not measure playlist files");
+               playlistToastShownAt = getTimeUs();
+               return;
+            }
+            home.playlistDeleteConfirmOpen = 1;
+            home.playlistDeleteConfirmSelected = 1;
+            exitConfirmNavigateRepeat.timer = exitConfirmNavigateRepeat.repeats = 0;
+            return;
+         }
+         if (isPadButtonReleased(PAD_BTN_SQUARE)) {
+            squarePressedAt = 0;
+            home.playlistNameAction = 2;
+            strCopy(home.playlistNameTargetId, sizeof home.playlistNameTargetId, selected->localPlaylistId);
+            oskInputBegin("Rename download playlist", selected->title, onHomePlaylistNameEntered);
+            return;
+         }
+         return;
+      }
+      if (isPadButtonPressed(PAD_BTN_SQUARE)) { squarePressedAt = getTimeUs(); return; }
+      if (isPadButtonPressed(PAD_BTN_CROSS)) {
+         home.playlistReturnToSearch = 0;
+         home.playlistReturnLocal = 0;
+         home.playlistReturnCategory = HOME_DOWNLOADS;
+         strCopy(home.localPlaylistId, sizeof home.localPlaylistId, selected->localPlaylistId);
+         strCopy(home.playlistTitle, sizeof home.playlistTitle, selected->title);
+         switchToCategory(HOME_LOCAL_PLAYLIST_CONTENTS);
+         return;
+      }
+      return;
+   }
+   if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS && home.playlistReturnCategory == HOME_DOWNLOADS &&
+       selected->isLocalDownload) {
       if (squarePressedAt) {
          if (isPadButtonDown(PAD_BTN_SQUARE) && getTimeUs() - squarePressedAt >= SQUARE_HOLD_US) {
             squarePressedAt = 0;
@@ -3838,10 +4401,37 @@ static void updateHome(void)
             exitConfirmNavigateRepeat.timer = exitConfirmNavigateRepeat.repeats = 0;
             return;
          }
-         if (isPadButtonReleased(PAD_BTN_SQUARE)) squarePressedAt = 0;
+         if (isPadButtonReleased(PAD_BTN_SQUARE)) {
+            squarePressedAt = 0;
+            removeVideoFromDownloadPlaylist(home.localPlaylistId, selected->videoId);
+            loadCategory();
+            return;
+         }
          return;
       }
       if (isPadButtonPressed(PAD_BTN_SQUARE)) { squarePressedAt = getTimeUs(); return; }
+   }
+   if ((home.category == HOME_DOWNLOADS ||
+        (home.category == HOME_LOCAL_PLAYLIST_CONTENTS && home.playlistReturnCategory == HOME_DOWNLOADS)) &&
+       selected->isLocalDownload) {
+      if (home.category == HOME_DOWNLOADS && squarePressedAt) {
+         if (isPadButtonDown(PAD_BTN_SQUARE) && getTimeUs() - squarePressedAt >= SQUARE_HOLD_US) {
+            squarePressedAt = 0;
+            strCopy(home.playlistDeleteId, sizeof home.playlistDeleteId, selected->videoId);
+            home.playlistDeleteFromWatchLater = 2;
+            home.playlistDeleteConfirmOpen = 1;
+            home.playlistDeleteConfirmSelected = 1;
+            exitConfirmNavigateRepeat.timer = exitConfirmNavigateRepeat.repeats = 0;
+            return;
+         }
+         if (isPadButtonReleased(PAD_BTN_SQUARE)) {
+            squarePressedAt = 0;
+            openDownloadPlaylistPicker(selected);
+            return;
+         }
+         return;
+      }
+      if (home.category == HOME_DOWNLOADS && isPadButtonPressed(PAD_BTN_SQUARE)) { squarePressedAt = getTimeUs(); return; }
       if (isPadButtonPressed(PAD_BTN_CROSS)) {
          char path[MAX_PATH_LEN];
          if (getDownloadedVideoPath(selected->videoId, path, sizeof path) == 0) {
@@ -3868,16 +4458,26 @@ static void updateHome(void)
       return;
    }
    if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS && isPadButtonPressed(PAD_BTN_SQUARE) && selected->videoId[0]) {
-      removeVideoFromLocalPlaylist(home.localPlaylistId, selected->videoId);
-      localPlaylistRevisionSeen = getLocalPlaylistRevision(); categoryCached[HOME_LOCAL_PLAYLISTS] = 0; loadCategory(); return;
+      if (home.playlistReturnCategory == HOME_DOWNLOADS) {
+         removeVideoFromDownloadPlaylist(home.localPlaylistId, selected->videoId);
+      } else {
+         strCopy(home.playlistDeleteId, sizeof home.playlistDeleteId, selected->videoId);
+         home.playlistDeleteFromWatchLater = 4;
+         home.playlistDeleteConfirmOpen = 1;
+         home.playlistDeleteConfirmSelected = 1;
+         exitConfirmNavigateRepeat.timer = exitConfirmNavigateRepeat.repeats = 0;
+         return;
+      }
+      loadCategory(); return;
    }
    if (home.category == HOME_PLAYLISTS) {
-      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 0);
+      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 1);
       if (homeSquareHint >= 0) {
          setButtonHintCaption(&hints, homeSquareHint, "Save playlist");
          setButtonHintShown(&hints, homeSquareHint, 1);
       }
       if (handleHomeSquareAction(selected)) return;
+      if (isPadButtonPressed(PAD_BTN_R3) && selected->isPlaylist) { openDownloadPlaylistConfirmation(selected); return; }
       if (isPadButtonPressed(PAD_BTN_CROSS) && selected->isPlaylist && selected->playlistId[0]) {
          strCopy(home.playlistId, sizeof home.playlistId, selected->playlistId);
          strCopy(home.playlistTitle, sizeof home.playlistTitle, selected->title);
@@ -3886,12 +4486,13 @@ static void updateHome(void)
       return;
    }
    if (home.category == HOME_LOCAL_PLAYLISTS) {
-      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 0);
+      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, selected->isPlaylist);
       if (homeSquareHint >= 0) {
          setButtonHintCaption(&hints, homeSquareHint,
                               home.localPlaylistTab == 0 ? "Remove (hold)" : "Rename / Delete (hold)");
          setButtonHintShown(&hints, homeSquareHint, 1);
       }
+      if (isPadButtonPressed(PAD_BTN_R3) && selected->isPlaylist) { openDownloadPlaylistConfirmation(selected); return; }
       if ((home.localPlaylistTab == 0 && selected->isPlaylist && selected->playlistId[0]) ||
           (home.localPlaylistTab == 1 && selected->isLocalPlaylist && selected->localPlaylistId[0])) {
          if (squarePressedAt) {
@@ -3931,6 +4532,7 @@ static void updateHome(void)
          } else if (home.localPlaylistTab == 1 && selected->isLocalPlaylist && selected->localPlaylistId[0]) {
             home.playlistReturnToSearch = 0;
             home.playlistReturnLocal = 0;
+            home.playlistReturnCategory = HOME_LOCAL_PLAYLISTS;
             strCopy(home.localPlaylistId, sizeof home.localPlaylistId, selected->localPlaylistId);
             strCopy(home.playlistTitle, sizeof home.playlistTitle, selected->title);
             switchToCategory(HOME_LOCAL_PLAYLIST_CONTENTS);
@@ -3939,14 +4541,19 @@ static void updateHome(void)
       return;
    }
    if (home.category == HOME_WATCHLATER || home.category == HOME_LOCAL_PLAYLIST_CONTENTS) {
-      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 0);
+      if (homeDownloadHint >= 0)
+         setButtonHintShown(&hints, homeDownloadHint,
+                            home.category == HOME_WATCHLATER ||
+                            (home.category == HOME_LOCAL_PLAYLIST_CONTENTS &&
+                             home.playlistReturnCategory != HOME_DOWNLOADS));
       if (homeSquareHint >= 0) {
          setButtonHintCaption(&hints, homeSquareHint,
-                              home.category == HOME_WATCHLATER ? "Remove / Playlist (hold)" : "Remove");
+                              home.category == HOME_WATCHLATER ? "Remove / Playlist (hold)" :
+                              (home.playlistReturnCategory == HOME_DOWNLOADS ? "Remove / Delete (hold)" : "Remove"));
          setButtonHintShown(&hints, homeSquareHint, 1);
       }
    } else if (home.category == HOME_PLAYLIST_CONTENTS) {
-      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 0);
+      if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 1);
       if (homeSquareHint >= 0) setButtonHintShown(&hints, homeSquareHint, 0);
    } else if (homeSquareHint >= 0) {
       if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 1);
@@ -3954,8 +4561,15 @@ static void updateHome(void)
       setButtonHintShown(&hints, homeSquareHint, 1);
    }
    if (handleHomeSquareAction(selected)) return;
-   if (home.category != HOME_PLAYLIST_CONTENTS && home.category != HOME_LOCAL_PLAYLIST_CONTENTS &&
-       isPadButtonPressed(PAD_BTN_R3)) { if (!selected->isLive) enqueueDownload(selected); return; }
+   if (isPadButtonPressed(PAD_BTN_R3)) {
+      if (selected->isPlaylist) openDownloadPlaylistConfirmation(selected);
+      else if (!selected->isLive && selected->videoId[0]) {
+         char downloadedPath[MAX_PATH_LEN];
+         if (getDownloadedVideoPath(selected->videoId, downloadedPath, sizeof downloadedPath) != 0)
+            enqueueDownload(selected);
+      }
+      return;
+   }
    // Recommended tiles don't say which channel they are from
    if (!home.channelLookupActive && isPadButtonPressed(PAD_BTN_TRIANGLE)) {
       logInfo("[diag-triangle] home page=%d selected=%d videoId=%s channelIdLen=%d authorLen=%d\n",
@@ -4044,11 +4658,11 @@ static void drawDownloadManagement(void)
 
    int panelW = getDownloadManagerPanelWidth();
    int panelH = home.screenH - 32;
-   if (panelH > 430) panelH = 430;
+   if (panelH > 500) panelH = 500;
    if (panelH < 360) panelH = home.screenH - 16;
-   int rowH = (panelH - 174) / DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS;
+   int rowH = (panelH - 202) / DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS;
    if (rowH < 30) rowH = 30;
-   int listTop = 112;
+   int listTop = 132;
    int listH = rowH * DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS;
    int x = (home.screenW - panelW) / 2;
    int y = (home.screenH - panelH) / 2;
@@ -4063,20 +4677,20 @@ static void drawDownloadManagement(void)
    static const char *categoryNames[3] = { "Ongoing", "Completed", "Failed" };
    int tabGap = 8;
    int tabW = (panelW - 48 - tabGap * 2) / 3;
-   int tabY = y + 52;
+   int tabY = y + 66;
    for (int i = 0; i < 3; i++) {
       int tabX = x + 24 + i * (tabW + tabGap);
       int selected = i == home.downloadManagerCategory;
       char tabText[48];
       snprintf(tabText, sizeof tabText, "%s (%d)", categoryNames[i], counts[i]);
-      fillGfxRoundedRectangleFixed(tabX, tabY, tabW, 34, 7,
+      fillGfxRoundedRectangleFixed(tabX, tabY, tabW, 42, 7,
                                    selected ? activeTheme->accent : activeTheme->surface);
       setLabelText(&downloadManagerRows[i], tabText);
       setLabelColor(&downloadManagerRows[i], selected ? activeTheme->appBg : activeTheme->textSecondary);
       refreshLabelScale(&downloadManagerRows[i]);
       moveLabel(&downloadManagerRows[i],
                 tabX + (tabW - downloadManagerRows[i].tt.tex.w) / 2,
-                getCenteredLabelY(&downloadManagerRows[i], tabY, 34));
+                getCenteredLabelY(&downloadManagerRows[i], tabY, 42));
       drawLabel(&downloadManagerRows[i]);
    }
 
@@ -4097,7 +4711,7 @@ static void drawDownloadManagement(void)
          } else if (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING) {
             strCopy(status, sizeof status, "Queued");
          } else if (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_COMPLETED) {
-            strCopy(status, sizeof status, "Downloaded");
+            status[0] = 0;
          } else {
             strCopy(status, sizeof status, "Failed");
          }
@@ -4126,9 +4740,14 @@ static void drawDownloadManagement(void)
          int titleX = x + 52;
          int titleY = getCenteredLabelY(&downloadManagerRows[row + 3], rowY, rowH);
          int statusX = x + panelW - 34 - downloadManagerStatuses[row].tt.tex.w;
-         drawLabelAt(&downloadManagerRows[row + 3], titleX, titleY);
-         drawLabelAt(&downloadManagerStatuses[row], statusX,
-                     getCenteredLabelY(&downloadManagerStatuses[row], rowY, rowH));
+         if (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_COMPLETED) {
+            drawLabelAt(&downloadManagerRows[row + 3], titleX,
+                        getCenteredLabelY(&downloadManagerRows[row + 3], rowY, rowH));
+         } else {
+            drawLabelAt(&downloadManagerRows[row + 3], titleX, titleY);
+            drawLabelAt(&downloadManagerStatuses[row], statusX,
+                        getCenteredLabelY(&downloadManagerStatuses[row], rowY, rowH));
+         }
       } else {
          setLabelText(&downloadManagerRows[row + 3], "");
          setLabelText(&downloadManagerStatuses[row], "");
@@ -4248,12 +4867,28 @@ static void drawHome(void)
    if (home.category < TREND_COUNT) drawTrendingTabs();
    else if (home.category == HOME_LIVE) drawLiveTabs();
    else if (home.category == HOME_LOCAL_PLAYLISTS) drawLocalPlaylistTabs();
+   else if (home.category == HOME_DOWNLOADS) drawDownloadCategoryTabs();
    if (homeSupportsSort() || homeSupportsPlaylistSort()) drawHomeSortPills();
    drawPlaylistShuffleBadge();
    if (home.category == HOME_DOWNLOADS) drawDownloadSpaceStatus();
    drawButtonHintsFitted(&hints, home.screenW, homeFooterBottomY, HINT_ROW_GAP, MAX_HINT_ROWS);
    if (!home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen) drawSidebar();
    drawDownloadOverlay(home.screenW);
+   if (home.downloadPlaylistConfirmOpen) {
+      int panelW = home.screenW * 90 / 100;
+      if (panelW > 1200) panelW = 1200;
+      int panelH = (int)(260 * home.uiScale);
+      int x = (home.screenW - panelW) / 2, y = (home.screenH - panelH) / 2;
+      fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+      fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+      fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+      refreshLabelScale(&downloadPlaylistConfirmTitle);
+      refreshLabelScale(&downloadPlaylistConfirmFooter);
+      moveLabel(&downloadPlaylistConfirmTitle, x + 28, y + (int)(48 * home.uiScale));
+      moveLabel(&downloadPlaylistConfirmFooter, x + 28, y + panelH - (int)(58 * home.uiScale));
+      drawLabel(&downloadPlaylistConfirmTitle);
+      drawLabel(&downloadPlaylistConfirmFooter);
+   }
    if (home.accountOpen) drawAccountPanel();
    if (home.settingsOpen) {
       if (updateSettingsOpen) drawUpdateSettingsPanel();
@@ -4280,11 +4915,25 @@ static void drawHome(void)
       drawLabelAt(&playlistToastLabel, toastX, toastY);
    }
    if (home.playlistDeleteConfirmOpen) {
-      setLabelText(&exitConfirmTitle, home.playlistDeleteFromWatchLater == 1 ? "Remove playlist" :
-                   home.playlistDeleteFromWatchLater == 2 ? "Delete download" : "Delete playlist");
-      setLabelText(&exitConfirmMessage, home.playlistDeleteFromWatchLater == 1 ? "Remove this playlist from Watch Later?" :
-                   home.playlistDeleteFromWatchLater == 2 ? "Delete this downloaded video from the HDD?" :
-                   "Delete this playlist and its videos?");
+      setLabelText(&exitConfirmTitle,
+                   home.playlistDeleteFromWatchLater == 1 ? "Remove playlist" :
+                   home.playlistDeleteFromWatchLater == 2 ? "Delete download" :
+                   (home.playlistDeleteFromWatchLater == 3 || home.playlistDeleteFromWatchLater == 4) ? "Remove video" :
+                   home.playlistDeleteFromWatchLater == 5 ? "Delete download playlist" : "Delete playlist");
+      char deleteMessage[192];
+      if (home.playlistDeleteFromWatchLater == 5) {
+         char freed[48]; formatDownloadSpace(home.playlistDeleteBytes, freed, sizeof freed);
+         snprintf(deleteMessage, sizeof deleteMessage, "Delete playlist and %d videos? Frees %s",
+                  home.playlistDeleteVideoCount, freed);
+      } else {
+         strCopy(deleteMessage, sizeof deleteMessage,
+                 home.playlistDeleteFromWatchLater == 1 ? "Remove this playlist from Watch Later?" :
+                 home.playlistDeleteFromWatchLater == 2 ? "Delete this downloaded video from the HDD?" :
+                 home.playlistDeleteFromWatchLater == 3 ? "Remove this video from Watch Later?" :
+                 home.playlistDeleteFromWatchLater == 4 ? "Remove this video from this PS3 playlist?" :
+                 "Delete this playlist and its videos?");
+      }
+      setLabelText(&exitConfirmMessage, deleteMessage);
       setLabelText(&exitConfirmChoices[0], "Yes"); setLabelText(&exitConfirmChoices[1], "No");
       int saved = home.exitConfirmSelected; home.exitConfirmSelected = home.playlistDeleteConfirmSelected;
       drawExitConfirmation(); home.playlistDeleteConfirmSelected = home.exitConfirmSelected; home.exitConfirmSelected = saved;
@@ -4381,7 +5030,8 @@ static void resumeHome(void)
        getPlaylistWatchLaterRevision() != playlistWatchLaterRevisionSeen) {
       localPlaylistRevisionSeen = getLocalPlaylistRevision();
       playlistWatchLaterRevisionSeen = getPlaylistWatchLaterRevision();
-      if (home.category == HOME_LOCAL_PLAYLISTS || home.category == HOME_LOCAL_PLAYLIST_CONTENTS) {
+      if (home.category == HOME_LOCAL_PLAYLISTS || home.category == HOME_LOCAL_PLAYLIST_CONTENTS ||
+          home.category == HOME_DOWNLOADS) {
          loadCategory();
          return;
       }
@@ -4395,6 +5045,9 @@ static void resumeHome(void)
 
 static void termHome(void)
 {
+   if (downloadPlaylistThreadActive) { joinThread(downloadPlaylistThread); downloadPlaylistThreadActive = 0; }
+   free(downloadPlaylistResults);
+   downloadPlaylistResults = NULL;
    if (home.channelLookupActive) {
       cancelHttpRequestGroup(&home.channelLookupGroup);
       joinThread(home.channelLookupTid);
@@ -4412,6 +5065,9 @@ static void termHome(void)
    freeLabel(&playlistErrorLabel);
    freeLabel(&playlistToastLabel);
    freeLabel(&downloadManagerTitle);
+   freeLabel(&downloadPlaylistConfirmTitle);
+   freeLabel(&downloadPlaylistConfirmFooter);
+   for (int i = 0; i < 3; i++) freeLabel(&downloadCategoryLabels[i]);
    for (int i = 0; i < 10; i++) freeLabel(&downloadManagerRows[i]);
    for (int i = 0; i < 7; i++) freeLabel(&downloadManagerStatuses[i]);
    freeLabel(&downloadManagerFooter);

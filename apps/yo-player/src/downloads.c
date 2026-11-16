@@ -8,6 +8,7 @@
 #include "demux.h"              // VideoDemuxer + readVideoAu / readAudioAu
 #include "extractor.h"
 #include "settings.h"
+#include "storage.h"
 #include "subtitles.h"
 #include "chapters.h"
 #include "video-export.h"   // hand the finished file to the xmb
@@ -28,10 +29,12 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#define MAX_QUEUE          16
+#define MAX_QUEUE          2048
 #define OVERLAY_TEXT_SIZE  23
 #define DOWNLOAD_TOAST_US  1000000ULL
 #define DOWNLOAD_LIBRARY_DIR CRTUBE_DATA_DIR "/downloads"
+#define DOWNLOAD_PLAYLISTS_DIR CRTUBE_DATA_DIR "/downloads/playlists"
+#define DOWNLOAD_PLAYLIST_INDEX_PATH DOWNLOAD_PLAYLISTS_DIR "/index.txt"
 #define DOWNLOAD_THUMB_CAP (96 * 1024)       // matches the grid's Watch Later / duration badge
 
 typedef struct {
@@ -828,22 +831,175 @@ static void formatEstimatedSpace(uint64_t bytes, char *out, int capacity)
    }
 }
 
+static uint64_t estimateFormatBytes(const StreamFormat *format, int durationSeconds)
+{
+   if (!format || durationSeconds <= 0) return 0;
+   if (format->contentLength > 0) return format->contentLength;
+   if (format->bitrate <= 0) return 0;
+   return (uint64_t)format->bitrate * (uint64_t)durationSeconds / 8ULL;
+}
+
 static uint64_t estimateDownloadBytes(const StreamFormat *video, const StreamFormat *audio, int durationSeconds)
 {
    if (!video || durationSeconds <= 0) return 0;
-   int height = video->height > 0 ? video->height : 720;
-   uint64_t videoKbps;
-   if (height <= 240) videoKbps = 350;
-   else if (height <= 360) videoKbps = 650;
-   else if (height <= 480) videoKbps = 1100;
-   else if (height <= 720) videoKbps = 2600;
-   else if (height <= 1080) videoKbps = 5200;
-   else if (height <= 1440) videoKbps = 9000;
-   else videoKbps = 18000;
-   if (video->fps > 30) videoKbps = videoKbps * 5 / 4;
-   uint64_t audioKbps = audio ? 192 : (video->hasAudio ? 192 : 0);
-   uint64_t bytes = (uint64_t)durationSeconds * (videoKbps + audioKbps) * 1000ULL / 8ULL;
-   return bytes + bytes / 5 + 2ULL * 1024ULL * 1024ULL; // 20% headroom + MP4/sidecars
+   uint64_t videoBytes = estimateFormatBytes(video, durationSeconds);
+   uint64_t audioBytes = audio ? estimateFormatBytes(audio, durationSeconds) : 0;
+   if (!videoBytes || (audio && !audioBytes)) return 0;
+   uint64_t total = videoBytes + audioBytes;
+   // A muxed format's bitrate already includes audio. Add a separate audio
+   // stream only when the selected video format is video-only.
+   return total + total / 100ULL;
+}
+
+int estimateDownloadSizeForVideo(const SearchResult *item, uint64_t *bytesOut)
+{
+   if (bytesOut) *bytesOut = 0;
+   if (!item || !item->videoId[0] || !bytesOut) return -1;
+   StreamInfo *info = (StreamInfo *)calloc(1, sizeof *info);
+   const Extractor *extractor = findExtractor(item->videoId);
+   if (!info || !extractor || extractor->extract(item->videoId, info) != 0 ||
+       info->formatCount <= 0 || info->durationSeconds <= 0 || info->isLive) {
+      free(info);
+      return -1;
+   }
+   int maxHeight = 0;
+   switch (getDownloadResolution()) {
+      case DOWNLOAD_RESOLUTION_480P: maxHeight = 480; break;
+      case DOWNLOAD_RESOLUTION_720P: maxHeight = 720; break;
+      case DOWNLOAD_RESOLUTION_1080P: maxHeight = 1080; break;
+      default: break;
+   }
+   const char *language = getDownloadAudioLanguage();
+   int preferSeparateAudio = language && strcmp(language, "original") != 0;
+   const StreamFormat *video = pickDownloadVideo(info, maxHeight, preferSeparateAudio);
+   const StreamFormat *audio = NULL;
+   if (video && !video->hasAudio) {
+      audio = pickDownloadAudio(info, language, getDownloadAutoDubEnabled());
+      if (!audio && preferSeparateAudio) audio = pickDownloadAudio(info, "original", 0);
+      if (!audio) video = pickDownloadMuxedVideo(info, maxHeight);
+   }
+   uint64_t estimate = video ? estimateDownloadBytes(video, audio, info->durationSeconds) : 0;
+   free(info);
+   if (!estimate) return -1;
+   *bytesOut = estimate;
+   return 0;
+}
+
+static int buildDownloadPlaylistDeletePlan(const char *playlistId,
+                                            char ids[][16], int capacity,
+                                            uint64_t *bytesOut, int *videoCountOut)
+{
+   if (bytesOut) *bytesOut = 0;
+   if (videoCountOut) *videoCountOut = 0;
+   if (!playlistId || !playlistId[0] || !ids || capacity <= 0) return -1;
+   SearchResults *videos = (SearchResults *)malloc(sizeof *videos);
+   if (!videos) return -1;
+   int count = getDownloadPlaylistVideos(playlistId, videos);
+   if (count < 0) { free(videos); return -1; }
+   if (markOtherDownloadPlaylistMembership(videos, playlistId) < 0) {
+      free(videos);
+      return -1;
+   }
+   int idCount = 0;
+   for (int i = 0; i < videos->count && idCount < capacity; i++) {
+      const char *id = videos->items[i].videoId;
+      if (!id[0] || videos->items[i].isDownloadPlaylistVideo) continue;
+      int duplicate = 0;
+      for (int j = 0; j < idCount; j++) if (!strcmp(ids[j], id)) { duplicate = 1; break; }
+      if (!duplicate) strCopy(ids[idCount++], 16, id);
+   }
+   free(videos);
+
+   uint64_t total = 0;
+   if (idCount > 0) {
+      VfsDir dir;
+      makeDir(DOWNLOAD_LIBRARY_DIR);
+      if (openDir(DOWNLOAD_LIBRARY_DIR, &dir) != 0) return -1;
+      char name[256], path[MAX_PATH_LEN];
+      VfsEntryType type;
+      int readResult, statFailed = 0;
+      while ((readResult = readDir(&dir, name, sizeof name, &type)) > 0) {
+         if (type != VFS_ENTRY_FILE) continue;
+         for (int i = 0; i < idCount; i++) {
+            size_t idLength = strlen(ids[i]);
+            if (strncmp(name, ids[i], idLength) != 0 || name[idLength] != '.') continue;
+            snprintf(path, sizeof path, "%s/%s", DOWNLOAD_LIBRARY_DIR, name);
+            VfsStat stat;
+            if (statPath(path, &stat) == 0 && !stat.isDir) total += stat.size;
+            else statFailed = 1;
+            break;
+         }
+      }
+      closeDir(&dir);
+      if (readResult < 0 || statFailed) return -1;
+      const char *staging = getVideoStagingDir();
+      if (staging && strcmp(staging, DOWNLOAD_LIBRARY_DIR) != 0) {
+         for (int i = 0; i < idCount; i++) {
+            snprintf(path, sizeof path, "%s/%s.mp4", staging, ids[i]);
+            VfsStat stat;
+            if (fileExists(path)) {
+               if (statPath(path, &stat) == 0 && !stat.isDir) total += stat.size;
+               else return -1;
+            }
+         }
+      }
+   }
+   // Include the playlist's own serialized list and the exact index row that
+   // saveDownloadPlaylistIndex removes. The video artifact scan above mirrors
+   // removeDownloadArtifacts(), including sidecars and partial files.
+   char metadataPath[MAX_PATH_LEN];
+   snprintf(metadataPath, sizeof metadataPath, "%s/%s.txt", DOWNLOAD_PLAYLISTS_DIR, playlistId);
+   VfsStat metadataStat;
+   if (statPath(metadataPath, &metadataStat) == 0 && !metadataStat.isDir) total += metadataStat.size;
+   else if (fileExists(metadataPath)) return -1;
+   char indexBuffer[16384];
+   int indexLength = readFile(DOWNLOAD_PLAYLIST_INDEX_PATH, indexBuffer, sizeof indexBuffer - 1);
+   if (indexLength < 0 && fileExists(DOWNLOAD_PLAYLIST_INDEX_PATH)) return -1;
+   if (indexLength > 0) {
+      indexBuffer[indexLength] = 0;
+      size_t idLength = strlen(playlistId);
+      char *line = indexBuffer;
+      while (*line) {
+         char *lineEnd = strchr(line, '\n');
+         size_t lineLength = lineEnd ? (size_t)(lineEnd - line) + 1 : strlen(line);
+         if (strncmp(line, playlistId, idLength) == 0 && line[idLength] == '\t') {
+            total += lineLength;
+            break;
+         }
+         if (!lineEnd) break;
+         line = lineEnd + 1;
+      }
+   }
+   if (bytesOut) *bytesOut = total;
+   if (videoCountOut) *videoCountOut = idCount;
+   return idCount;
+}
+
+int getDownloadPlaylistDeleteInfo(const char *playlistId, uint64_t *bytesOut, int *videoCountOut)
+{
+   char (*ids)[16] = (char (*)[16])malloc(sizeof(char[16]) * DOWNLOAD_MANAGEMENT_MAX_ITEMS);
+   if (!ids) return -1;
+   int count = buildDownloadPlaylistDeletePlan(playlistId, ids, DOWNLOAD_MANAGEMENT_MAX_ITEMS,
+                                               bytesOut, videoCountOut);
+   free(ids);
+   return count;
+}
+
+int deleteDownloadPlaylistAndVideos(const char *playlistId)
+{
+   char (*ids)[16] = (char (*)[16])malloc(sizeof(char[16]) * DOWNLOAD_MANAGEMENT_MAX_ITEMS);
+   if (!ids) return -1;
+   int count = buildDownloadPlaylistDeletePlan(playlistId, ids, DOWNLOAD_MANAGEMENT_MAX_ITEMS, NULL, NULL);
+   if (count < 0) { free(ids); return -1; }
+   const char **queue = (const char **)malloc(sizeof(char *) * (size_t)(count ? count : 1));
+   if (!queue) { free(ids); return -1; }
+   for (int i = 0; i < count; i++) queue[i] = ids[i];
+   int queued = count > 0 ? queueDeleteManagedDownloads(queue, count) : 0;
+   free(queue);
+   if (count > 0 && queued != 0) { free(ids); return -1; }
+   int result = deleteDownloadPlaylist(playlistId);
+   free(ids);
+   return result;
 }
 
 static int confirmDownloadSpace(uint64_t estimate)
@@ -1201,7 +1357,7 @@ int queueDeleteManagedDownloads(const char *ids[], int count)
    if (!ids || count <= 0 || !dl.initialized) return -1;
    if (count > DOWNLOAD_MANAGEMENT_MAX_ITEMS) count = DOWNLOAD_MANAGEMENT_MAX_ITEMS;
    lock(&manager.mutex);
-   if (manager.deleteCount > 0) {
+   if (manager.deleteCount > 0 || manager.deletingCount > 0) {
       unlock(&manager.mutex);
       return -1;
    }
@@ -1351,6 +1507,42 @@ void enqueueDownload(const SearchResult *item)
    enqueueDownloadItem(item, NULL, NULL, 0, 0);
 }
 
+int enqueueDownloadBatch(const SearchResult *items, int count)
+{
+   if (!dl.initialized || !items || count <= 0) return 0;
+   int spawn = 0, added = 0, full = 0;
+   lock(&dl.mutex);
+   for (int n = 0; n < count && !dl.cancelAll; n++) {
+      const SearchResult *item = &items[n];
+      if (!item->videoId[0]) continue;
+      int duplicate = dl.active && strcmp(dl.activeId, item->videoId) == 0;
+      for (int i = 0; i < dl.count && !duplicate; i++)
+         if (strcmp(dl.queue[i].videoId, item->videoId) == 0) duplicate = 1;
+      if (duplicate || downloadIdDeleteReserved(item->videoId)) continue;
+      if (dl.count >= MAX_QUEUE) { full = 1; break; }
+      QueueItem *queued = &dl.queue[dl.count++];
+      memset(queued, 0, sizeof *queued);
+      strCopy(queued->videoId, sizeof queued->videoId, item->videoId);
+      strCopy(queued->title, sizeof queued->title, item->title);
+      added++;
+   }
+   if (added && !dl.workerSpawned) { dl.workerSpawned = 1; spawn = 1; }
+   unlock(&dl.mutex);
+
+   if (added) {
+      logInfo("[dl] queued playlist batch: %d item(s)%s\n", added, full ? " (queue reached capacity)" : "");
+   } else if (full) {
+      logWarn("[dl] playlist batch skipped: queue full\n");
+   }
+   if (spawn && spawnJoinableThread(&dl.worker, downloadWorker, 0, THREAD_PRIORITY_LOW,
+                                    THREAD_STACK_SIZE_64KB, "yt-dl") != 0) {
+      lock(&dl.mutex); dl.workerSpawned = 0; unlock(&dl.mutex);
+      logError("[dl] worker spawn failed for playlist batch\n");
+      return -1;
+   }
+   return full && !added ? -2 : added;
+}
+
 void enqueuePlaybackDownload(const SearchResult *item, const char *audioTrackId,
                              const char *activeSubtitleLanguage)
 {
@@ -1444,34 +1636,50 @@ void drawDownloadOverlay(int screenWidth)
    static int cachedPercent = -1;
    static int cachedQueue = -1;
    static int cachedWidth = -1;
+   static int cachedAvailable = -1;
+   static float cachedUiScale = -1.0f;
 
    if (!dl.initialized) return;
    if (dl.active && isSidebarFullyOpen()) {
       int left = getSidebarPanelRightEdge() + 12;
       int right = screenWidth - 12;
       int available = right - left;
-      if (available >= 100) {
+      float baseScale = getGfxUiScaleFactor();
+      if (baseScale < 1.0f) baseScale = 1.0f;
+      if (available >= 52) {
          int changed = cachedPercent != dl.percent || cachedQueue != dl.count ||
-                       cachedWidth != screenWidth || strcmp(cachedTitle, dl.activeTitle) != 0;
+                       cachedWidth != screenWidth || cachedAvailable != available ||
+                       cachedUiScale != baseScale || strcmp(cachedTitle, dl.activeTitle) != 0;
          if (changed) {
             char clipped[sizeof dl.activeTitle];
             char text[128];
-            int queued = dl.count;
-            int low = 1, high = 64, best = 0;
-            while (low <= high) {
-               int chars = (low + high) / 2;
-               int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, chars);
-               if (queued > 0)
-                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
-               else
-                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
-               setLabelText(&overlayLabel, text);
-               if (overlayLabel.tt.tex.w + 12 <= available) { best = chars; low = chars + 1; }
-               else high = chars - 1;
+            int queued = dl.count, bestChars = 0, fitted = 0;
+            // Keep the notification at the same top-right anchor; shrink its
+            // font before shortening the title. No browse/navigation geometry moves.
+            for (float factor = 1.0f; factor >= 0.50f; factor -= 0.05f) {
+               setLabelFixedRenderScale(&overlayLabel, baseScale * factor, 0);
+               int low = 1, high = 64, charsBest = 0;
+               while (low <= high) {
+                  int chars = (low + high) / 2;
+                  int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, chars);
+                  if (queued > 0)
+                     snprintf(text, sizeof text, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
+                  else
+                     snprintf(text, sizeof text, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
+                  setLabelText(&overlayLabel, text);
+                  if (overlayLabel.tt.tex.w + 12 <= available) { charsBest = chars; low = chars + 1; }
+                  else high = chars - 1;
+               }
+               if (charsBest > 0) { fitted = 1; bestChars = charsBest; break; }
             }
-            if (best == 0) setLabelText(&overlayLabel, "Downloading...");
-            else {
-               int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, best);
+            if (!fitted) {
+               setLabelFixedRenderScale(&overlayLabel, baseScale * 0.50f, 0);
+               char compact[32];
+               snprintf(compact, sizeof compact, "DL %d%%", dl.percent);
+               setLabelText(&overlayLabel, compact);
+               if (overlayLabel.tt.tex.w + 12 > available) setLabelText(&overlayLabel, "DL");
+            } else {
+               int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, bestChars);
                if (queued > 0)
                   snprintf(text, sizeof text, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
                else
@@ -1482,14 +1690,16 @@ void drawDownloadOverlay(int screenWidth)
             cachedPercent = dl.percent;
             cachedQueue = dl.count;
             cachedWidth = screenWidth;
+            cachedAvailable = available;
+            cachedUiScale = baseScale;
          }
          if (overlayLabel.tt.tex.w > 0) {
             setLabelColor(&overlayLabel, downloadsThemeIsDark() ? 0xFFFFFFFF : 0xFF000000);
             int badgeW = overlayLabel.tt.tex.w + 12;
             int badgeH = overlayLabel.tt.tex.h + 8;
             int x = right - badgeW;
-            fillGfxRectangle(x, 12, badgeW, badgeH, activeTheme->badgeFill);
-            drawLabelAt(&overlayLabel, x + 6, 16);
+            fillGfxRectangle(x, 6, badgeW, badgeH, activeTheme->badgeFill);
+            drawLabelAt(&overlayLabel, x + 6, 10);
          }
       }
    }
@@ -1844,10 +2054,14 @@ static void managerWorker(uint64_t arg)
 
       for (int i = 0; i < deleteCount && !manager.stop; i++) {
          if (reserveDownloadDelete(deleteIds[i])) {
-            if (!downloadIdBusy(deleteIds[i])) {
-               if (removeDownloadArtifacts(deleteIds[i]) != 0)
-                  logWarn("[dl-manager] could not delete %s\\n", deleteIds[i]);
+            // A playlist can be deleted while one of its videos is queued or active.
+            // Cancel that ID first, then wait for the writer to release its files before
+            // removing the MP4 and sidecars; otherwise the manager could silently skip it.
+            while (!manager.stop && downloadIdBusy(deleteIds[i])) {
+               if (cancelManagedDownload(deleteIds[i]) != 0) sleepMs(50);
             }
+            if (!manager.stop && removeDownloadArtifacts(deleteIds[i]) != 0)
+               logWarn("[dl-manager] could not delete %s\\n", deleteIds[i]);
             releaseDownloadDelete(deleteIds[i]);
          }
          if ((i & 3) == 3) sleepMs(10);

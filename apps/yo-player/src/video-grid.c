@@ -781,7 +781,11 @@ static int comparePlaylistTitles(const char *a, const char *b)
 static int gridResultBefore(const SearchResult *a, const SearchResult *b,
                             int sortMode, int playlistSortMode)
 {
-   if (((a->isPlaylist && b->isPlaylist) || (a->isLocalDownload && b->isLocalDownload)) &&
+   int aDownloadPlaylist = a->isLocalPlaylist && strncmp(a->localPlaylistId, "dp", 2) == 0;
+   int bDownloadPlaylist = b->isLocalPlaylist && strncmp(b->localPlaylistId, "dp", 2) == 0;
+   int mixedDownloads = (a->isLocalDownload && bDownloadPlaylist) ||
+                        (b->isLocalDownload && aDownloadPlaylist);
+   if (((a->isPlaylist && b->isPlaylist) || (a->isLocalDownload && b->isLocalDownload) || mixedDownloads) &&
        playlistSortMode == PLAYLIST_SORT_AZ)
       return comparePlaylistTitles(a->title, b->title) < 0;
    if (sortMode == SORT_VIEWS) {
@@ -1787,13 +1791,26 @@ static void drawTile(VideoGrid *grid, int i)
       int badgePadY = (int)(4 * scale + 0.5f);
       int badgeGap = (int)(6 * scale + 0.5f);
       int textW = grid->durations[i].tt.tex.w;
-      int badgeW = iconW + iconGap + textW + 2 * badgePadX;
+      int playlistIconW = item->isDownloadPlaylistVideo ? iconW : 0;
+      int playlistIconGap = item->isDownloadPlaylistVideo ? (int)(4 * scale + 0.5f) : 0;
+      int badgeW = playlistIconW + playlistIconGap + iconW + iconGap + textW + 2 * badgePadX;
       int badgeH = (grid->durations[i].tt.tex.h > iconH ? grid->durations[i].tt.tex.h : iconH) + 2 * badgePadY;
       int badgeX = tx + grid->tileW - badgeW - badgeGap;
       int badgeY = ty + grid->thumbH - badgeH - badgeGap;
       fillGfxRoundedRectangleFixed(badgeX, badgeY, badgeW, badgeH, badgeH / 3, 0xFF000000);
       int iconX = badgeX + badgePadX;
       int iconY = badgeY + (badgeH - iconH) / 2;
+      if (item->isDownloadPlaylistVideo) {
+         // Three stacked lines identify membership in a Downloads playlist.
+         int lineH = (int)(2 * scale + 0.5f);
+         int lineGap = (int)(2 * scale + 0.5f);
+         fillGfxRectangleFixed(iconX, iconY + (int)(2 * scale + 0.5f), iconW, lineH, activeTheme->textPrimary);
+         fillGfxRectangleFixed(iconX, iconY + (int)(2 * scale + 0.5f) + lineH + lineGap,
+                               (int)(11 * scale + 0.5f), lineH, activeTheme->textPrimary);
+         fillGfxRectangleFixed(iconX, iconY + (int)(2 * scale + 0.5f) + 2 * (lineH + lineGap),
+                               (int)(8 * scale + 0.5f), lineH, activeTheme->textPrimary);
+         iconX += playlistIconW + playlistIconGap;
+      }
       /* Compact floppy-disk silhouette. */
       fillGfxRectangleFixed(iconX, iconY, iconW, iconH, activeTheme->textPrimary);
       fillGfxRectangleFixed(iconX + (int)(3 * scale + 0.5f), iconY,
@@ -1820,7 +1837,7 @@ static void drawTile(VideoGrid *grid, int i)
    }
 
    if (!grid->suppressWatchLaterBadge &&
-       ((!item->isPlaylist && grid->isWatchLater && grid->isWatchLater(item->videoId)) ||
+       ((!item->isPlaylist && !item->isLocalDownload && grid->isWatchLater && grid->isWatchLater(item->videoId)) ||
         (item->isPlaylist && !item->isLocalPlaylist && grid->isPlaylistWatchLater &&
          grid->isPlaylistWatchLater(item->playlistId)))) {
       int badgeW = grid->watchLaterBadge.tt.tex.w + 2 * padX;

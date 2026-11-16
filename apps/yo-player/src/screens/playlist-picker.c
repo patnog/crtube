@@ -33,6 +33,7 @@ static struct {
    SearchResult item;
    PickerPlaylist playlists[64];
    int playlistCount;
+   int downloadsOnly;
    int count;
    int selected;
    int scroll;
@@ -76,13 +77,15 @@ static void initPicker(void)
 {
    picker.screenW = getGfxScreenWidth();
    picker.screenH = getGfxScreenHeight();
-   picker.playlistCount = getLocalPlaylistCount();
+   picker.playlistCount = picker.downloadsOnly ? getDownloadPlaylistCount() : getLocalPlaylistCount();
    if (picker.playlistCount < 0) picker.playlistCount = 0;
    if (picker.playlistCount > 64) picker.playlistCount = 64;
    for (int i = 0; i < picker.playlistCount; i++)
-      getLocalPlaylistInfo(i, picker.playlists[i].id, sizeof picker.playlists[i].id,
-                           picker.playlists[i].name, sizeof picker.playlists[i].name);
-   picker.count = picker.playlistCount + 2; // Watch Later + local playlists + Create playlist
+      (picker.downloadsOnly ? getDownloadPlaylistInfo(i, picker.playlists[i].id, sizeof picker.playlists[i].id,
+                           picker.playlists[i].name, sizeof picker.playlists[i].name) :
+                           getLocalPlaylistInfo(i, picker.playlists[i].id, sizeof picker.playlists[i].id,
+                           picker.playlists[i].name, sizeof picker.playlists[i].name));
+   picker.count = picker.playlistCount + (picker.downloadsOnly ? 1 : 2); // Optional Watch Later + PS3 playlists + Create
    picker.selected = 0;
    picker.scroll = 0;
    int maxRows = (picker.screenH - 150) / PICKER_ROW_H;
@@ -106,9 +109,15 @@ static void initPicker(void)
    setLabelScaleWithUi(&pickerTitle, 1);
    for (int i = 0; i < PICKER_MAX_ROWS; i++) {
       const char *name = "";
-      if (i == 0) name = "Watch Later";
-      else if (i == picker.count - 1) name = "Create playlist";
-      else if (i - 1 < picker.playlistCount) name = picker.playlists[i - 1].name;
+      if (!picker.downloadsOnly && i == 0) {
+         name = "Watch Later";
+      } else if (i == picker.count - 1) {
+         name = "Create playlist";
+      } else {
+         int playlistIndex = i - (picker.downloadsOnly ? 0 : 1);
+         if (playlistIndex >= 0 && playlistIndex < picker.playlistCount)
+            name = picker.playlists[playlistIndex].name;
+      }
       initLabel(&pickerRows[i], &pickerFont, 0, 0, picker.panelW - 72, AUTO, 21,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, name);
       setLabelScaleWithUi(&pickerRows[i], 1);
@@ -127,8 +136,11 @@ static void updatePicker(void)
       picker.oskDone = 0;
       if (picker.createdName[0]) {
          char id[LOCAL_PLAYLIST_ID_LEN];
-         if (createLocalPlaylist(picker.createdName, &picker.item, id, sizeof id) == 0)
+         if ((picker.downloadsOnly ? createEmptyDownloadPlaylist(picker.createdName, id, sizeof id) :
+             createLocalPlaylist(picker.createdName, &picker.item, id, sizeof id)) == 0) {
+            if (picker.downloadsOnly) addVideoToDownloadPlaylist(id, &picker.item);
             finishPicker();
+         }
          picker.createdName[0] = 0;
       }
       return;
@@ -144,22 +156,24 @@ static void updatePicker(void)
    }
    if (!isPadButtonPressed(PAD_BTN_CROSS)) return;
 
-   if (picker.selected == 0) {
+   if (!picker.downloadsOnly && picker.selected == 0) {
       toggleWatchLater(&picker.item);
       finishPicker();
       return;
    }
    if (picker.selected == picker.count - 1) {
       char defaultName[LOCAL_PLAYLIST_NAME_LEN];
-      snprintf(defaultName, sizeof defaultName, "Playlist %d", getLocalPlaylistCount() + 1);
+      snprintf(defaultName, sizeof defaultName, "Playlist %d",
+               (picker.downloadsOnly ? getDownloadPlaylistCount() : getLocalPlaylistCount()) + 1);
       if (!oskInputBegin("Create playlist", defaultName, onPlaylistNameEntered))
          picker.oskDone = 0;
       return;
    }
 
-   int index = picker.selected - 1;
+   int index = picker.selected - (picker.downloadsOnly ? 0 : 1);
    if (index >= 0 && index < picker.playlistCount) {
-      addVideoToLocalPlaylist(picker.playlists[index].id, &picker.item);
+      if (picker.downloadsOnly) addVideoToDownloadPlaylist(picker.playlists[index].id, &picker.item);
+      else addVideoToLocalPlaylist(picker.playlists[index].id, &picker.item);
       finishPicker();
    }
 }
@@ -200,6 +214,15 @@ static void termPicker(void)
 void openLocalPlaylistPicker(const SearchResult *item)
 {
    if (!item || !item->videoId[0] || item->isPlaylist) return;
+   picker.downloadsOnly = 0;
+   picker.item = *item;
+   pushScreen(&playlistPickerScreen);
+}
+
+void openDownloadPlaylistPicker(const SearchResult *item)
+{
+   if (!item || !item->videoId[0] || item->isPlaylist) return;
+   picker.downloadsOnly = 1;
    picker.item = *item;
    pushScreen(&playlistPickerScreen);
 }

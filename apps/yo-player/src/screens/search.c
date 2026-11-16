@@ -24,6 +24,7 @@
 #include "screen-manager.h"
 #include "osk-input.h"
 #include "string-utilities.h"
+#include "path.h"                // MAX_PATH_LEN for local download paths
 #include <string.h>
 #include <stdlib.h>
 
@@ -49,6 +50,16 @@ static char         pendingQuery[SEARCH_QUERY_LEN];
 static SearchResult pendingChannel;
 static int          pendingIsChannel;
 static int          pendingChannelCategory;
+static struct {
+   int valid;
+   int selected;
+   int scrollRow;
+   SortOrder sort;
+   char query[SEARCH_QUERY_LEN];
+   char videoId[16];
+   char playlistId[64];
+} channelReturn;
+static int restoreChannelReturnPending;
 static int          pendingLanding;
 static int          pendingSort;
 static int          pendingSortValid;
@@ -118,6 +129,10 @@ static int sortHint = -1, refreshHint = -1, clearHistoryHint = -1;
 static int channelPrevHint = -1, channelNextHint = -1;
 static SearchResult squarePendingItem;
 static uint64_t squarePressedAt;
+static uint64_t historySquarePressedAt;
+static int historyClearConfirmOpen;
+static int historySquareSelection;
+static Label historyConfirmTitle, historyConfirmFooter;
 static int playbackRestorePending;
 static void restoreSearchPlaybackSelection(void);
 #define SQUARE_HOLD_US 550000ULL
@@ -146,7 +161,10 @@ static void updateSearchHints(void)
    int fieldAction = search.landing ? (search.historySelection >= 0 ? 1 : 0) : search.fieldFocused;
    setButtonHintCaption(&hints, crossHint, fieldAction ? (search.landing ? "Search" : "Type") :
                         (search.landing ? "Type" : "Play"));
-   if (squareHint >= 0) setButtonHintShown(&hints, squareHint, !search.landing && !search.fieldFocused);
+   if (squareHint >= 0) {
+      setButtonHintShown(&hints, squareHint, search.landing ? search.historySelection >= 0 : !search.fieldFocused);
+      setButtonHintCaption(&hints, squareHint, search.landing ? "Delete / Clear all (hold)" : "Watch Later / Playlist (hold)");
+   }
    if (triangleHint >= 0) setButtonHintShown(&hints, triangleHint, !search.landing && !search.fieldFocused);
 
    if (selectHint >= 0) setButtonHintShown(&hints, selectHint, !search.landing);
@@ -158,7 +176,6 @@ static void updateSearchHints(void)
    if (refreshHint >= 0) setButtonHintShown(&hints, refreshHint, !search.landing);
    if (clearHistoryHint >= 0) setButtonHintShown(&hints, clearHistoryHint, hasHistory);
    if (search.landing) {
-      if (squareHint >= 0) setButtonHintShown(&hints, squareHint, 0);
       if (triangleHint >= 0) setButtonHintShown(&hints, triangleHint, 0);
       if (downloadHint >= 0) setButtonHintShown(&hints, downloadHint, 0);
    }
@@ -381,8 +398,19 @@ static void reload(int allowChannelCache)
 static void enterChannel(const SearchResult *item)
 {
    if (!item || !item->channelId[0]) return;
+   // Keep the originating query and cursor so Circle from the channel returns
+   // to the same result position instead of closing Search.
+   channelReturn.valid = 1;
+   restoreChannelReturnPending = 0;
+   channelReturn.selected = search.grid.selected;
+   channelReturn.scrollRow = search.grid.scrollRow;
+   channelReturn.sort = search.sort;
+   strCopy(channelReturn.query, sizeof channelReturn.query, search.query);
+   strCopy(channelReturn.videoId, sizeof channelReturn.videoId, item->videoId);
+   strCopy(channelReturn.playlistId, sizeof channelReturn.playlistId, item->playlistId);
    strCopy(search.channelId, sizeof search.channelId, item->channelId);
-   strCopy(search.channelName, sizeof search.channelName, item->author[0] ? item->author : "Channel");
+   strCopy(search.channelName, sizeof search.channelName,
+           item->author[0] ? item->author : "Channel");
    search.channelSort = CHANNEL_SORT_LATEST;
    search.channelCategory = 0;
    search.channelSortToken[0] = 0;
@@ -436,6 +464,8 @@ static void initSearch(void)
                  ? (SortOrder)pendingSort : (SortOrder)getSortPreference(SORT_PREF_SEARCH);
    pendingSortValid = 0;
    squarePressedAt = 0;
+   historySquarePressedAt = 0;
+   historyClearConfirmOpen = 0;
    search.landing = pendingLanding && !pendingIsChannel;
    search.fieldFocused = 0;
    search.resumeGridInput = 0;
@@ -548,6 +578,15 @@ static void initSearch(void)
    initLabel(&historyEmptyLabel, &uiFont, MARGIN_X, 0, AUTO, AUTO, 22,
              activeTheme->textSecondary, TEXT_NOWRAP, "No recent searches");
    setLabelScaleWithUi(&historyEmptyLabel, 1);
+   int historyConfirmWidth = (int)((search.screenW * 0.90f - 40) / search.uiScale);
+   if (historyConfirmWidth > 620) historyConfirmWidth = 620;
+   if (historyConfirmWidth < 240) historyConfirmWidth = 240;
+   initLabel(&historyConfirmTitle, &uiFont, 0, 0, historyConfirmWidth, AUTO, 27,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Delete all search history?");
+   initLabel(&historyConfirmFooter, &uiFont, 0, 0, historyConfirmWidth, AUTO, 19,
+             activeTheme->textSecondary, TEXT_NOWRAP, "X Confirm       O Cancel");
+   setLabelScaleWithUi(&historyConfirmTitle, 1);
+   setLabelScaleWithUi(&historyConfirmFooter, 1);
    for (int i = 0; i < MAX_SEARCH_HISTORY; i++) {
       initLabelRaw(&historyLabels[i], &uiFont, 0, 0,
                    search.screenW - 2 * MARGIN_X - 36, HISTORY_ROW_H - 4,
@@ -568,7 +607,7 @@ static void initSearch(void)
    channelPrevHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L1), "");
    channelNextHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R1), "Category");
    refreshHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R2), "Refresh");
-   clearHistoryHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L3), "Clear history");
+   clearHistoryHint = -1;
    setButtonHintsStableLayout(&hints, 1);
    // Measure the longest dynamic captions so later mode changes cannot need an unreserved row.
    setButtonHintCaption(&hints, crossHint, "Open playlist");
@@ -606,6 +645,11 @@ static void updateSearch(void)
 {
    updateDownloadOverlay();
    if (isDownloadSpacePromptOpen() || oskInputActive()) return;
+   if (historyClearConfirmOpen) {
+      if (isPadButtonPressed(PAD_BTN_CIRCLE)) { historyClearConfirmOpen = 0; return; }
+      if (isPadButtonPressed(PAD_BTN_CROSS)) { clearHistory(); historyClearConfirmOpen = 0; return; }
+      return;
+   }
 
    if (!isSidebarActive() && isPadButtonPressed(PAD_BTN_LEFT) &&
        (search.landing || search.fieldFocused || gridStage(&search.grid) != GRID_READY ||
@@ -631,10 +675,49 @@ static void updateSearch(void)
       openHomeSettingsPanelFromSearch();
       return;
    }
-   if (isPadButtonPressed(PAD_BTN_CIRCLE)) { popScreen(); return; }
-   if (isPadButtonPressed(PAD_BTN_L3) && search.historyCount > 0) {
-      clearHistory();
+   if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+      if (search.channelId[0] && channelReturn.valid) {
+         strCopy(search.query, sizeof search.query, channelReturn.query);
+         search.sort = channelReturn.sort;
+         search.channelId[0] = 0;
+         search.channelName[0] = 0;
+         search.channelSortToken[0] = 0;
+         restoreChannelReturnPending = 1;
+         reload(0);
+         return;
+      }
+      popScreen();
       return;
+   }
+   if (search.landing && search.historySelection >= 0 && search.historyCount > 0) {
+      if (!historySquarePressedAt && isPadButtonPressed(PAD_BTN_SQUARE)) {
+         historySquareSelection = search.historySelection;
+         historySquarePressedAt = getTimeUs();
+         return;
+      }
+      if (historySquarePressedAt) {
+         if (isPadButtonDown(PAD_BTN_SQUARE) &&
+             getTimeUs() - historySquarePressedAt >= SQUARE_HOLD_US) {
+            historySquarePressedAt = 0;
+            historyClearConfirmOpen = 1;
+            return;
+         }
+         if (isPadButtonReleased(PAD_BTN_SQUARE)) {
+            uint64_t held = getTimeUs() - historySquarePressedAt;
+            historySquarePressedAt = 0;
+            if (held < SQUARE_HOLD_US && historySquareSelection >= 0 &&
+                historySquareSelection < search.historyCount) {
+               removeSearchHistoryAt(historySquareSelection);
+               search.historySelection = historySquareSelection;
+               reloadHistory();
+               if (search.historySelection >= search.historyCount)
+                  search.historySelection = search.historyCount - 1;
+               updateSearchHints();
+            }
+            return;
+         }
+         return;
+      }
    }
 
    if (search.landing) {
@@ -715,6 +798,33 @@ static void updateSearch(void)
       setGridFocusHidden(&search.grid, 1);
    }
 
+   if (restoreChannelReturnPending && gridStage(&search.grid) == GRID_READY) {
+      int selected = channelReturn.selected;
+      if (channelReturn.videoId[0] || channelReturn.playlistId[0]) {
+         for (int i = 0; i < search.grid.results.count; i++) {
+            const SearchResult *candidate = &search.grid.results.items[i];
+            if ((channelReturn.videoId[0] && strcmp(candidate->videoId, channelReturn.videoId) == 0) ||
+                (channelReturn.playlistId[0] && strcmp(candidate->playlistId, channelReturn.playlistId) == 0)) {
+               selected = i;
+               break;
+            }
+         }
+      }
+      if (selected < 0) selected = 0;
+      if (selected >= search.grid.results.count) selected = search.grid.results.count - 1;
+      if (selected < 0) selected = 0;
+      search.grid.selected = selected;
+      search.grid.scrollRow = channelReturn.scrollRow;
+      int columns = search.grid.columns > 0 ? search.grid.columns : 1;
+      int totalRows = (search.grid.results.count + columns - 1) / columns;
+      int maxScroll = totalRows - search.grid.visibleRows;
+      if (maxScroll < 0) maxScroll = 0;
+      if (search.grid.scrollRow < 0) search.grid.scrollRow = 0;
+      if (search.grid.scrollRow > maxScroll) search.grid.scrollRow = maxScroll;
+      restoreChannelReturnPending = 0;
+      channelReturn.valid = 0;
+   }
+
    if (gridStage(&search.grid) != GRID_READY || search.fieldFocused || search.resumeGridInput) return;
 
    if (search.channelId[0]) {
@@ -731,7 +841,7 @@ static void updateSearch(void)
       setButtonHintCaption(&hints, crossHint, "Open playlist");
       if (squareHint >= 0) { setButtonHintCaption(&hints, squareHint, "Save playlist"); setButtonHintShown(&hints, squareHint, 1); }
       if (triangleHint >= 0) setButtonHintShown(&hints, triangleHint, 0);
-      if (downloadHint >= 0) setButtonHintShown(&hints, downloadHint, 0);
+      if (downloadHint >= 0) { setButtonHintShown(&hints, downloadHint, 1); setButtonHintCaption(&hints, downloadHint, "Download playlist"); }
    } else {
       setButtonHintCaption(&hints, crossHint, "Play");
       if (squareHint >= 0) { setButtonHintCaption(&hints, squareHint, "Watch Later / Playlist (hold)"); setButtonHintShown(&hints, squareHint, 1); }
@@ -760,7 +870,17 @@ static void updateSearch(void)
       }
       return;
    }
-   if (isPadButtonPressed(PAD_BTN_R3)) { if (!selected->isPlaylist && !selected->isLive) enqueueDownload(selected); return; }
+   if (isPadButtonPressed(PAD_BTN_R3)) {
+      if (selected->isPlaylist) {
+         SearchResult playlist = *selected;
+         openHomeDownloadPlaylistConfirmation(&playlist);
+      } else if (!selected->isLive) {
+         char downloadedPath[MAX_PATH_LEN];
+         if (getDownloadedVideoPath(selected->videoId, downloadedPath, sizeof downloadedPath) != 0)
+            enqueueDownload(selected);
+      }
+      return;
+   }
     if (isPadButtonPressed(PAD_BTN_TRIANGLE)) {
        if (selected->isPlaylist) return;
        if (search.channelId[0]) {
@@ -1001,6 +1121,22 @@ static void drawSearch(void)
    }
 
    drawButtonHintsFitted(&hints, search.screenW, search.footerBottomY, HINT_ROW_GAP, MAX_HINT_ROWS);
+   if (historyClearConfirmOpen) {
+      int panelW = (int)(680 * search.uiScale), panelH = (int)(190 * search.uiScale);
+      if (panelW > search.screenW - 40) panelW = search.screenW - 40;
+      int x = (search.screenW - panelW) / 2, y = (search.screenH - panelH) / 2;
+      fillGfxRectangle(0, 0, search.screenW, search.screenH, activeTheme->scrim);
+      fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+      fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+      refreshLabelScale(&historyConfirmTitle);
+      refreshLabelScale(&historyConfirmFooter);
+      moveLabel(&historyConfirmTitle, search.screenW / 2 - historyConfirmTitle.tt.tex.w / 2,
+                y + (int)(48 * search.uiScale));
+      moveLabel(&historyConfirmFooter, search.screenW / 2 - historyConfirmFooter.tt.tex.w / 2,
+                y + (int)(118 * search.uiScale));
+      drawLabel(&historyConfirmTitle);
+      drawLabel(&historyConfirmFooter);
+   }
    drawSidebar();
    drawDownloadOverlay(search.screenW);
 }
@@ -1008,6 +1144,7 @@ static void drawSearch(void)
 static void suspendSearch(void)
 {
    squarePressedAt = 0;
+   historySquarePressedAt = 0;
    pauseVideoGrid(&search.grid);
 }
 
@@ -1048,6 +1185,8 @@ static void refreshSearchThemeColors(void)
    setLabelColor(&statusLabel, activeTheme->textSecondary);
    setLabelColor(&historyTitleLabel, activeTheme->textSecondary);
    setLabelColor(&historyEmptyLabel, activeTheme->textSecondary);
+   setLabelColor(&historyConfirmTitle, activeTheme->textPrimary);
+   setLabelColor(&historyConfirmFooter, activeTheme->textSecondary);
    for (int i = 0; i < SORT_COUNT; i++)
       setLabelColor(&sortLabels[i], activeTheme->textSecondary);
    for (int i = 0; i < 4; i++)
@@ -1081,6 +1220,8 @@ static void termSearch(void)
    freeLabel(&statusLabel);
    freeLabel(&historyTitleLabel);
    freeLabel(&historyEmptyLabel);
+   freeLabel(&historyConfirmTitle);
+   freeLabel(&historyConfirmFooter);
    for (int i = 0; i < MAX_SEARCH_HISTORY; i++) freeLabel(&historyLabels[i]);
    freeIcon(&searchIcon);
    closeFont(&uiFont);
@@ -1088,6 +1229,8 @@ static void termSearch(void)
 
 void openSearchPage(void)
 {
+   channelReturn.valid = 0;
+   restoreChannelReturnPending = 0;
    pendingQuery[0] = 0;
    pendingIsChannel = 0;
    pendingLanding = 1;
@@ -1097,6 +1240,8 @@ void openSearchPage(void)
 
 void openSearchQuery(const char *query)
 {
+   channelReturn.valid = 0;
+   restoreChannelReturnPending = 0;
    if (!query || !query[0]) { openSearchPage(); return; }
    strCopy(pendingQuery, sizeof pendingQuery, query);
    pendingIsChannel = 0;
@@ -1108,6 +1253,8 @@ void openSearchQuery(const char *query)
 
 void openSearchQueryWithSort(const char *query, int sort)
 {
+   channelReturn.valid = 0;
+   restoreChannelReturnPending = 0;
    if (!query || !query[0]) { openSearchPage(); return; }
    strCopy(pendingQuery, sizeof pendingQuery, query);
    pendingIsChannel = 0;
@@ -1126,6 +1273,8 @@ void openChannelFor(const SearchResult *item)
 void openChannelForCategory(const SearchResult *item, int category)
 {
    if (!item || !item->channelId[0]) return;
+   channelReturn.valid = 0;
+   restoreChannelReturnPending = 0;
    pendingChannel = *item;
    pendingChannelCategory = category;
    pendingIsChannel = 1;

@@ -16,6 +16,8 @@ typedef struct {
    int  itag;              // source-specific format id (0 if n/a)
    int  width, height;
    int  fps;               // frames per second (0 if the source doesn't say)
+   int  bitrate;           // source-reported average bitrate in bits/second, when available
+   uint64_t contentLength; // source-reported byte length, when available
    int  hasVideo, hasAudio;
    int  needsCipher;       // 1 = url is signature-ciphered, not yet playable
    char container[8];      // "mp4"
@@ -85,6 +87,7 @@ typedef struct {
    uint64_t downloadedAt;
    int  checkLiveStatus;     // local history item: resolve current LIVE state asynchronously
    int  liveStatusChecked;   // worker completed the current LIVE-state lookup
+   int  isDownloadPlaylistVideo; // downloaded video belongs to at least one Downloads-owned playlist
 } SearchResult;
 
 #define MAX_CONTINUATION 4096   // youtube "load more" tokens are long base64 blobs

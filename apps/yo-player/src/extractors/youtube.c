@@ -185,6 +185,26 @@ static int jsonInt(const char *from, const char *end, const char *key, int *out)
    return 1;
 }
 
+static uint64_t jsonUInt64(const char *from, const char *end, const char *key)
+{
+   char pat[48];
+   int patLen = snprintf(pat, sizeof pat, "\"%s\":", key);
+   const char *p = from ? findInRange(from, end, pat) : NULL;
+   if (!p) return 0;
+   p += patLen;
+   while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+   if (p < end && *p == '\"') p++;
+   uint64_t value = 0;
+   int digits = 0;
+   while (p < end && *p >= '0' && *p <= '9') {
+      unsigned digit = (unsigned)(*p++ - '0');
+      if (value > (UINT64_MAX - digit) / 10ULL) return 0;
+      value = value * 10ULL + digit;
+      digits++;
+   }
+   return digits ? value : 0;
+}
+
 // Read a JSON boolean field, allowing optional whitespace after the colon.
 static int jsonBool(const char *from, const char *end, const char *key)
 {
@@ -395,6 +415,9 @@ static void parseFormatArray(const char *arrayStart, const char *regionEnd, int 
       jsonInt(object, objectEnd, "width", &format->width);
       jsonInt(object, objectEnd, "height", &format->height);
       jsonInt(object, objectEnd, "fps", &format->fps);
+      jsonInt(object, objectEnd, "averageBitrate", &format->bitrate);
+      if (format->bitrate <= 0) jsonInt(object, objectEnd, "bitrate", &format->bitrate);
+      format->contentLength = jsonUInt64(object, objectEnd, "contentLength");
       format->needsCipher = !jsonString(object, objectEnd, "url", format->url, sizeof format->url);
 
       // mimeType is like: video/mp4; codecs="avc1.640028". only mark a stream playable when its codec is

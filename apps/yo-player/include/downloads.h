@@ -15,7 +15,7 @@
 void initDownloads(void);       // call after initFont
 void shutdownDownloads(void);   // cancel + clear the queue, join the worker, free the overlay; call at exit
 
-#define DOWNLOAD_MANAGEMENT_MAX_ITEMS 256
+#define DOWNLOAD_MANAGEMENT_MAX_ITEMS 512
 #define DOWNLOAD_MANAGEMENT_TITLE_LEN 160
 #define DOWNLOAD_MANAGEMENT_VISIBLE_ITEMS 7
 
@@ -46,7 +46,17 @@ int getDownloadLibraryStats(uint64_t *usedBytes, uint64_t *freeBytes, int *ready
 // 0 = accepted, 1 = not found, -1 = already finalizing / cannot cancel.
 int cancelManagedDownload(const char *videoId);
 
-void enqueueDownload(const SearchResult *item);   // queue using global download preferences
+// Estimate the selected source streams using contentLength or average bitrate.
+// Returns -1 when the extractor does not expose enough information.
+int estimateDownloadSizeForVideo(const SearchResult *item, uint64_t *bytesOut);
+// Exact current artifact bytes queued for deletion with a Downloads playlist;
+// shared videos are excluded. Returns the exclusive video count.
+int getDownloadPlaylistDeleteInfo(const char *playlistId, uint64_t *bytesOut, int *videoCountOut);
+// Deletes the Downloads playlist and queues deletion of its unshared videos.
+int deleteDownloadPlaylistAndVideos(const char *playlistId);
+void enqueueDownload(const SearchResult *item);
+// Returns queued count, -1 if the worker could not start, or -2 if the queue was full.
+int enqueueDownloadBatch(const SearchResult *items, int count);   // queue using global download preferences
 void enqueuePlaybackDownload(const SearchResult *item, const char *audioTrackId,
                              const char *activeSubtitleLanguage);
 int getDownloadedVideos(SearchResults *out, int sortAZ);

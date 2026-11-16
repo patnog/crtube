@@ -15,6 +15,7 @@ void initStorage(void);
 int  getSearchHistory(char out[][SEARCH_QUERY_LEN], int max);
 void addSearchHistory(const char *query);
 void clearSearchHistory(void);
+int  removeSearchHistoryAt(int index);
 
 // PS3-local playback history: 50 newest-first video entries, persisted independently from watch/resume state.
 int  getLocalHistory(SearchResults *out);
@@ -82,3 +83,23 @@ int  deleteLocalPlaylist(const char *playlistId);
 int  renameLocalPlaylist(const char *playlistId, const char *name);
 int  removePlaylistFromWatchLater(const char *playlistId);
 int  createEmptyLocalPlaylist(const char *name, char *playlistIdOut, int playlistIdCapacity);
+int  createLocalPlaylistFromResults(const char *name, const SearchResult *items, int count,
+                                    char *playlistIdOut, int playlistIdCapacity);
+
+// Downloads-owned playlists are stored separately from PS3 > Playlists > PS3.
+int  getDownloadPlaylistCount(void);
+int  getDownloadPlaylistInfo(int newestIndex, char *idOut, int idCapacity, char *nameOut, int nameCapacity);
+int  getDownloadPlaylistRevision(void);
+int  getDownloadPlaylists(SearchResults *out);
+// Marks downloaded entries that belong to any Downloads-owned playlist.
+int  markDownloadPlaylistMembership(SearchResults *videos);
+// Marks entries referenced by another Downloads playlist, excluding the playlist being deleted.
+int  markOtherDownloadPlaylistMembership(SearchResults *videos, const char *excludedPlaylistId);
+int  getDownloadPlaylistVideos(const char *playlistId, SearchResults *out);
+int  createEmptyDownloadPlaylist(const char *name, char *playlistIdOut, int playlistIdCapacity);
+int  createDownloadPlaylistFromResults(const char *name, const SearchResult *items, int count, char *playlistIdOut, int playlistIdCapacity);
+int  addVideoToDownloadPlaylist(const char *playlistId, const SearchResult *item);
+int  removeVideoFromDownloadPlaylist(const char *playlistId, const char *videoId);
+int  removeVideoFromAllDownloadPlaylists(const char *videoId);
+int  deleteDownloadPlaylist(const char *playlistId);
+int  renameDownloadPlaylist(const char *playlistId, const char *name);
