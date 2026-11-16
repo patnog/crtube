@@ -110,13 +110,12 @@ static void bootMark(const char *text, uint64_t length)
 #define BOOT_MARK(text) ((void)0)
 #endif
 
+// A TEE failure is scoped to the active playback session. Playback recovery selects a
+// lower rendition for that video; the user's global 1080p60 preference must remain intact.
 static void applyPendingTeeDisableRequest(void)
 {
-   if (!consumeVideoPlayerTeeDisableRequest() || !getEnable1080p60()) return;
-   if (setEnable1080p60(0) == 0)
-      logWarn("[settings] Enable 1080p (experimental) switched OFF after TEE failure or unsafe close\n");
-   else
-      logError("[settings] TEE failure; experimental 1080p disabled in memory but could not be saved\n");
+   if (consumeVideoPlayerTeeDisableRequest())
+      logWarn("[video-diag] TEE failure/unsafe close reported; keep global 1080p60 preference unchanged\n");
 }
 
 int main(int argc, char **argv)

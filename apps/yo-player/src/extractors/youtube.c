@@ -786,7 +786,8 @@ static int fetchPlayerClient(const char *clientFields, const char *userAgent,
 }
 
 static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
-                                           int *respLen, StreamInfo *out, int liveMode)
+                                           int *respLen, StreamInfo *out, int liveMode,
+                                           int requiredVideoItag, int requiredAudioItag)
 {
    const struct {
       const char *name;
@@ -848,6 +849,7 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
       if (strcmp(status, "UNPLAYABLE") == 0) continue;
 
       out->formatCount = 0;
+      out->liveAndroidClient = 0;
       parseFormats(resp, end, out);
       if (liveMode) {
          // A LIVE retry is useful only when it exposes the DASH segment timeline
@@ -887,6 +889,19 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
          out->formatCount = kept;
       }
 
+      if (out->formatCount > 0 && requiredVideoItag > 0) {
+         int haveVideo = 0, haveAudio = requiredAudioItag <= 0;
+         for (int j = 0; j < out->formatCount; j++) {
+            if (out->formats[j].itag == requiredVideoItag && out->formats[j].hasVideo) haveVideo = 1;
+            if (requiredAudioItag > 0 && out->formats[j].itag == requiredAudioItag &&
+                out->formats[j].hasAudio) haveAudio = 1;
+         }
+         if (!haveVideo || !haveAudio) {
+            logInfo("[yt] retry client=%s lacks required LIVE itags %d/%d; continue\n",
+                    clients[i].name, requiredVideoItag, requiredAudioItag);
+            continue;
+         }
+      }
       if (out->formatCount > 0) {
          const char *details = strstr(resp, "\"videoDetails\"");
          if (details) {
@@ -1410,7 +1425,7 @@ static int extract(const char *input, StreamInfo *out)
       if (strcmp(statusText, "UNPLAYABLE") == 0 || liveRequest) {
          logInfo("[yt] player has no usable stream; trying alternate %s clients\n",
                  liveRequest ? "LIVE" : "VOD");
-         if (retryUnplayableWithOtherClients(videoId, resp, &respLen, out, liveRequest) > 0) {
+         if (retryUnplayableWithOtherClients(videoId, resp, &respLen, out, liveRequest, 0, 0) > 0) {
             logInfo("[yt] resolved videoId=%s with alternate client formats=%d live=%d\n",
                     videoId, out->formatCount, liveRequest);
             if (liveRequest) out->isLive = 1;
@@ -2542,9 +2557,114 @@ static int fetchLive(LiveCategory category, const char *continuation, SearchResu
    return 0;
 }
 
+
+// A seek/reconnect in a session that originally fell back to ANDROID must not silently
+// return to VISIONOS as its first request. Preserve the selected itags, try ANDROID first,
+// then VISIONOS, and finally the remaining LIVE fallback clients if neither exposes them.
+static int refreshLiveForSeek(const char *input, int videoItag, int audioItag, StreamInfo *out)
+{
+   memset(out, 0, sizeof *out);
+   char videoId[16];
+   if (!extractVideoId(input, videoId, sizeof videoId) || ensureVisitorData() != 0) return -1;
+
+   char *resp = (char *)malloc(RESP_CAP);
+   if (!resp) return -1;
+   int respLen = 0, rc = -1;
+   const char *clientName = "ANDROID";
+
+   static const char *ANDROID_FIELDS =
+      "\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\","
+      "\"androidSdkVersion\":34,\"hl\":\"en\",\"gl\":\"US\"";
+   logInfo("[yt-live-seek] resolving selected LIVE itags Android-first video=%s itags=%d/%d\n",
+           videoId, videoItag, audioItag);
+   rc = fetchPlayerClient(ANDROID_FIELDS, WEB_UA, "3", "20.10.38",
+                          videoId, resp, &respLen);
+   if (rc == 0 && !isHttpRequestGroupCancelled()) {
+      const char *end = resp + respLen;
+      parseFormats(resp, end, out);
+      parseLiveManifest(resp, end, out, "dashand");
+      int kept = 0;
+      for (int i = 0; i < out->formatCount; i++) {
+         if (!out->formats[i].isLiveSegmented) continue;
+         if (kept != i) out->formats[kept] = out->formats[i];
+         kept++;
+      }
+      out->formatCount = kept;
+      out->liveAndroidClient = 1;
+   }
+
+   int haveVideo = 0, haveAudio = audioItag <= 0;
+   for (int i = 0; i < out->formatCount; i++) {
+      if (out->formats[i].itag == videoItag && out->formats[i].hasVideo) haveVideo = 1;
+      if (audioItag > 0 && out->formats[i].itag == audioItag && out->formats[i].hasAudio) haveAudio = 1;
+   }
+
+   // If Android cannot provide the selected rendition, retry with the original primary
+   // client. This path is only used by a session already known to have started on Android.
+   if ((!haveVideo || !haveAudio) && !isHttpRequestGroupCancelled()) {
+      memset(out, 0, sizeof *out);
+      clientName = "VISIONOS";
+      respLen = 0;
+      logInfo("[yt-live-seek] Android did not expose selected itags; trying VISIONOS video=%s\n", videoId);
+      rc = fetchPlayer(PLAYER_BODY_FMT, PLAYER_UA, "101", PLAYER_VERSION,
+                       videoId, resp, &respLen);
+      if (rc == 0 && !isHttpRequestGroupCancelled()) {
+         const char *end = resp + respLen;
+         parseFormats(resp, end, out);
+         parseLiveManifest(resp, end, out, "dashseg");
+         int kept = 0;
+         for (int i = 0; i < out->formatCount; i++) {
+            if (!out->formats[i].isLiveSegmented) continue;
+            if (kept != i) out->formats[kept] = out->formats[i];
+            kept++;
+         }
+         out->formatCount = kept;
+         out->liveAndroidClient = 0;
+      }
+      haveVideo = 0;
+      haveAudio = audioItag <= 0;
+      for (int i = 0; i < out->formatCount; i++) {
+         if (out->formats[i].itag == videoItag && out->formats[i].hasVideo) haveVideo = 1;
+         if (audioItag > 0 && out->formats[i].itag == audioItag && out->formats[i].hasAudio) haveAudio = 1;
+      }
+   }
+
+   // If neither preferred identity exposes the exact selected pair, let the existing
+   // LIVE fallback order try the remaining clients. That list may repeat ANDROID before
+   // moving on to its other identities; the explicit first attempt remains Android-first.
+   if ((!haveVideo || !haveAudio) && !isHttpRequestGroupCancelled()) {
+      int retried = retryUnplayableWithOtherClients(videoId, resp, &respLen, out, 1, videoItag, audioItag);
+      haveVideo = 0;
+      haveAudio = audioItag <= 0;
+      for (int i = 0; i < out->formatCount; i++) {
+         if (out->formats[i].itag == videoItag && out->formats[i].hasVideo) haveVideo = 1;
+         if (audioItag > 0 && out->formats[i].itag == audioItag && out->formats[i].hasAudio) haveAudio = 1;
+      }
+      if (retried > 0 && haveVideo && haveAudio)
+         clientName = out->liveAndroidClient ? "ANDROID" : "alternate";
+   }
+
+   if (haveVideo && haveAudio) {
+      const char *end = resp + respLen;
+      const char *streaming = strstr(resp, "\"streamingData\"");
+      out->isLive = 1;
+      out->liveDvr = strstr(resp, "\"isLiveDvrEnabled\":true") != NULL;
+      jsonInt(streaming ? streaming : resp, end, "targetDurationSec", &out->liveSegmentSec);
+      jsonInt(streaming ? streaming : resp, end, "maxDvrDurationSec", &out->liveWindowSec);
+      logInfo("[yt-live-seek] selected itags resolved with %s formats=%d\n", clientName, out->formatCount);
+      free(resp);
+      return 0;
+   }
+
+   logWarn("[yt-live-seek] selected itags unavailable after Android-first client attempts (video=%d audio=%d rc=%d)\n",
+           haveVideo, haveAudio, rc);
+   free(resp);
+   return -1;
+}
+
 const Extractor youtubeExtractor = {
    "youtube", matches, extract, search, fetchTrending, getChannel, fetchAccountFeed,
    youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly, fetchLive,
    getChannelLive, fetchAccountPlaylists, fetchAccountPlaylistVideos,
-   youtubeGetVideoStatus, getChannelCategory, refreshLiveAndroid
+   youtubeGetVideoStatus, getChannelCategory, refreshLiveAndroid, refreshLiveForSeek
 };

@@ -66,8 +66,6 @@
 #define SEEK_ACCEL_2_US     3000000ULL
 #define SEEK_ACCEL_3_US     5000000ULL
 #define SEEK_APPLY_IDLE_US  400000ULL
-#define CONTROLS_VISIBLE_US 2000000ULL
-#define HUD_VISIBLE_US      3000000ULL
 #define TOAST_VISIBLE_US    2000000ULL   // how long a toast ("Skipped ...", "Subtitles: ...") stays up
 #define ASK_PROMPT_VISIBLE_US 3000000ULL
 #define AUTOPLAY_NOTICE_US  3000000ULL
@@ -130,8 +128,8 @@ static Label optionsCurrentValueLabels[3]; // Quality, Audio, Subs language
 
 // Playback-owned settings panel. It deliberately shares the persisted settings APIs
 // with navigation, but owns its input state, labels, layout and SponsorBlock submenu.
-#define PLAYBACK_SETTINGS_COUNT 7
-#define PLAYBACK_SETTINGS_ROW_H 54
+#define PLAYBACK_SETTINGS_COUNT 8
+#define PLAYBACK_SETTINGS_ROW_H 45
 #define PLAYBACK_SETTINGS_PANEL_W 650
 #define PLAYBACK_SETTINGS_PANEL_H 490
 #define PLAYBACK_SUBTITLE_STYLE_COUNT 5
@@ -147,13 +145,19 @@ static int playbackSubtitleStyleOpen, playbackSubtitleStyleSelected;
 static ButtonRepeat playbackSubtitleStyleRepeat;
 static Label playbackSubtitleStyleTitle, playbackSubtitleStyleLabels[PLAYBACK_SUBTITLE_STYLE_COUNT], playbackSubtitlePreview;
 static int playbackSponsorOpen, playbackSponsorSelected;
-static ButtonRepeat playbackSettingsRepeat, playbackSponsorRepeat, playbackSubtitleOffsetRepeat, playbackOverscanRepeat;
+static ButtonRepeat playbackSettingsRepeat, playbackSponsorRepeat, playbackSubtitleOffsetRepeat;
+static ButtonRepeat playbackOverscanRepeat, playbackOsdTimeoutRepeat;
 static Label playbackSettingsTitle, playbackSettingsLabels[PLAYBACK_SETTINGS_COUNT];
 static Label playbackSettingsValues[PLAYBACK_SETTINGS_COUNT];
 static Label playbackSettingsToggleLabels[2];
 static Label playbackSponsorTitle, playbackSponsorCategoryLabels[SPONSOR_CATEGORY_COUNT];
 static Label playbackSponsorActionLabels[3];
 
+// Playback settings are persisted globally, while adaptive decoder recovery is session-local:
+// a failed 1080p60 rendition is skipped for this video without rewriting the user's preference.
+// Android-fallback LIVE sessions retain their origin separately from the currently active
+// client, so a temporary VISIONOS seek fallback does not change the next seek's priority.
+//
 // the video to play, set by playVideo() before the screen is pushed. defaults to
 // a short public clip so pushing the screen directly still does something.
 static char requestedInput[256] = "jNQXAC9IVRw";   // "Me at the zoo"
@@ -383,7 +387,8 @@ static struct {
    int              isLive;           // active or recently-ended DASH LIVE stream
    int              liveEnded;        // post-live recording: edge is fixed and playback ends there
    int              liveDvr;          // rewind enabled by the broadcaster (always enabled for post-live)
-   int              liveAndroidClient; // only Android-fallback LIVE streams use in-place signed-base renewal
+   int              liveAndroidClient; // active formats came from ANDROID; enables signed-base renewal
+   int              liveAndroidFallbackSession; // session origin; keeps ANDROID first on every seek
    int              liveSegmentSec;   // target duration of each numbered DASH segment
    int              liveWindowSegs;   // advertised DVR window in segments
    long             liveFloorSq;      // earliest segment available in the manifest
@@ -611,23 +616,23 @@ static int extractLiveFormatBase(const StreamFormat *format, char *out, int cap)
    return 0;
 }
 
-static void updateStoredAndroidLiveUrls(const StreamInfo *info)
+// Refresh every stored rendition from the selected client. This also keeps later
+// manual quality/audio switches coherent if a seek had to move from ANDROID to VISIONOS.
+static void updateStoredLiveUrls(const StreamInfo *info)
 {
    for (int i = 0; i < state.videoCount; i++) {
       const StreamFormat *format = findLiveFormatByItag(info, state.videoItags[i]);
-      if (format && strncmp(format->url, "dashand|", 8) == 0)
+      if (format)
          strCopy(state.videoUrls[i], sizeof state.videoUrls[i], format->url);
    }
    for (int i = 0; i < state.audioCount; i++) {
       const StreamFormat *format = findLiveAudioFormatByItag(info, state.audioItags[i], state.audioIds[i]);
-      if (format &&
-          strncmp(format->url, "dashand|", 8) == 0)
+      if (format)
          strCopy(state.audioUrls[i], sizeof state.audioUrls[i], format->url);
    }
    if (state.fallbackAudioItag > 0) {
       const StreamFormat *format = findLiveAudioFormatByItag(info, state.fallbackAudioItag, NULL);
-      if (format &&
-          strncmp(format->url, "dashand|", 8) == 0)
+      if (format)
          strCopy(state.fallbackAudioUrl, sizeof state.fallbackAudioUrl, format->url);
    }
 }
@@ -742,7 +747,7 @@ static void reapLiveBaseRefresh(void)
                     state.liveBaseRefreshAudioEdgeSq) == 0;
    }
    if (applied) {
-      updateStoredAndroidLiveUrls(info);
+      updateStoredLiveUrls(info);
       state.liveEdgeSq = state.liveBaseRefreshVideoEdgeSq;
       state.liveFloorSq = state.liveBaseRefreshVideoStartSq;
       if (state.liveBaseRefreshWindowSec > 0 && state.liveSegmentSec > 0) {
@@ -1363,6 +1368,7 @@ static void worker(uint64_t arg)
    if (!video) { fail("no playable mp4 video"); goto done; }
    int isLivePlayback = info->isLive || info->isPostLive || video->isLiveSegmented;
    state.liveAndroidClient = isLivePlayback && info->liveAndroidClient;
+   state.liveAndroidFallbackSession = state.liveAndroidClient;
    const StreamFormat *availableAudio = pickBestAudio(info);
    const StreamFormat *qualityFormats[MAX_PLAYBACK_QUALITIES] = {0};
    state.videoCount = 0;
@@ -2300,8 +2306,8 @@ static void initPlay(void)
    initLabelRaw(&playbackSettingsTitle, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 48, AUTO,
                 playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "Playback Settings");
    static const char *playbackSettingNames[PLAYBACK_SETTINGS_COUNT] = {
-      "Enable 1080p (experimental)", "UI Scaling", "Overscan", "Overscan (crop to fill)",
-      "Subtitle Style", "Subtitle Offset", "SponsorBlock"
+      "Enable 1080p60 (experimental)", "UI Scaling", "Overscan", "Overscan (crop to fill)",
+      "Subtitle Style", "Subtitle Offset", "SponsorBlock", "OSD Timeout"
    };
    for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
       initLabelRaw(&playbackSettingsLabels[i], &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 230, AUTO,
@@ -2926,10 +2932,68 @@ static void liveReopenWorker(uint64_t arg)
    if (old) destroyVideoPlayer(old);
 
    VideoPlayer *replacement = NULL;
-   if (!playbackCancelRequested())
+
+   // Android-fallback LIVE sessions re-resolve the selected itags for every seek/reconnect.
+   // The extractor tries ANDROID first, then VISIONOS and the remaining LIVE clients.
+   if (!playbackCancelRequested() && state.liveAndroidFallbackSession) {
+      const Extractor *extractor = findExtractor(requestedInput);
+      StreamInfo *info = (StreamInfo *)calloc(1, sizeof *info);
+      int separateAudio = state.audItag > 0 && !state.videoHasAudio[state.resolutionIndex];
+      int rc = -1;
+      if (info && extractor && extractor->refreshLiveForSeek)
+         rc = extractor->refreshLiveForSeek(requestedInput, state.vidItag,
+                                             separateAudio ? state.audItag : 0, info);
+      const StreamFormat *video = rc == 0 ? findLiveFormatByItag(info, state.vidItag) : NULL;
+      const char *trackId = state.audioPick >= 0 && state.audioPick < state.audioCount
+                          ? state.audioIds[state.audioPick] : NULL;
+      const StreamFormat *audio = separateAudio
+         ? findLiveAudioFormatByItag(info, state.audItag, trackId) : NULL;
+      char refreshedVideo[MAX_STREAM_URL] = "";
+      char refreshedAudio[MAX_STREAM_URL] = "";
+      if (video && (!separateAudio || audio)) {
+         long targetSq = state.liveLatencySec > 0.0f
+                       ? video->liveEdgeSq - LIVE_START_BEHIND : state.liveFirstSq;
+         if (targetSq < video->liveStartSq) targetSq = video->liveStartSq;
+         if (targetSq > video->liveEdgeSq) targetSq = video->liveEdgeSq;
+         writeLiveDescriptor(refreshedVideo, sizeof refreshedVideo, video->url,
+                             video->liveEdgeSq, targetSq);
+         if (audio)
+            writeLiveDescriptor(refreshedAudio, sizeof refreshedAudio, audio->url,
+                                audio->liveEdgeSq, targetSq);
+         if (refreshedVideo[0])
+            replacement = createVideoPlayerSplitCancelable(refreshedVideo,
+                               refreshedAudio[0] ? refreshedAudio : NULL,
+                               allocGfxVideoBuffer, freeGfxVideoBuffer, &state.cancelRequested);
+         if (replacement) {
+            strCopy(state.liveVideoOpen, sizeof state.liveVideoOpen, refreshedVideo);
+            strCopy(state.liveAudioOpen, sizeof state.liveAudioOpen, refreshedAudio);
+            updateStoredLiveUrls(info);
+            state.liveAndroidClient = info->liveAndroidClient;
+            state.liveDvr = info->liveDvr;
+            if (info->liveSegmentSec > 0) state.liveSegmentSec = info->liveSegmentSec;
+            if (info->liveWindowSec > 0 && state.liveSegmentSec > 0) {
+               state.liveWindowSegs = info->liveWindowSec / state.liveSegmentSec;
+               if (state.liveWindowSegs < 1) state.liveWindowSegs = 1;
+            }
+            state.liveEdgeSq = video->liveEdgeSq;
+            state.liveFloorSq = video->liveStartSq;
+            state.liveFirstSq = targetSq;
+            state.liveEdgeUs = sys_time_get_system_time();
+            logInfo("[yt-live-seek] reopened selected itags after Android-first refresh client=%s edgeSq=%ld\n",
+                    state.liveAndroidClient ? "ANDROID" : "VISIONOS", state.liveEdgeSq);
+         }
+      }
+      if (info) { free(info->captions); free(info); }
+   }
+
+   // Keep the previous signed descriptor as a final recovery attempt if re-resolution
+   // could not produce a usable replacement. Non-Android LIVE sessions retain their
+   // original reopen path unchanged.
+   if (!replacement && !playbackCancelRequested())
       replacement = createVideoPlayerSplitCancelable(state.liveVideoOpen,
                          state.liveAudioOpen[0] ? state.liveAudioOpen : NULL,
                          allocGfxVideoBuffer, freeGfxVideoBuffer, &state.cancelRequested);
+
    if (playbackCancelRequested() && replacement) {
       destroyVideoPlayer(replacement);
       replacement = NULL;
@@ -3669,13 +3733,18 @@ static void updatePlaybackSettings(void)
       playbackOverscanRepeat.timer = 0;
       playbackOverscanRepeat.repeats = 0;
    }
+   if (playbackSettingsSelected != 7) {
+      playbackOsdTimeoutRepeat.timer = 0;
+      playbackOsdTimeoutRepeat.repeats = 0;
+   }
    int left = isPadButtonPressed(PAD_BTN_LEFT);
    int right = isPadButtonPressed(PAD_BTN_RIGHT);
    int cross = isPadButtonPressed(PAD_BTN_CROSS);
 
    // Cross is not an adjustment control for these numeric/display settings.
    if (playbackSettingsSelected == 1 || playbackSettingsSelected == 2 ||
-       playbackSettingsSelected == 3 || playbackSettingsSelected == 5)
+       playbackSettingsSelected == 3 || playbackSettingsSelected == 5 ||
+       playbackSettingsSelected == 7)
       cross = 0;
 
    if (playbackSettingsSelected == 5) {
@@ -3684,6 +3753,21 @@ static void updatePlaybackSettings(void)
       if (offsetDelta) {
          int offset = getSubtitleOffset() + offsetDelta;
          if (setSubtitleOffset(offset) != 0) showToast("Could not save subtitle offset");
+      }
+      return;
+   }
+
+   if (playbackSettingsSelected == 7) {
+      static const int timeouts[] = { 2, 3, 5, 10, 15, 30, 60 };
+      int current = getOsdTimeout(), selected = 0;
+      for (int i = 0; i < 7; i++) if (timeouts[i] == current) selected = i;
+      int delta = isRepeatDue(&playbackOsdTimeoutRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
+                  isRepeatDue(&playbackOsdTimeoutRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
+      if (delta) {
+         selected += delta;
+         if (selected < 0) selected = 0;
+         if (selected > 6) selected = 6;
+         if (setOsdTimeout(timeouts[selected]) != 0) showToast("Could not save OSD timeout");
       }
       return;
    }
@@ -3932,6 +4016,9 @@ static void drawPlaybackSettings(void)
    setLabelText(&playbackSettingsValues[4], "Configure");
    setLabelText(&playbackSettingsValues[5], subtitleOffsetValue);
    setLabelText(&playbackSettingsValues[6], "Configure");
+   char osdTimeoutValue[16];
+   snprintf(osdTimeoutValue, sizeof osdTimeoutValue, "%ds", getOsdTimeout());
+   setLabelText(&playbackSettingsValues[7], osdTimeoutValue);
 
    int toggleW = 132;
    int toggleX = x + panelW - 40 - toggleW;
@@ -5019,8 +5106,10 @@ static int controlsVisible(void)
    if (state.stage != STAGE_PLAYING || !state.player) return 0;
    uint64_t now = sys_time_get_system_time();
    if (isVideoPaused(state.player) || isVideoEnded(state.player) || state.seeking) return 1;
-   if (state.hudShownUs != 0 && now - state.hudShownUs < HUD_VISIBLE_US) return 1;
-   return state.controlsShownUs != 0 && now - state.controlsShownUs < CONTROLS_VISIBLE_US;
+   if (state.hudShownUs != 0 &&
+       now - state.hudShownUs < (uint64_t)getOsdTimeout() * 1000000ull) return 1;
+   return state.controlsShownUs != 0 &&
+          now - state.controlsShownUs < (uint64_t)getOsdTimeout() * 1000000ull;
 }
 
 static int fullPlaybackHudVisible(void)
@@ -5028,7 +5117,7 @@ static int fullPlaybackHudVisible(void)
    if (state.controlsDismissed) return 0;
    if (isVideoPaused(state.player)) return 1;
    return state.hudShownUs != 0 &&
-          sys_time_get_system_time() - state.hudShownUs < HUD_VISIBLE_US;
+          sys_time_get_system_time() - state.hudShownUs < (uint64_t)getOsdTimeout() * 1000000ull;
 }
 
 // paint each sponsor segment onto the bar in its category colour, over the progress fill so it stays

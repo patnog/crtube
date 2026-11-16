@@ -192,6 +192,8 @@ typedef struct Extractor {
    int (*getChannelCategory)(const char *channelId, int category, const char *continuation, SearchResults *out);
    // Refresh only the signed DASH bases for an Android-client LIVE session, preserving selected itags.
    int (*refreshLiveAndroid)(const char *input, int videoItag, int audioItag, StreamInfo *out);
+   // Re-resolve an Android-fallback LIVE before seek/reconnect: ANDROID first, then other clients.
+   int (*refreshLiveForSeek)(const char *input, int videoItag, int audioItag, StreamInfo *out);
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.

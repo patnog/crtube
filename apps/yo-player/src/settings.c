@@ -48,6 +48,8 @@ static const char *DEFAULT_SETTINGS =
    "overscan=0\n"
    "overscan-crop-to-fill=0\n"
    "screensaver-timeout=30\n"
+   "osd-timeout=2\n"
+   "# playback OSD inactivity timeout in seconds: 2, 3, 5, 10, 15, 30 or 60\n"
    "# output zoom in percent (-15 to +15); 0 keeps the original framing\n"
    "# independent video zoom used only when Crop to Fill is enabled (-15 to +15)\n"
    "subtitle-offset=0\n"
@@ -93,6 +95,7 @@ static char subtitleLanguage[12] = "en";
 static int overscanPercent = 0;
 static int cropToFillOverscanPercent = 0;
 static int screensaverTimeout = 30;
+static int osdTimeoutSeconds = 2;
 static int subtitleOffsetPixels = 0;
 static int subtitleStyle[5] = { 0, 0, 3, 0, 2 };
 static const char *SUBTITLE_STYLE_KEYS[5] = { "subtitle-text-color", "subtitle-background-color", "subtitle-background-opacity", "subtitle-highlight", "subtitle-font-size" };
@@ -445,6 +448,23 @@ void loadSettings(void)
       }
    }
 
+   const char *osdTimeoutValue = findSettingValue(text, "osd-timeout");
+   if (!osdTimeoutValue) {
+      if (rewriteSettingKey(SETTINGS_PATH, "osd-timeout", "2") != 0)
+         logWarn("[settings] could not add default osd-timeout key\n");
+   } else {
+      char *end = NULL;
+      long parsed = strtol(osdTimeoutValue, &end, 10);
+      if (end != osdTimeoutValue &&
+          (*end == 0 || *end == '\n' || *end == '\r' || *end == ' ' || *end == '\t') &&
+          (parsed == 2 || parsed == 3 || parsed == 5 || parsed == 10 || parsed == 15 || parsed == 30 || parsed == 60)) {
+         osdTimeoutSeconds = (int)parsed;
+      } else {
+         osdTimeoutSeconds = 2;
+         logWarn("[settings] invalid osd-timeout value, using 2\n");
+      }
+   }
+
    const char *subtitleOffsetValue = findSettingValue(text, "subtitle-offset");
    if (!subtitleOffsetValue) {
       if (rewriteSettingKey(SETTINGS_PATH, "subtitle-offset", "0") != 0)
@@ -634,6 +654,27 @@ int setSubtitleOffset(int pixels)
    subtitleOffsetPixels = pixels;
    logInfo("[settings] subtitle-offset=%d px\n", subtitleOffsetPixels);
    return 0;
+}
+
+int getOsdTimeout(void) { return osdTimeoutSeconds; }
+
+int setOsdTimeout(int seconds)
+{
+    if (seconds != 2 && seconds != 3 && seconds != 5 &&
+        seconds != 10 && seconds != 15 && seconds != 30 && seconds != 60) return -1;
+    if (seconds == osdTimeoutSeconds) return 0;
+
+    char value[8];
+    int length = snprintf(value, sizeof value, "%d", seconds);
+    if (length <= 0 || length >= (int)sizeof value ||
+        rewriteSettingKey(SETTINGS_PATH, "osd-timeout", value) != 0) {
+       logWarn("[settings] could not persist osd-timeout=%d\n", seconds);
+       return -1;
+    }
+
+    osdTimeoutSeconds = seconds;
+    logInfo("[settings] osd-timeout=%d\n", osdTimeoutSeconds);
+    return 0;
 }
 
 int getScreensaverTimeout(void) { return screensaverTimeout; }

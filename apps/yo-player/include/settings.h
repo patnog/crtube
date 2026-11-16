@@ -64,6 +64,10 @@ int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails
 int getCropToFillOverscanPercent(void);
 int setCropToFillOverscanPercent(int percent);
 
+// Playback OSD inactivity timeout in seconds: 2, 3, 5, 10, 15, 30 or 60.
+int getOsdTimeout(void);
+int setOsdTimeout(int seconds);  // 0 on success, -1 for invalid value or persistence failure
+
 // Screensaver inactivity timeout in seconds: 0=off, otherwise 30..300 in 30-second steps.
 int getScreensaverTimeout(void);
 int setScreensaverTimeout(int seconds);  // 0 on success, -1 for invalid value or persistence failure
