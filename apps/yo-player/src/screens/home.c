@@ -604,11 +604,15 @@ static void channelLookupWorker(uint64_t arg)
    home.channelLookupResult = getVideoChannelId(home.channelLookupItem.videoId,
                                                  home.channelLookupItem.channelId,
                                                  sizeof home.channelLookupItem.channelId);
-   if (home.channelLookupResult == 0 && home.channelLookupItem.channelId[0] &&
-       home.channelLookupItem.isLocalDownload) {
+   if (home.channelLookupResult == 0 && home.channelLookupItem.channelId[0]) {
       char path[MAX_PATH_LEN];
-      if (getDownloadedVideoPath(home.channelLookupItem.videoId, path, sizeof path) == 0)
-         saveDownloadedChannelId(path, home.channelLookupItem.channelId);
+      // Resolve the path instead of trusting the list's isLocalDownload flag:
+      // a download can be opened from a playlist whose cached item predates it.
+      if (getDownloadedVideoPath(home.channelLookupItem.videoId, path, sizeof path) == 0) {
+         int saveResult = saveDownloadedChannelId(path, home.channelLookupItem.channelId);
+         logInfo("[home] saved downloaded channel metadata video=%s result=%d\n",
+                 home.channelLookupItem.videoId, saveResult);
+      }
    }
    __sync_synchronize();
    setHttpRequestGroup(NULL);
@@ -3915,6 +3919,23 @@ static void updateDownloadManagement(void)
       home.downloadManagerMessage[0] = 0;
 }
 
+static void openHomeDownloadManager(void)
+{
+   DownloadManagementItem firstOngoing;
+   int ongoingCount = 0, managerLoading = 0;
+   getDownloadManagementItems(DOWNLOAD_MANAGEMENT_ONGOING, 0, &firstOngoing, 1,
+                              &ongoingCount, &managerLoading);
+   home.downloadManagerOpen = 1;
+   home.downloadManagerCategory = ongoingCount > 0 ?
+      DOWNLOAD_MANAGEMENT_ONGOING : DOWNLOAD_MANAGEMENT_COMPLETED;
+   home.downloadManagerSelected = 0;
+   home.downloadManagerScroll = 0;
+   home.downloadManagerSelectedCount = 0;
+   home.downloadManagerMessage[0] = 0;
+   requestDownloadManagementRefresh();
+   regionNavigateRepeat.timer = regionNavigateRepeat.repeats = 0;
+}
+
 static void updateHome(void)
 {
    static int previousUpdateDownloadState;
@@ -4080,6 +4101,8 @@ static void updateHome(void)
          } else {
             logWarn("[home] Triangle: async channel lookup failed video=%s\n",
                     home.channelLookupItem.videoId);
+            setLabelText(&playlistToastLabel, "Channel unavailable");
+            playlistToastShownAt = getTimeUs();
          }
          return;
       }
@@ -4169,19 +4192,7 @@ static void updateHome(void)
       return;
    }
    if (home.category == HOME_DOWNLOADS && isPadButtonPressed(PAD_BTN_R3)) {
-      DownloadManagementItem firstOngoing;
-      int ongoingCount = 0, managerLoading = 0;
-      getDownloadManagementItems(DOWNLOAD_MANAGEMENT_ONGOING, 0, &firstOngoing, 1,
-                                 &ongoingCount, &managerLoading);
-      home.downloadManagerOpen = 1;
-      home.downloadManagerCategory = ongoingCount > 0 ?
-         DOWNLOAD_MANAGEMENT_ONGOING : DOWNLOAD_MANAGEMENT_COMPLETED;
-      home.downloadManagerSelected = 0;
-      home.downloadManagerScroll = 0;
-      home.downloadManagerSelectedCount = 0;
-      home.downloadManagerMessage[0] = 0;
-      requestDownloadManagementRefresh();
-      regionNavigateRepeat.timer = regionNavigateRepeat.repeats = 0;
+      openHomeDownloadManager();
       return;
    }
    if (home.createPlaylistOskDone) {
@@ -4365,6 +4376,37 @@ static void updateHome(void)
       (home.category == HOME_DOWNLOADS && home.downloadCategory != 1));
    const SearchResult *selected = gridSelected(&home.grid);
    if (!selected) return;
+
+   // R3 in a downloaded playlist always opens the download manager.
+   if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS &&
+       home.playlistReturnCategory == HOME_DOWNLOADS &&
+       isPadButtonPressed(PAD_BTN_R3)) {
+      openHomeDownloadManager();
+      return;
+   }
+
+   // Handle Triangle before category-specific early returns so downloaded
+   // videos behave exactly like online video tiles.
+   if (isPadButtonPressed(PAD_BTN_TRIANGLE) &&
+       selected->videoId[0] && !selected->isPlaylist && !selected->isLive &&
+       !home.channelLookupPending && !home.channelLookupActive) {
+      SearchResult channelItem = *selected;
+      if (channelItem.channelId[0]) {
+         cacheCurrent();
+         openChannelForCategory(&channelItem, home.playlistReturnChannelCategory);
+      } else {
+         logInfo("[home] Triangle: resolving channel for video=%s (download=%d)\n",
+                 channelItem.videoId, channelItem.isLocalDownload);
+         home.channelLookupItem = channelItem;
+         home.channelLookupResult = -1;
+         home.channelLookupGroup.cancelled = 0;
+         home.channelLookupDone = 0;
+         home.channelLookupActive = 0;
+         home.channelLookupPending = 1;
+         pauseVideoGrid(&home.grid);
+      }
+      return;
+   }
    if (home.category == HOME_DOWNLOADS && selected->isPlaylist && selected->isLocalPlaylist) {
       if (squarePressedAt) {
          if (isPadButtonDown(PAD_BTN_SQUARE) && getTimeUs() - squarePressedAt >= SQUARE_HOLD_US) {
@@ -4578,30 +4620,16 @@ static void updateHome(void)
    // Downloaded playlist contents have no category tabs and no download action.
    int inDownloadedPlaylist = home.category == HOME_LOCAL_PLAYLIST_CONTENTS &&
                               home.playlistReturnCategory == HOME_DOWNLOADS;
-   if (homeL1Hint >= 0) setButtonHintShown(&hints, homeL1Hint, !inDownloadedPlaylist);
-   if (homeR1Hint >= 0) setButtonHintShown(&hints, homeR1Hint, !inDownloadedPlaylist);
+   int inOnlinePlaylist = home.category == HOME_PLAYLIST_CONTENTS;
+   int showCategoryHints = !inDownloadedPlaylist && !inOnlinePlaylist;
+   if (homeL1Hint >= 0) setButtonHintShown(&hints, homeL1Hint, showCategoryHints);
+   if (homeR1Hint >= 0) setButtonHintShown(&hints, homeR1Hint, showCategoryHints);
    if (homeDownloadHint >= 0 && inDownloadedPlaylist) {
       setButtonHintCaption(&hints, homeDownloadHint, "Manage downloads");
       setButtonHintShown(&hints, homeDownloadHint, 1);
    }
 
    if (handleHomeSquareAction(selected)) return;
-   if (inDownloadedPlaylist && isPadButtonPressed(PAD_BTN_R3)) {
-      DownloadManagementItem firstOngoing;
-      int ongoingCount = 0, managerLoading = 0;
-      getDownloadManagementItems(DOWNLOAD_MANAGEMENT_ONGOING, 0, &firstOngoing, 1,
-                                 &ongoingCount, &managerLoading);
-      home.downloadManagerOpen = 1;
-      home.downloadManagerCategory = ongoingCount > 0 ?
-         DOWNLOAD_MANAGEMENT_ONGOING : DOWNLOAD_MANAGEMENT_COMPLETED;
-      home.downloadManagerSelected = 0;
-      home.downloadManagerScroll = 0;
-      home.downloadManagerSelectedCount = 0;
-      home.downloadManagerMessage[0] = 0;
-      requestDownloadManagementRefresh();
-      regionNavigateRepeat.timer = regionNavigateRepeat.repeats = 0;
-      return;
-   }
    if (isPadButtonPressed(PAD_BTN_R3)) {
       if (selected->isPlaylist) openDownloadPlaylistConfirmation(selected);
       else if (!selected->isLive && selected->videoId[0]) {
@@ -4609,31 +4637,6 @@ static void updateHome(void)
          if (getDownloadedVideoPath(selected->videoId, downloadedPath, sizeof downloadedPath) != 0)
             enqueueDownload(selected);
       }
-      return;
-   }
-   // Recommended tiles don't say which channel they are from
-   if (!home.channelLookupActive && isPadButtonPressed(PAD_BTN_TRIANGLE)) {
-      logInfo("[diag-triangle] home page=%d selected=%d videoId=%s channelIdLen=%d authorLen=%d\n",
-         home.category, home.grid.selected, selected->videoId,
-         (int)strlen(selected->channelId), (int)strlen(selected->author));
-      SearchResult channelItem = *selected;
-      if (!channelItem.channelId[0]) {
-         logInfo("[home] Triangle: scheduling async channel lookup for video=%s\n", channelItem.videoId);
-         home.channelLookupItem = channelItem;
-         home.channelLookupResult = -1;
-         home.channelLookupGroup.cancelled = 0;
-         home.channelLookupDone = 0;
-         home.channelLookupActive = 0;
-         home.channelLookupPending = 1;
-         pauseVideoGrid(&home.grid);
-         return;
-      }
-
-      logInfo("[diag-triangle] home cacheCurrent begin\n");
-      cacheCurrent();
-      logInfo("[diag-triangle] home cacheCurrent done; openChannelFor begin\n");
-      openChannelForCategory(&channelItem, home.playlistReturnChannelCategory);
-      logInfo("[diag-triangle] home openChannelFor returned\n");
       return;
    }
    if (isPadButtonPressed(PAD_BTN_CROSS)) {

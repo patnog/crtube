@@ -654,8 +654,18 @@ int saveDownloadedChannelId(const char *videoPath, const char *channelId)
    char published[24] = "", views[32] = "", likes[32] = "Offline";
    if (loadDownloadedMetadata(videoPath, title, sizeof title, author, sizeof author,
                               description, sizeof description, published, sizeof published,
-                              views, sizeof views, likes, sizeof likes) != 0)
-      return -1;
+                              views, sizeof views, likes, sizeof likes) != 0) {
+      // Older library entries may have no metadata sidecar. Create a minimal
+      // one rather than losing the resolved channel ID for those downloads.
+      const char *base = strrchr(videoPath, '/');
+      base = base ? base + 1 : videoPath;
+      strCopy(title, sizeof title, base);
+      char *extension = strrchr(title, '.');
+      if (extension) *extension = 0;
+      strCopy(author, sizeof author, "Downloaded");
+      description[0] = published[0] = views[0] = 0;
+      strCopy(likes, sizeof likes, "Offline");
+   }
    int duration = loadDownloadedDuration(videoPath);
    char path[MAX_PATH_LEN], data[3000];
    buildSidecarPath(path, sizeof path, videoPath, ".meta");

@@ -5657,10 +5657,9 @@ static void drawPlay(void)
       drawButtonHints(&liveFailureHints, state.screenW);
    }
 
-   if (!state.liveFailureVisible &&
-       (controlsVisible() || (state.player && isVideoPaused(state.player))) &&
-       !state.controlsDismissed)
-   // Restore the selected library scale before the next screen is drawn.
+   // Always restore the selected library scale before the next screen is drawn.
+   // This must not depend on HUD visibility or playback state: otherwise the
+   // temporary 1.0x playback scale can leak into navigation.
    setGfxSdUiScale(selectedUiScale);
 
    // Split the UI-thread frame into clear, frame acquisition, YUV submission and remaining HUD.
