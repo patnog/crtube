@@ -23,7 +23,16 @@ typedef struct {
 // instead (getLiveSourceFirstSq says where). ended: a live stream that is over (YouTube's post-live recording) -
 // edgeSq is its last segment, after which the stream ends instead of waiting, and playSq < 0 begins at startSq,
 // as a video begins at its start. NULL on failure.
-LiveSource *openLiveSource(const char *baseUrl, long startSq, long edgeSq, long playSq, int ended);
+void setLiveSourceDetailedDiagnosticsEnabled(int enabled);
+void setLiveSourceUrlDetailsEnabled(int enabled);
+
+// refreshable is enabled only for the Android LIVE descriptor; it pauses on signed-URL 403
+// and accepts a replacement BaseURL without resetting the buffered byte stream.
+LiveSource *openLiveSource(const char *baseUrl, long startSq, long edgeSq, long playSq, int ended, int refreshable);
+int liveSourceNeedsRenewal(const LiveSource *source);
+// Replaces video and optional separate-audio bases as one operation, preserving nextSq and buffers.
+int refreshLiveSourceBasePair(LiveSource *video, const char *videoBase, long videoEdgeSq,
+                              LiveSource *audio, const char *audioBase, long audioEdgeSq);
 
 int64_t  readLiveSource(LiveSource *source, void *buffer, uint64_t length);   // bytes, 0 = eof/cancelled, -1 err
 int      seekLiveSource(LiveSource *source, uint64_t offset);                 // within the buffered window; 0 / -1

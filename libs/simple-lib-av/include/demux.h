@@ -52,6 +52,21 @@ static inline uint64_t seekVideoDemuxer(VideoDemuxer *demuxer, uint64_t targetNs
    return demuxer->isMp4 ? seekMp4Demuxer(&demuxer->container.mp4, targetNs, landAfter) : seekMkvDemuxer(&demuxer->container.mkv, targetNs, landAfter);
 }
 
+static inline int getVideoDemuxerLiveRenewalNeeded(const VideoDemuxer *demuxer)
+{
+   return demuxer && demuxer->isMp4
+      ? getVideoSourceLiveRenewalNeeded(&demuxer->container.mp4.source) : 0;
+}
+
+static inline int refreshVideoDemuxerLiveBasePair(VideoDemuxer *video, const char *videoBase, long videoEdgeSq,
+                                                  VideoDemuxer *audio, const char *audioBase, long audioEdgeSq)
+{
+   if (!video || !video->isMp4 || (audio && !audio->isMp4)) return -1;
+   return refreshVideoSourceLiveBasePair(&video->container.mp4.source, videoBase, videoEdgeSq,
+                                         audio ? &audio->container.mp4.source : NULL,
+                                         audioBase, audioEdgeSq);
+}
+
 static inline int getVideoDemuxerLiveBufferStatus(const VideoDemuxer *demuxer, LiveSourceBufferStatus *status)
 {
    return demuxer && demuxer->isMp4

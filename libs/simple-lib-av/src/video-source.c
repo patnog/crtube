@@ -20,11 +20,14 @@ static int seekBackend(VideoSource *source, uint64_t offset)
    return seekFs(&source->file, (int64_t)offset, VFS_SEEK_SET) < 0 ? -1 : 0;
 }
 
-// dashseg is an active LIVE window; dashvod is a just-ended LIVE recording. Both accept an optional playSq.
-static const char *parseLivePath(const char *path, long *startSq, long *edgeSq, long *playSq, int *ended)
+// dashseg is the standard LIVE window, dashand is refreshable Android LIVE, and dashvod is post-live.
+static const char *parseLivePath(const char *path, long *startSq, long *edgeSq, long *playSq,
+                                 int *ended, int *refreshable)
 {
-   if (strncmp(path, "dashseg|", 8) != 0 && strncmp(path, "dashvod|", 8) != 0) return NULL;
+   if (strncmp(path, "dashseg|", 8) != 0 && strncmp(path, "dashvod|", 8) != 0 &&
+       strncmp(path, "dashand|", 8) != 0) return NULL;
    *ended = path[4] == 'v';
+   *refreshable = strncmp(path, "dashand|", 8) == 0;
    const char *cursor = path + 8;
    *startSq = atol(cursor);
    cursor = strchr(cursor, '|');
@@ -51,10 +54,10 @@ int openVideoSource(VideoSource *source, const char *path)
    if (!source->buffer) return -1;
 
    long startSq = 0, edgeSq = 0, playSq = -1;
-   int ended = 0;
-   const char *liveBase = parseLivePath(path, &startSq, &edgeSq, &playSq, &ended);
+   int ended = 0, refreshable = 0;
+   const char *liveBase = parseLivePath(path, &startSq, &edgeSq, &playSq, &ended, &refreshable);
    if (liveBase) {
-      source->live = openLiveSource(liveBase, startSq, edgeSq, playSq, ended);
+      source->live = openLiveSource(liveBase, startSq, edgeSq, playSq, ended, refreshable);
       if (!source->live) { free(source->buffer); source->buffer = 0; return -1; }
       source->isLive = 1;
       source->size   = 0;   // unbounded live stream
@@ -129,6 +132,20 @@ int seekVideoSource(VideoSource *source, uint64_t offset)
 }
 
 uint64_t getVideoSourcePosition(const VideoSource *source) { return source->pos; }
+
+int getVideoSourceLiveRenewalNeeded(const VideoSource *source)
+{
+   return source && source->isOpen && source->isLive ? liveSourceNeedsRenewal(source->live) : 0;
+}
+
+int refreshVideoSourceLiveBasePair(VideoSource *video, const char *videoBase, long videoEdgeSq,
+                                   VideoSource *audio, const char *audioBase, long audioEdgeSq)
+{
+   if (!video || !video->isOpen || !video->isLive ||
+       (audio && (!audio->isOpen || !audio->isLive))) return -1;
+   return refreshLiveSourceBasePair(video->live, videoBase, videoEdgeSq,
+                                    audio ? audio->live : NULL, audioBase, audioEdgeSq);
+}
 
 int getVideoSourceLiveBufferStatus(const VideoSource *source, LiveSourceBufferStatus *status)
 {

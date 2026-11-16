@@ -64,9 +64,8 @@ static const char *WEB_UA =
 static const char *PLAYER_BODY_FMT =
    "{\"context\":{\"client\":{" PLAYER_CLIENT ",\"visitorData\":\"%s\"}},\"videoId\":\"%s\",\"contentCheckOk\":true,\"racyCheckOk\":true}";
 
-// live streams need the ANDROID_VR client: VISIONOS returns only an HLS manifest for them, which the live
-// path can't read, while ANDROID_VR still returns the DASH manifest it needs. Live fetches discrete
-// segments, so the ~60s cap that pushed VOD off ANDROID_VR does not apply here.
+// VISIONOS remains the primary player client. When it provides no DASH manifest for a LIVE,
+// this Android VR request is the first secondary attempt before the ordered LIVE fallback list.
 #define LIVE_VERSION "1.65.10"
 #define LIVE_CLIENT \
    "\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"" LIVE_VERSION "\"," \
@@ -822,7 +821,7 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
    // Try distinct non-primary identities in descending likelihood of exposing a
    // usable DASH timeline. ANDROID_VR (index 9) was already used by LIVE_BODY_FMT.
    // Every remaining client appears exactly once; no retry loop can revisit one.
-   static const int liveOrder[] = { 3, 2, 1, 0, 7, 6, 5, 4, 8 };
+   static const int liveOrder[] = { 1, 3, 2, 0, 7, 6, 5, 4, 8 };
    const int attempts = liveMode ? LIVE_PLAYER_FALLBACK_ATTEMPTS : count;
    for (int attempt = 0; attempt < attempts; attempt++) {
       if (isHttpRequestGroupCancelled()) return 0;
@@ -852,8 +851,10 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
       parseFormats(resp, end, out);
       if (liveMode) {
          // A LIVE retry is useful only when it exposes the DASH segment timeline
-         // consumed by live-source. Plain HLS/progressive URLs are not substitutes.
-         parseLiveManifest(resp, end, out, "dashseg");
+         // consumed by live-source. Only active ANDROID LIVE sessions are refreshable;
+         // post-live recordings and VISIONOS retain their existing descriptor path.
+         int androidLive = !out->isPostLive && strcmp(clients[i].name, "ANDROID") == 0;
+         parseLiveManifest(resp, end, out, androidLive ? "dashand" : "dashseg");
          int kept = 0;
          for (int j = 0; j < out->formatCount; j++) {
             if (!out->formats[j].isLiveSegmented) continue;
@@ -863,6 +864,7 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
          out->formatCount = kept;
          if (out->formatCount > 0) {
             out->isLive = 1;
+            out->liveAndroidClient = androidLive;
             out->liveDvr = strstr(resp, "\"isLiveDvrEnabled\":true") != NULL;
             const char *streaming = strstr(resp, "\"streamingData\"");
             jsonInt(streaming ? streaming : resp, end, "targetDurationSec", &out->liveSegmentSec);
@@ -1210,6 +1212,60 @@ static int isMembersOnlyResponse(const char *text)
       }
    }
    return 0;
+}
+
+static int refreshLiveAndroid(const char *input, int videoItag, int audioItag, StreamInfo *out)
+{
+   memset(out, 0, sizeof *out);
+   char videoId[16];
+   if (!extractVideoId(input, videoId, sizeof videoId) || ensureVisitorData() != 0) return -1;
+
+   char *resp = (char *)malloc(RESP_CAP);
+   if (!resp) return -1;
+   int respLen = 0;
+   static const char *ANDROID_FIELDS =
+      "\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\","
+      "\"androidSdkVersion\":34,\"hl\":\"en\",\"gl\":\"US\"";
+   logInfo("[yt-live-renew] resolving Android LIVE bases video=%s itags=%d/%d\n",
+           videoId, videoItag, audioItag);
+   int rc = fetchPlayerClient(ANDROID_FIELDS, WEB_UA, "3", "20.10.38", videoId, resp, &respLen);
+   if (rc != 0 || isHttpRequestGroupCancelled()) {
+      logError("[yt-live-renew] Android player request failed rc=%d\n", rc);
+      free(resp);
+      return rc ? rc : -1;
+   }
+
+   const char *end = resp + respLen;
+   if (strstr(resp, "\"isPostLiveDvr\":true")) {
+      logWarn("[yt-live-renew] Android response has transitioned to post-live; active BaseURL renewal is no longer applicable\n");
+      free(resp);
+      return -1;
+   }
+   parseFormats(resp, end, out);
+   parseLiveManifest(resp, end, out, "dashand");
+   int kept = 0;
+   for (int i = 0; i < out->formatCount; i++) {
+      if (!out->formats[i].isLiveSegmented) continue;
+      if (kept != i) out->formats[kept] = out->formats[i];
+      kept++;
+   }
+   out->formatCount = kept;
+   out->isLive = 1;
+   out->liveAndroidClient = 1;
+   out->liveDvr = strstr(resp, "\"isLiveDvrEnabled\":true") != NULL;
+   const char *streaming = strstr(resp, "\"streamingData\"");
+   jsonInt(streaming ? streaming : resp, end, "targetDurationSec", &out->liveSegmentSec);
+   jsonInt(streaming ? streaming : resp, end, "maxDvrDurationSec", &out->liveWindowSec);
+
+   int haveVideo = 0, haveAudio = audioItag <= 0;
+   for (int i = 0; i < out->formatCount; i++) {
+      if (out->formats[i].itag == videoItag && out->formats[i].hasVideo) haveVideo = 1;
+      if (audioItag > 0 && out->formats[i].itag == audioItag && out->formats[i].hasAudio) haveAudio = 1;
+   }
+   logInfo("[yt-live-renew] Android manifest formats=%d videoMatch=%d audioMatch=%d\n",
+           out->formatCount, haveVideo, haveAudio);
+   free(resp);
+   return haveVideo && haveAudio ? 0 : -1;
 }
 
 static int extract(const char *input, StreamInfo *out)
@@ -2490,5 +2546,5 @@ const Extractor youtubeExtractor = {
    "youtube", matches, extract, search, fetchTrending, getChannel, fetchAccountFeed,
    youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly, fetchLive,
    getChannelLive, fetchAccountPlaylists, fetchAccountPlaylistVideos,
-   youtubeGetVideoStatus, getChannelCategory
+   youtubeGetVideoStatus, getChannelCategory, refreshLiveAndroid
 };

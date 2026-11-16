@@ -107,6 +107,8 @@ void drawGfxTextureFixedSize(int x, int y, int w, int h, GfxTexture tex, float u
 void drawGfxTextureFixedPosition(int x, int y, int w, int h, GfxTexture tex, float u0, float v0, float u1, float v1, uint32_t tint, GfxFilter filter);
 void drawGfxTextureFixedSizeScaledPosition(int x, int y, int w, int h, GfxTexture tex, float u0, float v0, float u1, float v1, uint32_t tint, GfxFilter filter);
 void endGfxFrame(void);
+void setGfxDetailedDiagnosticsEnabled(int enabled);
+void setGfxEndFrameDiagnosticsEnabled(int enabled);
 
 // Blocks until the RSX has finished all submitted commands. Call before reusing
 // or freeing VRAM that a previous frame drew from, so the GPU is never reading

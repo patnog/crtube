@@ -32,6 +32,9 @@ int64_t  readVideoSource(VideoSource *source, void *buffer, uint64_t length); //
 int      seekVideoSource(VideoSource *source, uint64_t offset);              // absolute seek; 0 / -1
 uint64_t getVideoSourcePosition(const VideoSource *source);
 int      getVideoSourceLiveBufferStatus(const VideoSource *source, LiveSourceBufferStatus *status);
+int      getVideoSourceLiveRenewalNeeded(const VideoSource *source);
+int      refreshVideoSourceLiveBasePair(VideoSource *video, const char *videoBase, long videoEdgeSq,
+                                        VideoSource *audio, const char *audioBase, long audioEdgeSq);
 uint64_t getVideoSourceSize(const VideoSource *source);
 long     getVideoSourceLiveFirstSq(const VideoSource *source);
 int      getVideoSourceLiveHttpError(const VideoSource *source);

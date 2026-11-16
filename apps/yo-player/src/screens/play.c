@@ -10,7 +10,7 @@
 // the UI thread adopts the built player and pulls frames each render frame.
 
 #include "app-config.h"
-#include "diagnostics.h"
+#include "../../BUILD_CONFIG.h"
 #include "screens/play.h"
 #include "screens/home.h"
 #include "downloads.h"
@@ -383,6 +383,7 @@ static struct {
    int              isLive;           // active or recently-ended DASH LIVE stream
    int              liveEnded;        // post-live recording: edge is fixed and playback ends there
    int              liveDvr;          // rewind enabled by the broadcaster (always enabled for post-live)
+   int              liveAndroidClient; // only Android-fallback LIVE streams use in-place signed-base renewal
    int              liveSegmentSec;   // target duration of each numbered DASH segment
    int              liveWindowSegs;   // advertised DVR window in segments
    long             liveFloorSq;      // earliest segment available in the manifest
@@ -399,6 +400,21 @@ static struct {
    int              liveRefreshActive;
    int              liveRefreshAttempts;
    uint64_t         liveRefreshStableSinceUs;
+   int              liveBaseRefreshActive;
+   volatile int     liveBaseRefreshDone;
+   int              liveBaseRefreshSuccess;
+   int              liveBaseRefreshAttempts;
+   uint64_t         liveBaseRefreshNextTryUs;
+   sys_ppu_thread_t liveBaseRefreshTid;
+   VideoPlayer     *liveBaseRefreshPlayer;
+   StreamInfo      *liveBaseRefreshInfo;
+   int              liveBaseRefreshVideoItag, liveBaseRefreshAudioItag;
+   int              liveBaseRefreshNeedAudio;
+   char             liveBaseRefreshAudioTrackId[40];
+   char             liveBaseRefreshVideoBase[MAX_STREAM_URL];
+   char             liveBaseRefreshAudioBase[MAX_STREAM_URL];
+   long             liveBaseRefreshVideoStartSq, liveBaseRefreshVideoEdgeSq, liveBaseRefreshAudioEdgeSq;
+   int              liveBaseRefreshWindowSec;
    uint64_t         liveLastFrameUs;  // last newly presented frame; detects a stalled LIVE transport
    int              liveFailureVisible;
    VideoPlayer     *vodRetiringPlayer;
@@ -532,13 +548,221 @@ static void fail(const char *reason)
 static void writeLiveDescriptor(char *out, int cap, const char *descriptor, long edgeSq, long playSq)
 {
    out[0] = 0;
-   if (strncmp(descriptor, "dashseg|", 8) != 0 && strncmp(descriptor, "dashvod|", 8) != 0) return;
+   if (strncmp(descriptor, "dashseg|", 8) != 0 && strncmp(descriptor, "dashvod|", 8) != 0 &&
+       strncmp(descriptor, "dashand|", 8) != 0) return;
    long firstSq = atol(descriptor + 8);
    const char *edge = strchr(descriptor + 8, '|');
    if (!edge) return;
    edge = strchr(edge + 1, '|');
    if (!edge) return;
    snprintf(out, cap, "%.7s|%ld|%ld|%ld|%s", descriptor, firstSq, edgeSq, playSq, edge + 1);
+}
+
+static uint64_t liveBaseRefreshIntervalUs(void)
+{
+   uint64_t segmentSec = state.liveSegmentSec > 0 ? (uint64_t)state.liveSegmentSec : 5ull;
+   uint64_t intervalSec = segmentSec * 4ull;
+   if (intervalSec < 4ull) intervalSec = 4ull;
+   if (intervalSec > 20ull) intervalSec = 20ull;
+   return intervalSec * 1000000ull;
+}
+
+static uint64_t liveBaseRefreshRetryDelayUs(void)
+{
+   unsigned shift = state.liveBaseRefreshAttempts > 0 ? (unsigned)(state.liveBaseRefreshAttempts - 1) : 0;
+   if (shift > 3) shift = 3;
+   return (2000000ull << shift); // 2, 4, 8, then 16 seconds; no fixed attempt limit
+}
+
+static const StreamFormat *findLiveFormatByItag(const StreamInfo *info, int itag)
+{
+   if (!info || itag <= 0) return NULL;
+   for (int i = 0; i < info->formatCount; i++)
+      if (info->formats[i].itag == itag && info->formats[i].isLiveSegmented &&
+          info->formats[i].hasVideo) return &info->formats[i];
+   return NULL;
+}
+
+static const StreamFormat *findLiveAudioFormatByItag(const StreamInfo *info, int itag, const char *trackId)
+{
+   if (!info || itag <= 0) return NULL;
+   int original = trackId && strcmp(trackId, "__original_upload__") == 0;
+   for (int i = 0; i < info->formatCount; i++) {
+      const StreamFormat *format = &info->formats[i];
+      if (format->itag != itag || !format->isLiveSegmented || !format->hasAudio || format->hasVideo) continue;
+      if (original) {
+         if (!format->audioTrackId[0] && !format->audioIsAutoDubbed) return format;
+      } else if (!trackId || !trackId[0] || strcmp(format->audioTrackId, trackId) == 0) {
+         return format;
+      }
+   }
+   return NULL;
+}
+
+static int extractLiveFormatBase(const StreamFormat *format, char *out, int cap)
+{
+   if (!format || !out || cap <= 0 || strncmp(format->url, "dashand|", 8) != 0) return -1;
+   const char *first = strchr(format->url + 8, '|');
+   const char *second = first ? strchr(first + 1, '|') : NULL;
+   if (!second || !second[1]) return -1;
+   int length = (int)strlen(second + 1);
+   if (length >= cap) return -1;
+   memcpy(out, second + 1, (size_t)length + 1);
+   return 0;
+}
+
+static void updateStoredAndroidLiveUrls(const StreamInfo *info)
+{
+   for (int i = 0; i < state.videoCount; i++) {
+      const StreamFormat *format = findLiveFormatByItag(info, state.videoItags[i]);
+      if (format && strncmp(format->url, "dashand|", 8) == 0)
+         strCopy(state.videoUrls[i], sizeof state.videoUrls[i], format->url);
+   }
+   for (int i = 0; i < state.audioCount; i++) {
+      const StreamFormat *format = findLiveAudioFormatByItag(info, state.audioItags[i], state.audioIds[i]);
+      if (format &&
+          strncmp(format->url, "dashand|", 8) == 0)
+         strCopy(state.audioUrls[i], sizeof state.audioUrls[i], format->url);
+   }
+   if (state.fallbackAudioItag > 0) {
+      const StreamFormat *format = findLiveAudioFormatByItag(info, state.fallbackAudioItag, NULL);
+      if (format &&
+          strncmp(format->url, "dashand|", 8) == 0)
+         strCopy(state.fallbackAudioUrl, sizeof state.fallbackAudioUrl, format->url);
+   }
+}
+
+// Resolve a fresh manifest using ANDROID only. The active VideoPlayer keeps decoding while
+// this worker prepares the matching itag BaseURLs; no VISIONOS request or player rebuild occurs.
+static void liveBaseRefreshWorker(uint64_t arg)
+{
+   (void)arg;
+   setHttpRequestGroup(&state.requestGroup);
+   StreamInfo *info = (StreamInfo *)calloc(1, sizeof *info);
+   int rc = -1;
+   if (info && !playbackCancelRequested()) {
+      const Extractor *extractor = findExtractor(requestedInput);
+      if (extractor && extractor->refreshLiveAndroid)
+         rc = extractor->refreshLiveAndroid(requestedInput, state.liveBaseRefreshVideoItag,
+                                             state.liveBaseRefreshNeedAudio ? state.liveBaseRefreshAudioItag : 0,
+                                             info);
+   }
+   state.liveBaseRefreshSuccess = 0;
+   state.liveBaseRefreshVideoBase[0] = 0;
+   state.liveBaseRefreshAudioBase[0] = 0;
+   if (rc == 0 && !playbackCancelRequested()) {
+      const StreamFormat *video = findLiveFormatByItag(info, state.liveBaseRefreshVideoItag);
+      const StreamFormat *audio = state.liveBaseRefreshNeedAudio
+                                ? findLiveAudioFormatByItag(info, state.liveBaseRefreshAudioItag,
+                                                           state.liveBaseRefreshAudioTrackId) : NULL;
+      if (video && (!state.liveBaseRefreshNeedAudio || audio) &&
+          extractLiveFormatBase(video, state.liveBaseRefreshVideoBase,
+                                sizeof state.liveBaseRefreshVideoBase) == 0 &&
+          (!audio || extractLiveFormatBase(audio, state.liveBaseRefreshAudioBase,
+                                           sizeof state.liveBaseRefreshAudioBase) == 0)) {
+         state.liveBaseRefreshVideoStartSq = video->liveStartSq;
+         state.liveBaseRefreshVideoEdgeSq = video->liveEdgeSq;
+         state.liveBaseRefreshWindowSec = info->liveWindowSec;
+         state.liveBaseRefreshAudioEdgeSq = audio ? audio->liveEdgeSq : 0;
+         state.liveBaseRefreshSuccess = 1;
+      }
+   }
+   if (!state.liveBaseRefreshSuccess && !playbackCancelRequested())
+      logWarn("[yt-live-renew] Android manifest refresh failed rc=%d videoItag=%d audioItag=%d\n",
+              rc, state.liveBaseRefreshVideoItag, state.liveBaseRefreshNeedAudio ? state.liveBaseRefreshAudioItag : 0);
+   if (state.liveBaseRefreshSuccess && !playbackCancelRequested()) {
+      state.liveBaseRefreshInfo = info;
+      info = NULL;
+   }
+   if (info) free(info->captions);
+   free(info);
+   __sync_synchronize();
+   state.liveBaseRefreshDone = 1;
+   setHttpRequestGroup(NULL);
+   exitThread();
+}
+
+static void scheduleLiveBaseRefresh(int urgent)
+{
+   if (!state.isLive || !state.liveAndroidClient || state.liveEnded ||
+       state.stage != STAGE_PLAYING || !state.player || state.liveBaseRefreshActive ||
+       state.liveRefreshActive || state.threadActive || state.resolutionSwitchThreadActive ||
+       state.audioSwitchThreadActive || state.liveReopenThreadActive || state.subThreadActive)
+      return;
+   uint64_t now = sys_time_get_system_time();
+   if (state.liveBaseRefreshNextTryUs && now < state.liveBaseRefreshNextTryUs &&
+       (!urgent || state.liveBaseRefreshAttempts > 0)) return;
+
+   state.liveBaseRefreshPlayer = state.player;
+   state.liveBaseRefreshVideoItag = state.vidItag;
+   state.liveBaseRefreshAudioItag = state.audItag;
+   state.liveBaseRefreshNeedAudio = isVideoPlayerUsingSeparateAudio(state.player);
+   state.liveBaseRefreshAudioTrackId[0] = 0;
+   if (state.liveBaseRefreshNeedAudio && state.audioPick >= 0 && state.audioPick < state.audioCount)
+      strCopy(state.liveBaseRefreshAudioTrackId, sizeof state.liveBaseRefreshAudioTrackId,
+              state.audioIds[state.audioPick]);
+   state.liveBaseRefreshSuccess = 0;
+   state.liveBaseRefreshInfo = NULL;
+   state.liveBaseRefreshDone = 0;
+   state.liveBaseRefreshActive = 1;
+   state.liveBaseRefreshAttempts++;
+   logInfo("[yt-live-renew] starting Android BaseURL refresh attempt=%d urgent=%d itags=%d/%d separateAudio=%d\n",
+           state.liveBaseRefreshAttempts, urgent, state.liveBaseRefreshVideoItag,
+           state.liveBaseRefreshNeedAudio ? state.liveBaseRefreshAudioItag : 0,
+           state.liveBaseRefreshNeedAudio);
+   if (spawnJoinableThread(&state.liveBaseRefreshTid, liveBaseRefreshWorker, 0,
+                           THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-live-base-refresh") != 0) {
+      state.liveBaseRefreshActive = 0;
+      state.liveBaseRefreshNextTryUs = now + liveBaseRefreshRetryDelayUs();
+      logError("[yt-live-renew] could not start Android BaseURL refresh worker\n");
+   }
+}
+
+static void reapLiveBaseRefresh(void)
+{
+   if (!state.liveBaseRefreshActive || !state.liveBaseRefreshDone) return;
+   joinThread(state.liveBaseRefreshTid);
+   __sync_synchronize();
+   state.liveBaseRefreshActive = 0;
+   state.liveBaseRefreshDone = 0;
+   uint64_t now = sys_time_get_system_time();
+   int applied = 0;
+   StreamInfo *info = state.liveBaseRefreshInfo;
+   int audioTrackMatches = !state.liveBaseRefreshNeedAudio ||
+      (state.audioPick >= 0 && state.audioPick < state.audioCount &&
+       strcmp(state.audioIds[state.audioPick], state.liveBaseRefreshAudioTrackId) == 0) ||
+      (state.audioPick < 0 && !state.liveBaseRefreshAudioTrackId[0]);
+   if (state.liveBaseRefreshSuccess && info && state.player == state.liveBaseRefreshPlayer &&
+       state.isLive && state.liveAndroidClient && !state.resolutionSwitchThreadActive &&
+       !state.audioSwitchThreadActive && !state.liveReopenThreadActive && audioTrackMatches &&
+       state.vidItag == state.liveBaseRefreshVideoItag && state.audItag == state.liveBaseRefreshAudioItag) {
+      applied = refreshVideoPlayerLiveBases(state.player,
+                    state.liveBaseRefreshVideoBase, state.liveBaseRefreshVideoEdgeSq,
+                    state.liveBaseRefreshNeedAudio ? state.liveBaseRefreshAudioBase : NULL,
+                    state.liveBaseRefreshAudioEdgeSq) == 0;
+   }
+   if (applied) {
+      updateStoredAndroidLiveUrls(info);
+      state.liveEdgeSq = state.liveBaseRefreshVideoEdgeSq;
+      state.liveFloorSq = state.liveBaseRefreshVideoStartSq;
+      if (state.liveBaseRefreshWindowSec > 0 && state.liveSegmentSec > 0) {
+         state.liveWindowSegs = state.liveBaseRefreshWindowSec / state.liveSegmentSec;
+         if (state.liveWindowSegs < 1) state.liveWindowSegs = 1;
+      }
+      state.liveEdgeUs = now;
+      state.liveBaseRefreshAttempts = 0;
+      state.liveRefreshAttempts = 0;
+      state.liveBaseRefreshNextTryUs = now + liveBaseRefreshIntervalUs();
+      logInfo("[yt-live-renew] Android BaseURL pair applied without restarting playback; edgeSq=%ld next refresh in %llums\n",
+              state.liveEdgeSq, (unsigned long long)(liveBaseRefreshIntervalUs()/1000ull));
+   } else {
+      state.liveBaseRefreshNextTryUs = now + liveBaseRefreshRetryDelayUs();
+      logWarn("[yt-live-renew] Android BaseURL refresh not applied; retry in %llums\n",
+              (unsigned long long)(liveBaseRefreshRetryDelayUs()/1000ull));
+   }
+   if (info) free(info->captions);
+   free(info);
+   state.liveBaseRefreshInfo = NULL;
 }
 
 // Wait for the decoder/audio pipeline to produce a usable pre-roll. This runs on the
@@ -1015,9 +1239,32 @@ static int getRequestedDownloadedId(char out[12])
    return 1;
 }
 
+#if BUILD_DIAG_LIVE_RECOVERY
+static unsigned liveUrlFingerprint(const char *url)
+{
+   unsigned hash = 2166136261u;
+   if (!url) return 0;
+   while (*url) { hash ^= (unsigned char)*url++; hash *= 16777619u; }
+   return hash;
+}
+
+static long long liveUrlExpiry(const char *url)
+{
+   const char *p = url ? strstr(url, "expire=") : NULL;
+   if (p) return strtoll(p + 7, NULL, 10);
+   p = url ? strstr(url, "/expire/") : NULL;
+   return p ? strtoll(p + 8, NULL, 10) : 0;
+}
+#endif
+
 static void worker(uint64_t arg)
 {
    (void)arg;
+#if BUILD_DIAG_LIVE_RECOVERY
+   int liveRecoveryWorker = state.liveRefreshActive;
+   uint64_t recoveryWorkerStartUs = sys_time_get_system_time();
+   uint64_t recoveryResolveStartUs = 0;
+#endif
    setHttpRequestGroup(&state.requestGroup);
    StreamInfo *info = NULL;
    if (requestedIsLocal) {
@@ -1079,7 +1326,18 @@ static void worker(uint64_t arg)
    if (!info || !extractor) { fail("unrecognised link or id"); goto done; }
 
    // resolve (stage stays STAGE_LOADING, set by initPlay's memset, until we adopt or fail)
+#if BUILD_DIAG_LIVE_RECOVERY
+   if (liveRecoveryWorker) recoveryResolveStartUs = sys_time_get_system_time();
+#endif
    int extractResult = extractor->extract(requestedInput, info);
+#if BUILD_DIAG_LIVE_RECOVERY
+   if (liveRecoveryWorker)
+      logInfo("[yt-live-renew-diag] resolve rc=%d elapsedMs=%llu formats=%d live=%d postLive=%d segmentSec=%d windowSec=%d\n",
+              extractResult,
+              (unsigned long long)((sys_time_get_system_time()-recoveryResolveStartUs)/1000ull),
+              info->formatCount, info->isLive, info->isPostLive,
+              info->liveSegmentSec, info->liveWindowSec);
+#endif
    if (playbackCancelRequested()) goto done;
    if (extractResult != 0 || info->formatCount == 0) {
       fail(extractResult == -2 ? "This video is available to channel members only." : "resolve failed");
@@ -1104,6 +1362,7 @@ static void worker(uint64_t arg)
    const StreamFormat *video = pickBestPlaybackVideo(info);
    if (!video) { fail("no playable mp4 video"); goto done; }
    int isLivePlayback = info->isLive || info->isPostLive || video->isLiveSegmented;
+   state.liveAndroidClient = isLivePlayback && info->liveAndroidClient;
    const StreamFormat *availableAudio = pickBestAudio(info);
    const StreamFormat *qualityFormats[MAX_PLAYBACK_QUALITIES] = {0};
    state.videoCount = 0;
@@ -1135,6 +1394,19 @@ static void worker(uint64_t arg)
    state.resolutionIndex = selectedQuality;
    // A muxed rendition carries its own audio. Video-only choices use the original/default AAC track.
    const StreamFormat *audio = video->hasAudio ? NULL : availableAudio;
+#if BUILD_DIAG_LIVE_RECOVERY
+   if (liveRecoveryWorker) {
+      logInfo("[yt-live-renew-diag] formats oldVideo=%d oldAudio=%d newVideo=%d newAudio=%d muxed=%d separateAudio=%d videoLive=%d videoSq=%ld..%ld videoBaseHash=%08x videoExpire=%lld audioLive=%d audioSq=%ld..%ld audioBaseHash=%08x audioExpire=%lld\n",
+              state.vidItag, state.audItag, video->itag,
+              audio ? audio->itag : (video->hasAudio ? video->itag : 0),
+              video->hasAudio, audio != NULL, video->isLiveSegmented,
+              video->liveStartSq, video->liveEdgeSq, liveUrlFingerprint(video->url),
+              liveUrlExpiry(video->url), audio ? audio->isLiveSegmented : 0,
+              audio ? audio->liveStartSq : 0, audio ? audio->liveEdgeSq : 0,
+              liveUrlFingerprint(audio ? audio->url : NULL),
+              liveUrlExpiry(audio ? audio->url : NULL));
+   }
+#endif
    if (!audio && video->hasAudio) {
       const StreamFormat *fallbackAudio = pickBestAudio(info);
       if (fallbackAudio) {
@@ -1269,7 +1541,19 @@ static void worker(uint64_t arg)
    // segmented LIVE and VOD. A LIVE rendition that cannot initialize must not be
    // accepted as a successful player merely because its player object was created.
    if (playbackCancelRequested()) goto done;
+#if BUILD_DIAG_LIVE_RECOVERY
+   uint64_t liveOpenStartUs = liveRecoveryWorker ? sys_time_get_system_time() : 0;
+#endif
    state.pendingPlayer = openInitialWithFallback(info, &video, &audio, 1);
+#if BUILD_DIAG_LIVE_RECOVERY
+   if (liveRecoveryWorker)
+      logInfo("[yt-live-renew-diag] player-open success=%d elapsedMs=%llu selectedVideo=%d selectedAudio=%d separateAudio=%d liveEdge=%ld firstSq=%ld\n",
+              state.pendingPlayer != NULL,
+              (unsigned long long)((sys_time_get_system_time()-liveOpenStartUs)/1000ull),
+              video ? video->itag : 0, audio ? audio->itag : 0,
+              audio != NULL, video ? video->liveEdgeSq : 0,
+              video ? video->liveStartSq : 0);
+#endif
    if (playbackCancelRequested()) {
       if (state.pendingPlayer) {
          destroyVideoPlayer(state.pendingPlayer);
@@ -1301,6 +1585,8 @@ static void worker(uint64_t arg)
    state.vidH = video->height; state.vidFps = video->fps;
    state.audItag = audio ? audio->itag : (video->hasAudio ? video->itag : 0);
    state.isLive = isLivePlayback;
+   state.liveBaseRefreshNextTryUs = state.liveAndroidClient
+      ? sys_time_get_system_time() + liveBaseRefreshIntervalUs() : 0;
    state.subtitlePick = (subtitlesEnabled && !state.isLive) ?
                         findPreferredSubtitleTrack(getSubtitleLanguage()) : -1;
    lastSubtitlePick = state.subtitlePick;
@@ -1319,6 +1605,12 @@ static void worker(uint64_t arg)
    }
 
 done:
+#if BUILD_DIAG_LIVE_RECOVERY
+   if (liveRecoveryWorker)
+      logInfo("[yt-live-renew-diag] worker-done totalMs=%llu pendingPlayer=%d cancel=%d\n",
+              (unsigned long long)((sys_time_get_system_time()-recoveryWorkerStartUs)/1000ull),
+              state.pendingPlayer != NULL, playbackCancelRequested());
+#endif
    if (info) free(info->captions);
    free(info);
    __sync_synchronize();
@@ -1329,9 +1621,21 @@ done:
 
 static void liveRefreshWorker(uint64_t delayMs)
 {
+#if BUILD_DIAG_LIVE_RECOVERY
+   uint64_t refreshStartUs = sys_time_get_system_time();
+#endif
    VideoPlayer *old = state.liveRetiringPlayer;
    state.liveRetiringPlayer = NULL;
-   if (old) destroyVideoPlayer(old);
+   if (old) {
+#if BUILD_DIAG_LIVE_RECOVERY
+      uint64_t destroyStartUs = sys_time_get_system_time();
+#endif
+      destroyVideoPlayer(old);
+#if BUILD_DIAG_LIVE_RECOVERY
+      logInfo("[yt-live-renew-diag] old-player-destroyMs=%llu\n",
+              (unsigned long long)((sys_time_get_system_time()-destroyStartUs)/1000ull));
+#endif
+   }
 
    // Short, cancellable backoff: leaving playback must not wait for the full delay.
    uint64_t remaining = delayMs;
@@ -1347,6 +1651,13 @@ static void liveRefreshWorker(uint64_t delayMs)
    }
    // Reuse the complete resolver/open path. It fetches fresh YouTube playback data and
    // creates a new VideoPlayer, demuxers, segment sources, decoder and audio pipeline.
+#if BUILD_DIAG_LIVE_RECOVERY
+   logInfo("[yt-live-renew-diag] refresh-worker-start delayMs=%llu elapsedMs=%llu oldItags=%d/%d oldSeparateAudio=%d\n",
+           (unsigned long long)delayMs,
+           (unsigned long long)((sys_time_get_system_time()-refreshStartUs)/1000ull),
+           state.vidItag, state.audItag,
+           state.player ? isVideoPlayerUsingSeparateAudio(state.player) : 0);
+#endif
    worker(0);
 }
 
@@ -1483,7 +1794,14 @@ static void showLiveRefreshFailure(void)
 static void scheduleLiveRefresh(void)
 {
    static const unsigned delaysMs[5] = { 500, 1000, 2000, 3000, 5000 };
-   if (!state.isLive || state.liveFailureVisible || state.liveRefreshActive || state.threadActive ||
+   if (state.liveAndroidClient && state.player) {
+      if (state.liveBaseRefreshActive) return;
+      if (getVideoPlayerLiveRenewalNeeded(state.player)) {
+         scheduleLiveBaseRefresh(1);
+         return;
+      }
+   }
+   if (!state.isLive || state.liveFailureVisible || state.liveRefreshActive || state.liveBaseRefreshActive || state.threadActive ||
        state.resolutionSwitchThreadActive || state.audioSwitchThreadActive ||
        state.liveReopenThreadActive || state.subThreadActive) return;
    if (state.liveRefreshAttempts >= 5) {
@@ -1494,6 +1812,13 @@ static void scheduleLiveRefresh(void)
    unsigned delayMs = delaysMs[state.liveRefreshAttempts];
    state.liveRefreshAttempts++;
    logWarn("[yt-live-refresh] renewal attempt %d/5 in %u ms\n", state.liveRefreshAttempts, delayMs);
+#if BUILD_DIAG_LIVE_RECOVERY
+   logInfo("[yt-live-renew-diag] schedule attempt=%d delayMs=%u live=%d ended=%d dvr=%d itags=%d/%d separateAudio=%d segmentSec=%d windowSegs=%d edgeSq=%ld floorSq=%ld\n",
+           state.liveRefreshAttempts, delayMs, state.isLive, state.liveEnded, state.liveDvr,
+           state.vidItag, state.audItag,
+           state.player ? isVideoPlayerUsingSeparateAudio(state.player) : 0,
+           state.liveSegmentSec, state.liveWindowSegs, state.liveEdgeSq, state.liveFloorSq);
+#endif
    strCopy(state.message, sizeof state.message, "Reconnecting to LIVE...");
    state.stage = STAGE_LOADING;
    state.firstFrameSeen = 0;
@@ -4080,6 +4405,10 @@ static void updatePlay(void)
          setLabelText(&authorLabel, state.author);
          refreshPlaybackInfoHud();
          state.stage = STAGE_PLAYING;
+         if (state.isLive && state.liveAndroidClient) {
+            state.liveBaseRefreshAttempts = 0;
+            state.liveBaseRefreshNextTryUs = sys_time_get_system_time() + liveBaseRefreshIntervalUs();
+         }
          rememberAutoplayVideo(requestedInput);
          showControls();
       } else if (state.liveRefreshActive && !playbackCancelRequested()) {
@@ -4097,11 +4426,33 @@ static void updatePlay(void)
       }
    }
 
+   if (state.liveBaseRefreshActive && state.liveBaseRefreshDone)
+      reapLiveBaseRefresh();
+   if (state.stage == STAGE_PLAYING && state.isLive && state.liveAndroidClient && state.player) {
+      if (getVideoPlayerLiveRenewalNeeded(state.player))
+         scheduleLiveBaseRefresh(1);
+      else
+         scheduleLiveBaseRefresh(0);
+   }
+
    // Any HTTP error from a LIVE segment source is a session/transport failure.
    // Do not treat it as EOF: renew the extractor response and rebuild the complete player.
    if (state.stage == STAGE_PLAYING && state.isLive && state.player &&
        isVideoPlayerFailed(state.player) && getVideoPlayerLiveError(state.player) != 0) {
       int error = getVideoPlayerLiveError(state.player);
+#if BUILD_DIAG_LIVE_RECOVERY
+      VideoLiveBufferStatus liveBuffer;
+      memset(&liveBuffer, 0, sizeof liveBuffer);
+      getVideoPlayerLiveBufferStatus(state.player, &liveBuffer);
+      logWarn("[yt-live-renew-diag] trigger error=%d http=%d source=%d failed=%d attempts=%d itags=%d/%d separateAudio=%d audioAlive=%d liveSegmentSec=%d edgeSq=%ld firstSq=%ld bufferedKB=%llu aheadKB=%llu segmentsAhead=%d fetchInFlight=%d\n",
+              error, getVideoPlayerLiveHttpError(state.player), getVideoPlayerSourceError(state.player),
+              isVideoPlayerFailed(state.player), state.liveRefreshAttempts, state.vidItag, state.audItag,
+              isVideoPlayerUsingSeparateAudio(state.player), isVideoPlayerSeparateAudioAlive(state.player),
+              state.liveSegmentSec, state.liveEdgeSq, getVideoLiveFirstSq(state.player),
+              (unsigned long long)(liveBuffer.bufferedBytes/1024ull),
+              (unsigned long long)(liveBuffer.aheadBytes/1024ull), liveBuffer.segmentsAhead,
+              liveBuffer.fetchInFlight);
+#endif
       if (error >= 400)
          logWarn("[yt-live-refresh] LIVE HTTP %d; renewing playback session\n", error);
       else
@@ -4580,6 +4931,7 @@ static void measureFps(const uint8_t *frame)
 
 // Time the CPU-side YUV draw submission. This does not measure completion on
 // the RSX; it isolates the cost of preparing/submitting the video quad.
+#if BUILD_DIAG_PLAY_RENDER
 static void recordVideoRenderDraw(uint64_t pullUs, uint64_t drawUs, int frameW, int frameH)
 {
    static uint64_t windowStartUs;
@@ -4603,6 +4955,7 @@ static void recordVideoRenderDraw(uint64_t pullUs, uint64_t drawUs, int frameW, 
       pullTotalUs = pullMaxUs = drawTotalUs = drawMaxUs = calls = 0;
    }
 }
+#endif
 
 // rebuild the overlay lines. setLabelText skips unchanged text, so calling this per frame only
 // rasterises when a value actually moves (fps + time once a second).
@@ -5078,7 +5431,7 @@ static void drawPlay(void)
       frame = getVideoFrame(state.player, &w, &h);
       uint64_t framePullUs = sys_time_get_system_time() - framePullStartUs;
       framePullElapsedUs = framePullUs;
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_PLAY_RENDER
       if (framePullUs >= 25000ull)
          logWarn("[play-render-stall] phase=frame-pull elapsedMs=%llu frame=%p stage=%d live=%d\n",
                  (unsigned long long)(framePullUs / 1000ull), frame, state.stage, state.isLive);
@@ -5137,12 +5490,14 @@ static void drawPlay(void)
          uint64_t drawStartUs = sys_time_get_system_time();
          drawGfxYuvFrame(dx, dy, dw, dh, frame, w, h);
          yuvDrawElapsedUs = sys_time_get_system_time() - drawStartUs;
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_PLAY_RENDER
          if (yuvDrawElapsedUs >= 25000ull)
             logWarn("[play-render-stall] phase=yuv-draw elapsedMs=%llu source=%dx%d target=%dx%d\n",
                     (unsigned long long)(yuvDrawElapsedUs / 1000ull), w, h, dw, dh);
 #endif
+#if BUILD_DIAG_PLAY_RENDER
          recordVideoRenderDraw(framePullUs, yuvDrawElapsedUs, w, h);
+#endif
          if (!state.diagFirstYuvDraw) {
             state.diagFirstYuvDraw = 1;
             logInfo("[video-diag] first drawGfxYuvFrame complete\n");
@@ -5227,7 +5582,7 @@ static void drawPlay(void)
       uint64_t totalUs = renderEndUs >= renderStartUs ? renderEndUs - renderStartUs : 0;
       uint64_t restUs = totalUs > clearElapsedUs + framePullElapsedUs + yuvDrawElapsedUs
                       ? totalUs - clearElapsedUs - framePullElapsedUs - yuvDrawElapsedUs : 0;
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_PLAY_RENDER
       if (totalUs >= 25000ull)
          logWarn("[play-render-stall] phase=draw-play totalMs=%llu clearMs=%llu pullMs=%llu yuvMs=%llu restMs=%llu stage=%d live=%d paused=%d seeking=%d\n",
                  (unsigned long long)(totalUs / 1000ull),
@@ -5320,6 +5675,8 @@ static void termPlay(void)
    if (state.resolutionSwitchThreadActive) { joinPlaybackWorker("resolution-switch", state.resolutionSwitchTid); state.resolutionSwitchThreadActive = 0; }
    if (state.chThreadActive) { joinPlaybackWorker("chapters", state.chWorkerTid); state.chThreadActive = 0; }
    if (state.metadataThreadActive) { joinPlaybackWorker("metadata", state.metadataWorkerTid); state.metadataThreadActive = 0; }
+   if (state.liveBaseRefreshActive) { joinPlaybackWorker("live-base-refresh", state.liveBaseRefreshTid); state.liveBaseRefreshActive = 0; }
+   if (state.liveBaseRefreshInfo) { free(state.liveBaseRefreshInfo->captions); free(state.liveBaseRefreshInfo); state.liveBaseRefreshInfo = NULL; }
    if (state.nextThreadActive) { joinPlaybackWorker("autoplay", state.nextWorkerTid); state.nextThreadActive = 0; }
    free(state.subtitleTrack);
    state.subtitleTrack = NULL;

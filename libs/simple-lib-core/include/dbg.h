@@ -27,6 +27,26 @@ void setDebugLogPath(const char *path);
 typedef void (*LogCallback)(const char *line, int len);
 extern LogCallback logCallback;
 
+#define DBG_LOG_TIMING_STAGES 6
+enum {
+   DBG_LOG_TIME_TIMESTAMP = 0,
+   DBG_LOG_TIME_FORMAT,
+   DBG_LOG_TIME_OPEN,
+   DBG_LOG_TIME_WRITE,
+   DBG_LOG_TIME_CLOSE,
+   DBG_LOG_TIME_CALLBACK
+};
+typedef struct {
+   uint32_t count[DBG_LOG_TIMING_STAGES];
+   uint32_t totalUs[DBG_LOG_TIMING_STAGES];
+   uint32_t maxUs[DBG_LOG_TIMING_STAGES];
+} DbgLogTimingStats;
+extern volatile int logTimingEnabled;
+void setLogTimingEnabled(int on);
+uint64_t dbgLogTimeUs(void);
+void dbgRecordLogTiming(unsigned stage, uint32_t elapsedUs);
+void dbgTakeLogTimingStats(DbgLogTimingStats *out);
+
 static inline void setLogCallback(LogCallback fn) { logCallback = fn; }
 
 // Shared bounded-line struct used by every pre-connect log ring in this
@@ -88,8 +108,13 @@ static inline int dbgFormatTimestamp(char *out)
 static inline void logEmit(const char *level, const char *fmt, va_list ap)
 {
    char line[1024 + 32];
+   int timing = logTimingEnabled;
+   uint64_t stageStart = 0;
 
+   if (timing) stageStart = dbgLogTimeUs();
    int o = dbgFormatTimestamp(line);  // up to 15 bytes, no NUL
+   if (timing) dbgRecordLogTiming(DBG_LOG_TIME_TIMESTAMP,
+                                  (uint32_t)(dbgLogTimeUs() - stageStart));
 
    // "[LVL ] " — 7 bytes, fixed width so log columns align.
    line[o++] = '[';
@@ -100,7 +125,10 @@ static inline void logEmit(const char *level, const char *fmt, va_list ap)
    line[o++] = ']';
    line[o++] = ' ';
 
+   if (timing) stageStart = dbgLogTimeUs();
    int n = vsnprintf(line + o, sizeof line - o, fmt, ap);
+   if (timing) dbgRecordLogTiming(DBG_LOG_TIME_FORMAT,
+                                  (uint32_t)(dbgLogTimeUs() - stageStart));
    if (n <= 0) return;
    int max = (int)sizeof line - o - 1;
    if (n > max) n = max;
@@ -108,13 +136,27 @@ static inline void logEmit(const char *level, const char *fmt, va_list ap)
    // O_APPEND so the kernel positions+writes atomically per call: concurrent
    // loggers from different threads/PRXs can't interleave halves of a line.
    VfsFile f;
-   if (openFs(debugLogPath, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_APPEND, &f) == 0)
-   {
+   if (timing) stageStart = dbgLogTimeUs();
+   int opened = openFs(debugLogPath, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_APPEND, &f) == 0;
+   if (timing) dbgRecordLogTiming(DBG_LOG_TIME_OPEN,
+                                  (uint32_t)(dbgLogTimeUs() - stageStart));
+   if (opened) {
+      if (timing) stageStart = dbgLogTimeUs();
       writeFs(&f, line, (uint64_t)(o + n));
+      if (timing) dbgRecordLogTiming(DBG_LOG_TIME_WRITE,
+                                     (uint32_t)(dbgLogTimeUs() - stageStart));
+      if (timing) stageStart = dbgLogTimeUs();
       closeFs(&f);
+      if (timing) dbgRecordLogTiming(DBG_LOG_TIME_CLOSE,
+                                     (uint32_t)(dbgLogTimeUs() - stageStart));
    }
 
-   if (logCallback) logCallback(line, o + n);
+   if (logCallback) {
+      if (timing) stageStart = dbgLogTimeUs();
+      logCallback(line, o + n);
+      if (timing) dbgRecordLogTiming(DBG_LOG_TIME_CALLBACK,
+                                     (uint32_t)(dbgLogTimeUs() - stageStart));
+   }
 }
 
 static inline void logInfo(const char *fmt, ...)

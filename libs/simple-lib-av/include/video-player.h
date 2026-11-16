@@ -43,9 +43,14 @@ void         destroyVideoPlayer(VideoPlayer *player);
 // SECOND-next getVideoFrame call (the previous frame is retired one call late so the GPU is never
 // reading a buffer the decoder is refilling). Fills *width/*height with the coded plane dimensions.
 const uint8_t *getVideoFrame(VideoPlayer *player, int *width, int *height);
+void setVideoPlayerDetailedDiagnosticsEnabled(int enabled);
+void setVideoPlayerPostUnlockDiagnosticsEnabled(int enabled);
 
 int   isVideoPlayerReady(const VideoPlayer *player);
 int   getVideoPlayerLiveBufferStatus(const VideoPlayer *player, VideoLiveBufferStatus *status);
+int   getVideoPlayerLiveRenewalNeeded(const VideoPlayer *player);
+int   refreshVideoPlayerLiveBases(VideoPlayer *player, const char *videoBase, long videoEdgeSq,
+                                  const char *audioBase, long audioEdgeSq);
 int   isVideoPlayerFailed(const VideoPlayer *player);
 int   getVideoPlayerLiveHttpError(const VideoPlayer *player); // HTTP response status (400+), or 0
 int   getVideoPlayerLiveError(const VideoPlayer *player);     // HTTP status, -1 transport failure, or 0

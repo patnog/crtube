@@ -13,7 +13,7 @@
 #endif
 
 #include "app-config.h"
-#include "diagnostics.h"
+#include "../BUILD_CONFIG.h"
 #include "app.h"
 #include "vfs.h"
 #include "http.h"
@@ -32,6 +32,7 @@
 #include "settings.h"
 #include "updater.h"
 #include "video-player.h"
+#include "live-source.h"
 #include "downloads.h"
 #include "video-export.h"
 #include "ui/console-glyphs.h"
@@ -133,6 +134,7 @@ int main(int argc, char **argv)
 
    // Select this build’s private log before any app or library diagnostics are emitted.
    setDebugLogPath(CRTUBE_LOG_PATH);
+   setLogTimingEnabled(BUILD_DIAG_LOG_TIMING);
    VfsFile logFile;
    if (openFs(CRTUBE_LOG_PATH, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC, &logFile) == 0)
       closeFs(&logFile);
@@ -164,10 +166,18 @@ int main(int argc, char **argv)
 #endif
 
    if (initGfx(GFX_VSYNC_ON) != 0) { BOOT_MARK("gfx failed\n"); return 1; }
+   setGfxDetailedDiagnosticsEnabled(BUILD_DIAG_GFX);
+   setGfxEndFrameDiagnosticsEnabled(BUILD_DIAG_GFX_END_FRAME);
+   setVideoPlayerDetailedDiagnosticsEnabled(BUILD_DIAG_VIDEO_PLAYER);
+   setVideoPlayerPostUnlockDiagnosticsEnabled(BUILD_DIAG_POST_UNLOCK);
+   setLiveSourceDetailedDiagnosticsEnabled(BUILD_DIAG_LIVE_SOURCE);
+   setLiveSourceUrlDetailsEnabled(BUILD_DIAG_LIVE_URL_DETAILS);
    BOOT_MARK("gfx\n");
    if (initAudio() != 0) { BOOT_MARK("audio failed\n"); return 1; }
    BOOT_MARK("audio\n");
    if (initFont() != 0) { BOOT_MARK("font failed\n"); return 1; }
+   if (preloadSystemFontFallbacks() != 0)
+      logWarn("[font-preload] some fallback faces remain unavailable\n");
    BOOT_MARK("font\n");
    if (initIconFont() != 0) logError("[yt] embedded icon font failed to load; icons will be blank\n");
    BOOT_MARK("icon font\n");
@@ -193,7 +203,7 @@ int main(int argc, char **argv)
    int screensaverTimeoutLogged = 0;
 
    while (!appExitRequested) {
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       static uint64_t diagPreviousLoopEndUs;
       uint64_t diagLoopStartUs = sys_time_get_system_time();
       uint64_t diagGapUs = diagPreviousLoopEndUs && diagLoopStartUs >= diagPreviousLoopEndUs
@@ -203,26 +213,26 @@ int main(int argc, char **argv)
       uint64_t diagInputUs = 0, diagSaverUs = 0, diagUpdateUs = 0;
       uint64_t diagGfxBeginUs = 0, diagClearUs = 0, diagDrawUs = 0, diagGfxEndUs = 0;
 #endif
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       diagStageStartUs = sys_time_get_system_time();
 #endif
       appPoll();
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       diagAppPollUs = sys_time_get_system_time() - diagStageStartUs;
       diagStageStartUs = sys_time_get_system_time();
 #endif
       applyPendingTeeDisableRequest();
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       diagTeeUs = sys_time_get_system_time() - diagStageStartUs;
       diagStageStartUs = sys_time_get_system_time();
 #endif
       updateVideoExport();   // right after the sysutil pump, which is what delivers its results
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       diagExportUs = sys_time_get_system_time() - diagStageStartUs;
       diagStageStartUs = sys_time_get_system_time();
 #endif
       updatePad();
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       diagPadUs = sys_time_get_system_time() - diagStageStartUs;
       diagStageStartUs = sys_time_get_system_time();
 #endif
@@ -238,7 +248,7 @@ int main(int argc, char **argv)
          rightStick.y < -20 || rightStick.y > 20;
       uint64_t nowUs = getTimeUs();
       updateScreenSaver(); // also polls the asynchronous logo decode before activation
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       diagInputUs = sys_time_get_system_time() - diagStageStartUs;
       diagStageStartUs = sys_time_get_system_time();
 #endif
@@ -277,19 +287,19 @@ int main(int argc, char **argv)
 
       // Keep the underlying screen and its input handlers untouched while the overlay is visible.
       // Background workers continue independently; updateScreen is resumed after dismissal.
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       diagSaverUs = sys_time_get_system_time() - diagStageStartUs;
       diagStageStartUs = sys_time_get_system_time();
 #endif
       if (!isScreenSaverActive() && !screensaverReleaseGuard)
          updateScreen();
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       diagUpdateUs = sys_time_get_system_time() - diagStageStartUs;
       diagStageStartUs = sys_time_get_system_time();
 #endif
 
       beginGfxFrame();
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       diagGfxBeginUs = sys_time_get_system_time() - diagStageStartUs;
       diagStageStartUs = sys_time_get_system_time();
 #endif
@@ -297,18 +307,18 @@ int main(int argc, char **argv)
          drawScreenSaver();
       } else {
          clearGfx(activeTheme->appBg);
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
          diagClearUs = sys_time_get_system_time() - diagStageStartUs;
          diagStageStartUs = sys_time_get_system_time();
 #endif
          drawScreen();
       }
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       diagDrawUs = sys_time_get_system_time() - diagStageStartUs;
       diagStageStartUs = sys_time_get_system_time();
 #endif
       endGfxFrame();
-#if YO_PLAYER_DETAILED_DIAGNOSTICS
+#if BUILD_DIAG_MAIN_LOOP
       {
          uint64_t diagLoopEndUs = sys_time_get_system_time();
          uint64_t diagLoopUs = diagLoopEndUs - diagLoopStartUs;

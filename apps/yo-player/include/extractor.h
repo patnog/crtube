@@ -51,6 +51,7 @@ typedef struct {
    int  durationSeconds;
    int  isLive;            // currently broadcasting: streams need live segment-sequence fetching, not a static moov
    int  isPostLive;        // broadcast ended but YouTube still serves its recording as numbered DASH segments
+   int  liveAndroidClient; // active LIVE formats came from the ANDROID player fallback (not VISIONOS)
    int  liveDvr;           // broadcaster enabled rewind during the LIVE session
    int  liveSegmentSec;    // target duration of a LIVE segment (normally 5, sometimes 2)
    int  liveWindowSec;     // YouTube's advertised DVR window in seconds
@@ -189,6 +190,8 @@ typedef struct Extractor {
    int (*getVideoStatus)(const char *videoId, int *isLive);
    // Channel categories: 0 Videos, 1 Streams, 2 Shorts, 3 Playlists.
    int (*getChannelCategory)(const char *channelId, int category, const char *continuation, SearchResults *out);
+   // Refresh only the signed DASH bases for an Android-client LIVE session, preserving selected itags.
+   int (*refreshLiveAndroid)(const char *input, int videoItag, int audioItag, StreamInfo *out);
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.

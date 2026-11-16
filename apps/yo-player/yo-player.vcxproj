@@ -63,7 +63,7 @@
    <ClCompile Include="src\sidebar.c" />
   </ItemGroup>
   <ItemGroup>
-   <ClInclude Include="include\diagnostics.h" />
+   <ClInclude Include="BUILD_CONFIG.h" />
    <ClInclude Include="include\screens\home.h" />
    <ClInclude Include="include\screens\play.h" />
    <ClInclude Include="include\screens\search.h" />

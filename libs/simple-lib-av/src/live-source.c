@@ -51,12 +51,78 @@ static const char *SEGMENT_UA = "Mozilla/5.0 (PLAYSTATION 3; 4.9)";
 // expose whether one stream is occupying the transport while the other is starved.
 static volatile int g_liveAudioFetches;
 static volatile int g_liveVideoFetches;
+static volatile int g_liveSourceDetailedDiagnosticsEnabled;
+static volatile int g_liveUrlDetailsEnabled;
+
+void setLiveSourceDetailedDiagnosticsEnabled(int enabled)
+{
+   g_liveSourceDetailedDiagnosticsEnabled = enabled != 0;
+}
+
+void setLiveSourceUrlDetailsEnabled(int enabled)
+{
+   g_liveUrlDetailsEnabled = enabled != 0;
+}
+
+static unsigned liveBaseFingerprint(const char *base)
+{
+   unsigned hash = 2166136261u;
+   if (!base) return 0;
+   while (*base) { hash ^= (unsigned char)*base++; hash *= 16777619u; }
+   return hash;
+}
+
+static int liveUrlParamLength(const char *url, const char *name)
+{
+   if (!url || !name) return 0;
+   size_t nameLen = strlen(name);
+   const char *p = strchr(url, '?');
+   while (p && *p) {
+      p++;
+      if (strncmp(p, name, nameLen) == 0 && p[nameLen] == '=') {
+         p += nameLen + 1;
+         int length = 0;
+         while (p[length] && p[length] != '&') length++;
+         return length;
+      }
+      p = strchr(p, '&');
+   }
+   return 0;
+}
+
+static uint64_t liveUrlExpiry(const char *url)
+{
+   int length = liveUrlParamLength(url, "expire");
+   if (length < 1 || length >= 24) return 0;
+   char value[24];
+   const char *p = strchr(url, '?');
+   while (p && *p) {
+      p++;
+      if (strncmp(p, "expire=", 7) == 0) {
+         p += 7;
+         int i = 0;
+         while (p[i] && p[i] != '&' && i < (int)sizeof value - 1) {
+            if (p[i] < '0' || p[i] > '9') return 0;
+            value[i] = p[i];
+            i++;
+         }
+         value[i] = 0;
+         return (uint64_t)strtoull(value, NULL, 10);
+      }
+      p = strchr(p, '&');
+   }
+   return 0;
+}
+
 
 struct LiveSource {
    char     base[2048];   // "<...>/" - append "sq/<n>"
    long     nextSq;       // next segment number to fetch (prefetch-thread owned)
-   long     edgeSq;       // the live edge the source was opened with (an ended stream's last segment)
+   volatile long edgeSq; // manifest edge; updated atomically with Android LIVE BaseURL renewal
    int      ended;        // a stream that is over: edgeSq is the end
+   int      refreshable;  // Android LIVE source: signed BaseURL can be replaced in place
+   volatile int renewalPending;
+   unsigned baseGeneration;
    volatile int finished; // ...and its last segment is in: a read past it is the end of the stream
    volatile long firstSq; // the segment the stream began with, -1 until it is in
    int      firstDone;    // the first (init-bearing) segment has been emitted
@@ -83,6 +149,7 @@ struct LiveSource {
    volatile int     running;
    volatile int     cancel;
    int              isAudio;
+   int              diagUrlSuccessLogged;
    HttpRequestGroup *requestGroup;
    uint8_t         *specBuffer;
    int              specCapacity;
@@ -100,6 +167,59 @@ struct LiveSource {
    volatile int fetchInFlight;
    uint64_t totalFetches, totalFetchBytes, totalFetchUs, totalFetchFailures, totalEdgeWaits;
 };
+
+static void logLiveUrlDetails(const char *event, const LiveSource *source,
+                              const char *url, long sequence, int status)
+{
+   if (!g_liveUrlDetailsEnabled || !url) return;
+   sys_time_sec_t now = 0;
+   sys_time_nsec_t nanos = 0;
+   uint64_t expiry = liveUrlExpiry(url);
+   int clockValid = sys_time_get_current_time(&now, &nanos) == 0;
+   long long remaining = expiry && clockValid ? (long long)expiry - (long long)now : -1;
+   logInfo("[live-url-detail] event=%s type=%s sq=%ld status=%d baseHash=%08x urlLen=%u expire=%llu remainingSec=%lld sigLen=%d signatureLen=%d lsigLen=%d sparamsLen=%d nLen=%d\n",
+           event, source && source->isAudio ? "audio" : "video", sequence, status,
+           liveBaseFingerprint(url), (unsigned)strlen(url), (unsigned long long)expiry,
+           remaining, liveUrlParamLength(url, "sig"),
+           liveUrlParamLength(url, "signature"), liveUrlParamLength(url, "lsig"),
+           liveUrlParamLength(url, "sparams"), liveUrlParamLength(url, "n"));
+}
+
+static void logLiveHttp403Body(const LiveSource *source, long sequence,
+                               const uint8_t *body, int length)
+{
+   if (!g_liveUrlDetailsEnabled || !body || length <= 0) return;
+   int bodyLength = length;
+   if (length > 4096) length = 4096;
+   char code[48] = "", message[96] = "";
+   uint32_t bodyHash = 2166136261u;
+   for (int i = 0; i < length; i++) bodyHash = (bodyHash ^ body[i]) * 16777619u;
+   const char *tags[2][2] = {{"<Code>", "</Code>"}, {"<Message>", "</Message>"}};
+   char *outputs[2] = {code, message};
+   const int capacities[2] = {(int)sizeof code, (int)sizeof message};
+   for (int field = 0; field < 2; field++) {
+      size_t openLen = strlen(tags[field][0]), closeLen = strlen(tags[field][1]);
+      for (int i = 0; i + (int)openLen <= length; i++) {
+         if (memcmp(body + i, tags[field][0], openLen) != 0) continue;
+         int start = i + (int)openLen, end = start;
+         while (end + (int)closeLen <= length &&
+                memcmp(body + end, tags[field][1], closeLen) != 0) end++;
+         if (end + (int)closeLen > length) break;
+         int out = 0;
+         while (start < end && out < capacities[field] - 1) {
+            unsigned char c = body[start++];
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == ' ' || c == '_' || c == '-' ||
+                c == '.' || c == ':') outputs[field][out++] = (char)c;
+         }
+         outputs[field][out] = 0;
+         break;
+      }
+   }
+   logWarn("[live-url-403-body] type=%s sq=%ld bytes=%d bodyHash=%08x code='%s' message='%s'\n",
+           source && source->isAudio ? "audio" : "video", sequence, bodyLength, bodyHash, code, message);
+}
+
 
 // offset of the first 'moof' box (skipping a segment's leading ftyp/styp/sidx/moov/emsg). 0 if none found.
 static int firstMoofOffset(const uint8_t *data, int length)
@@ -199,7 +319,7 @@ static int liveSpecJoin(LiveSpecFetch *job)
    if (!job) return 0;
    int joinRc = joinThread(job->thread);
    if (joinRc == 0) return 1;
-   logWarn("[live-prefetch-parallel] worker join failed rc=%d; waiting for worker completion\n", joinRc);
+   if (g_liveSourceDetailedDiagnosticsEnabled) logWarn("[live-prefetch-parallel] worker join failed rc=%d; waiting for worker completion\n", joinRc);
    while (!job->done) sleepMs(10);
    __sync_synchronize();
    return 1;
@@ -212,14 +332,25 @@ static int fetchNextSegment(LiveSource *source)
 {
    if (source->ended && source->nextSq > source->edgeSq) return 2;
    char url[2200];
+   char requestBase[2048];
+   const char *baseForRequest = source->base;
+   unsigned requestGeneration = 0;
+   long requestSq = source->nextSq;
+   if (source->refreshable) {
+      lock(&source->lock);
+      strCopy(requestBase, sizeof requestBase, source->base);
+      requestGeneration = source->baseGeneration;
+      unlock(&source->lock);
+      baseForRequest = requestBase;
+   }
    // A manifest-derived base takes a path segment ("<base>sq/<n>"). The X-Head-Seqnum fallback in
    // youtube.c (used when the client gets no dashManifestUrl) hands over a query-style base that
    // already ends in "&sq=", where the number is appended directly instead.
-   size_t baseLen = strlen(source->base);
-   if (baseLen > 0 && source->base[baseLen - 1] == '=')
-      snprintf(url, sizeof url, "%s%ld", source->base, source->nextSq);
+   size_t baseLen = strlen(baseForRequest);
+   if (baseLen > 0 && baseForRequest[baseLen - 1] == '=')
+      snprintf(url, sizeof url, "%s%ld", baseForRequest, requestSq);
    else
-      snprintf(url, sizeof url, "%ssq/%ld", source->base, source->nextSq);
+      snprintf(url, sizeof url, "%ssq/%ld", baseForRequest, requestSq);
    HttpHeader headers[] = { { "User-Agent", SEGMENT_UA }, { "Accept-Encoding", "identity" } };
    char wholeText[24];
    HttpHeaderCapture whole = { "content-length", wholeText, sizeof wholeText };   // lowercase: see youtube.c
@@ -227,7 +358,7 @@ static int fetchNextSegment(LiveSource *source)
    int length = 0, status = 0, rc;
    uint8_t *at;
    uint64_t fetchStartUs = sys_time_get_system_time();
-   if (source->firstDone) {
+   if (source->firstDone && !source->refreshable) {
       int wantedSpecCapacity = source->largest + FETCH_MARGIN;
       if (wantedSpecCapacity > SPEC_FETCH_CAP) wantedSpecCapacity = SPEC_FETCH_CAP;
       if (wantedSpecCapacity > source->specCapacity) {
@@ -236,7 +367,7 @@ static int fetchNextSegment(LiveSource *source)
             source->specBuffer = bigger;
             source->specCapacity = wantedSpecCapacity;
          } else if (!source->specBuffer) {
-            logWarn("[live-prefetch-parallel] staging allocation failed; using sequential fetch\n");
+            if (g_liveSourceDetailedDiagnosticsEnabled) logWarn("[live-prefetch-parallel] staging allocation failed; using sequential fetch\n");
          }
       }
    }
@@ -263,7 +394,7 @@ static int fetchNextSegment(LiveSource *source)
                          source->largest > 0 &&
                          source->specCapacity >= (source->largest + FETCH_MARGIN > SPEC_FETCH_CAP
                             ? SPEC_FETCH_CAP : source->largest + FETCH_MARGIN) &&
-                         aheadNow < TARGET_AHEAD && segmentsNow < MAX_SEGMENTS_AHEAD - 1 &&
+                         !source->refreshable && aheadNow < TARGET_AHEAD && segmentsNow < MAX_SEGMENTS_AHEAD - 1 &&
                          roomWithHistory >= 2ull * ((uint64_t)source->largest + FETCH_MARGIN);
       unlock(&source->lock);
 
@@ -281,7 +412,7 @@ static int fetchNextSegment(LiveSource *source)
          if (spawnJoinableThread(&spec.thread, liveSpecFetchThread, (uint64_t)(uintptr_t)&spec,
                                  THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "live-spec-fetch") == 0) {
             specStarted = 1;
-            logInfo("[live-prefetch-parallel] type=%s start currentSq=%ld speculativeSq=%ld capKB=%d\n",
+            if (g_liveSourceDetailedDiagnosticsEnabled) logInfo("[live-prefetch-parallel] type=%s start currentSq=%ld speculativeSq=%ld capKB=%d\n",
                     source->isAudio ? "audio" : "video", source->nextSq, spec.sq, spec.capacity / 1024);
          }
       }
@@ -299,10 +430,15 @@ static int fetchNextSegment(LiveSource *source)
       if (source->isAudio) __sync_sub_and_fetch(&g_liveAudioFetches, 1);
       else __sync_sub_and_fetch(&g_liveVideoFetches, 1);
       source->lastRequestEndUs = requestEndUs;
+      if (g_liveUrlDetailsEnabled && !source->diagUrlSuccessLogged && rc == 0 &&
+          (status == 200 || status == 206)) {
+         source->diagUrlSuccessLogged = 1;
+         logLiveUrlDetails("http-success", source, source->base, source->nextSq, status);
+      }
       source->totalRequestUs += requestEndUs - requestStartUs;
       source->totalRequestGapUs += requestGapUs;
       source->totalRequestCount++;
-      logInfo("[live-fetch-cycle] type=%s sq=%ld result=%d status=%d bytes=%d requestMs=%llu completionGapMs=%llu activeAudio=%d activeVideo=%d\n",
+      if (g_liveSourceDetailedDiagnosticsEnabled) logInfo("[live-fetch-cycle] type=%s sq=%ld result=%d status=%d bytes=%d requestMs=%llu completionGapMs=%llu activeAudio=%d activeVideo=%d\n",
               source->isAudio ? "audio" : "video", source->nextSq, rc, status, length,
               (unsigned long long)((requestEndUs-requestStartUs)/1000ull),
               (unsigned long long)(requestGapUs/1000ull), g_liveAudioFetches, g_liveVideoFetches);
@@ -320,6 +456,12 @@ static int fetchNextSegment(LiveSource *source)
          return -1;
       }
    }
+   if (source->refreshable) {
+      lock(&source->lock);
+      int staleBase = requestGeneration != source->baseGeneration;
+      unlock(&source->lock);
+      if (staleBase) return -2; // a new signed BaseURL was installed while this request was in flight
+   }
    int specReady = 0;
    if (specStarted) {
       int specJoined = liveSpecJoin(&spec);
@@ -329,7 +471,7 @@ static int fetchNextSegment(LiveSource *source)
                   rc == 0 && (status == 200 || status == 206) && length > 0 &&
                   spec.result == 0 && (spec.status == 200 || spec.status == 206) &&
                   spec.length > 0 && spec.length < spec.capacity - 1;
-      logInfo("[live-prefetch-parallel] type=%s currentSq=%ld speculativeSq=%ld currentResult=%d currentStatus=%d speculativeResult=%d speculativeStatus=%d speculativeBytes=%d speculativeMs=%llu accepted=%d\n",
+      if (g_liveSourceDetailedDiagnosticsEnabled) logInfo("[live-prefetch-parallel] type=%s currentSq=%ld speculativeSq=%ld currentResult=%d currentStatus=%d speculativeResult=%d speculativeStatus=%d speculativeBytes=%d speculativeMs=%llu accepted=%d\n",
               source->isAudio ? "audio" : "video", source->nextSq, spec.sq, rc, status, spec.result, spec.status, spec.length,
               (unsigned long long)((spec.finishedUs > spec.startedUs ? spec.finishedUs-spec.startedUs : 0)/1000ull),
               specReady);
@@ -348,7 +490,7 @@ static int fetchNextSegment(LiveSource *source)
       }
       uint64_t edgeElapsedUs = sys_time_get_system_time()-fetchStartUs;
       source->totalEdgeWaits++;
-      logInfo("[live-fetch-diag] type=%s sq=%ld edgeWait status=%d rc=%d fetchMs=%llu nextSq=%ld edgeSq=%ld\n",
+      if (g_liveSourceDetailedDiagnosticsEnabled) logInfo("[live-fetch-diag] type=%s sq=%ld edgeWait status=%d rc=%d fetchMs=%llu nextSq=%ld edgeSq=%ld\n",
               source->isAudio ? "audio" : "video", source->nextSq, status, rc,
               (unsigned long long)(edgeElapsedUs/1000ull), source->nextSq, source->edgeSq);
       return 1;
@@ -362,13 +504,38 @@ static int fetchNextSegment(LiveSource *source)
          logError("[live] non-retryable HTTP %d on sq/%ld; stopping source\n", status, source->nextSq);
          return -1;
       }
-      if (status == 403) {
+      if (status == 403 && source->refreshable) {
+         lock(&source->lock);
+         if (requestGeneration != source->baseGeneration) {
+            unlock(&source->lock);
+            return -2;
+         }
          source->forbiddenStreak++;
+         source->httpError = 403;
+         source->renewalPending = 1;
+         int streak = source->forbiddenStreak;
+         unlock(&source->lock);
+         logWarn("[live] Android signed BaseURL rejected sq/%ld; waiting for in-place renewal (streak=%d)\n",
+                 requestSq, streak);
+         return -2;
+      }
+      if (status == 403) {
+         logLiveUrlDetails("http-403", source, source->base, source->nextSq, status);
+         logLiveHttp403Body(source, source->nextSq, at, length);
+         source->forbiddenStreak++;
+         if (g_liveSourceDetailedDiagnosticsEnabled)
+            logWarn("[live-renew-diag] http403 type=%s sq=%ld streak=%d/3 rc=%d bytes=%d baseHash=%08x nextSq=%ld edgeSq=%ld\n",
+                    source->isAudio ? "audio" : "video", source->nextSq, source->forbiddenStreak,
+                    rc, length, liveBaseFingerprint(source->base), source->nextSq, source->edgeSq);
          if (source->forbiddenStreak >= 3) {
             source->httpError = 403;
             source->sourceError = 403;
             __sync_synchronize();
             logError("[live] persistent HTTP 403 on sq/%ld; stopping this source\n", source->nextSq);
+            if (g_liveSourceDetailedDiagnosticsEnabled)
+               logWarn("[live-renew-diag] source-error type=%s error=403 streak=%d baseHash=%08x nextSq=%ld edgeSq=%ld\n",
+                       source->isAudio ? "audio" : "video", source->forbiddenStreak,
+                       liveBaseFingerprint(source->base), source->nextSq, source->edgeSq);
             return -1;
          }
       } else {
@@ -376,7 +543,8 @@ static int fetchNextSegment(LiveSource *source)
       }
       source->totalFetchFailures++;
       source->failStreak++;
-      if (source->failStreak == 1 || source->failStreak == MAX_FETCH_FAILURES)
+      if (g_liveSourceDetailedDiagnosticsEnabled &&
+          (source->failStreak == 1 || source->failStreak == MAX_FETCH_FAILURES))
          logError("[live-fetch-diag] type=%s sq=%ld failed rc=%d status=%d bytes=%d fetchMs=%llu failStreak=%d/%d\n",
                   source->isAudio ? "audio" : "video", source->nextSq, rc, status, length,
                   (unsigned long long)((sys_time_get_system_time()-fetchStartUs)/1000ull),
@@ -403,6 +571,10 @@ static int fetchNextSegment(LiveSource *source)
    // every segment after the stream's first comes with the init again: from its first moof on
    int offset = source->firstDone ? firstMoofOffset(at, length) : 0;
    lock(&source->lock);
+   if (source->refreshable && requestGeneration != source->baseGeneration) {
+      unlock(&source->lock);
+      return -2;
+   }
    if (offset > 0) memmove(at, at + offset, (size_t)(length - offset));
    source->segStart[source->segCount % SEGMENT_RING] = source->windowStart + (uint64_t)source->windowLen;
    source->segSq[source->segCount % SEGMENT_RING] = source->nextSq;
@@ -417,7 +589,7 @@ static int fetchNextSegment(LiveSource *source)
                      ? source->windowStart + (uint64_t)source->windowLen - source->position : 0;
    int windowCapNow = source->windowCap;
    unlock(&source->lock);
-   logInfo("[live-fetch-diag] type=%s sq=%ld status=%d rc=%d bytes=%d payload=%d strip=%d fetchMs=%llu requestToPublishMs=%llu bufferedKB=%llu aheadKB=%llu windowKB=%d largestKB=%d\n",
+   if (g_liveSourceDetailedDiagnosticsEnabled) logInfo("[live-fetch-diag] type=%s sq=%ld status=%d rc=%d bytes=%d payload=%d strip=%d fetchMs=%llu requestToPublishMs=%llu bufferedKB=%llu aheadKB=%llu windowKB=%d largestKB=%d\n",
            source->isAudio ? "audio" : "video", source->nextSq, status, rc, length, length-offset, offset,
            (unsigned long long)((sys_time_get_system_time()-fetchStartUs)/1000ull),
            (unsigned long long)((source->lastPublishUs-fetchStartUs)/1000ull),
@@ -435,7 +607,7 @@ static int fetchNextSegment(LiveSource *source)
       uint64_t specNeed = (uint64_t)source->windowLen + (uint64_t)specPayload + FETCH_MARGIN;
       unlock(&source->lock);
       if (specNeed > (uint64_t)source->windowCap && !growWindow(source, specNeed)) {
-         logWarn("[live-prefetch-parallel] speculative sq/%ld discarded: window growth failed\n", spec.sq);
+         if (g_liveSourceDetailedDiagnosticsEnabled) logWarn("[live-prefetch-parallel] speculative sq/%ld discarded: window growth failed\n", spec.sq);
       } else {
          lock(&source->lock);
          if (source->nextSq == spec.sq && source->windowCap - source->windowLen >= specPayload) {
@@ -454,12 +626,12 @@ static int fetchNextSegment(LiveSource *source)
             source->totalFetchUs += spec.finishedUs - spec.startedUs;
             source->diagLastFetchSuccessUs = spec.finishedUs;
             source->nextSq++;
-            logInfo("[live-prefetch-parallel] type=%s published sq=%ld bytes=%d payload=%d aheadKB=%llu\n",
+            if (g_liveSourceDetailedDiagnosticsEnabled) logInfo("[live-prefetch-parallel] type=%s published sq=%ld bytes=%d payload=%d aheadKB=%llu\n",
                     source->isAudio ? "audio" : "video", spec.sq, spec.length, specPayload,
                     (unsigned long long)((source->windowStart + source->windowLen > source->position
                        ? source->windowStart + source->windowLen - source->position : 0) / 1024ull));
          } else {
-            logWarn("[live-prefetch-parallel] speculative sq/%ld discarded: sequence or window changed\n", spec.sq);
+            if (g_liveSourceDetailedDiagnosticsEnabled) logWarn("[live-prefetch-parallel] speculative sq/%ld discarded: sequence or window changed\n", spec.sq);
          }
          unlock(&source->lock);
       }
@@ -473,6 +645,7 @@ static void prefetchThread(uint64_t arg)
    setHttpRequestGroup(source->requestGroup);
    while (source->running && !source->cancel && !source->sourceError &&
           !isHttpRequestGroupCancelled()) {
+      if (source->refreshable && source->renewalPending) { sleepMs(50); continue; }
       lock(&source->lock);
       uint64_t end = source->windowStart + (uint64_t)source->windowLen;
       uint64_t ahead = end > source->position ? end - source->position : 0;
@@ -507,7 +680,7 @@ static void prefetchThread(uint64_t arg)
                    room >= (uint64_t)largest + FETCH_MARGIN);
       if (reportSchedule) {
          source->diagLastScheduleReportUs = nowUs;
-         logInfo("[live-schedule-diag] type=%s action=%s reason=%s nextSq=%ld primed=%d aheadKB=%llu segmentsAhead=%d roomKB=%llu windowKB=%d/%d largestKB=%d sinceFetchMs=%llu activeAudio=%d activeVideo=%d edgeSq=%ld\n",
+         if (g_liveSourceDetailedDiagnosticsEnabled) logInfo("[live-schedule-diag] type=%s action=%s reason=%s nextSq=%ld primed=%d aheadKB=%llu segmentsAhead=%d roomKB=%llu windowKB=%d/%d largestKB=%d sinceFetchMs=%llu activeAudio=%d activeVideo=%d edgeSq=%ld\n",
                  source->isAudio ? "audio" : "video", fetch ? "fetch" : "wait",
                  fetch ? (!primed ? "initial" : startupNeedsSegments ? "startup-buffer" :
                           segments == 0 ? "reader-entered-last-segment" : "buffer-below-target") :
@@ -529,6 +702,7 @@ static void prefetchThread(uint64_t arg)
          break;
       }
       if (rc == 1) sleepMs(EDGE_POLL_MS);        // at the edge, wait then retry the same sq (it's live, more is coming)
+      else if (rc == -2 && source->refreshable) sleepMs(50); // renewal or stale in-flight request
       else if (rc < 0) {
          unsigned delay = RECONNECT_MS;
          for (int retry = 1; retry < source->failStreak && delay < RECONNECT_MAX_MS; retry++)
@@ -538,11 +712,16 @@ static void prefetchThread(uint64_t arg)
               !source->cancel && !source->sourceError && !isHttpRequestGroupCancelled(); waited += 50) sleepMs(50);
       }
    }
+   if (g_liveSourceDetailedDiagnosticsEnabled)
+      logWarn("[live-renew-diag] prefetch-exit type=%s running=%d cancel=%d error=%d http=%d nextSq=%ld edgeSq=%ld failStreak=%d forbiddenStreak=%d\n",
+              source->isAudio ? "audio" : "video", source->running, source->cancel,
+              source->sourceError, source->httpError, source->nextSq, source->edgeSq,
+              source->failStreak, source->forbiddenStreak);
    setHttpRequestGroup(NULL);
    exitThread();
 }
 
-LiveSource *openLiveSource(const char *baseUrl, long startSq, long edgeSq, long playSq, int ended)
+LiveSource *openLiveSource(const char *baseUrl, long startSq, long edgeSq, long playSq, int ended, int refreshable)
 {
    LiveSource *source = (LiveSource *)calloc(1, sizeof *source);
    if (!source) return NULL;
@@ -555,16 +734,22 @@ LiveSource *openLiveSource(const char *baseUrl, long startSq, long edgeSq, long 
    source->window = (uint8_t *)malloc(source->windowCap);
    if (!source->window) { closeLiveSource(source); return NULL; }
    strCopy(source->base, sizeof source->base, baseUrl);
+   logLiveUrlDetails("source-open", source, source->base, startSq, 0);
    long start = playSq >= 0 ? playSq : ended ? startSq : edgeSq - START_BEHIND_EDGE;
    if (ended && start > edgeSq) start = edgeSq;
    source->nextSq = start > startSq ? start : startSq;
    source->edgeSq = edgeSq;
    source->ended = ended;
+   source->refreshable = refreshable && !ended;
    source->firstSq = -1;
    createLock(&source->lock);
    source->lockReady = 1;
    logInfo("[live] open %s sq %ld..%ld, starting at %ld%s\n", ended ? "ended stream" : "live", startSq, edgeSq,
            source->nextSq, playSq >= 0 ? " (asked for)" : "");
+   if (g_liveSourceDetailedDiagnosticsEnabled)
+      logInfo("[live-renew-diag] source-open type=%s baseHash=%08x startSq=%ld edgeSq=%ld playSq=%ld nextSq=%ld ended=%d\n",
+              source->isAudio ? "audio" : "video", liveBaseFingerprint(baseUrl), startSq,
+              edgeSq, playSq, source->nextSq, ended);
 
    source->running = 1;
    source->threadActive = spawnJoinableThread(&source->prefetchThread, prefetchThread, (uint64_t)(uintptr_t)source,
@@ -612,7 +797,7 @@ int64_t readLiveSource(LiveSource *source, void *buffer, uint64_t length)
          if (reportStartupWait) source->diagLastStartupWaitReportUs = nowUs;
          unlock(&source->lock);
          if (reportStartupWait)
-            logWarn("[live-startup-wait] type=%s waitingSegments=%d requiredSegments=%d availableKB=%llu nextSq=%ld edgeSq=%ld\n",
+            if (g_liveSourceDetailedDiagnosticsEnabled) logWarn("[live-startup-wait] type=%s waitingSegments=%d requiredSegments=%d availableKB=%llu nextSq=%ld edgeSq=%ld\n",
                     source->isAudio ? "audio" : "video", startupSegmentsAhead, STARTUP_BUFFER_SEGMENTS,
                     (unsigned long long)(startupAvailable / 1024ull), startupNextSq, startupEdge);
          sleepMs(READ_WAIT_MS);
@@ -660,12 +845,12 @@ int64_t readLiveSource(LiveSource *source, void *buffer, uint64_t length)
             source->diagWaitMaxUs=source->diagEmptyPolls=source->diagMaxAvailable=0;
          }
          unlock(&source->lock);
-         if (startupReleasedNow)
+         if (startupReleasedNow && g_liveSourceDetailedDiagnosticsEnabled)
             logInfo("[live-startup-buffer] type=%s released segments=%d targetSegments=%d aheadKB=%llu edgeSq=%ld\n",
                     source->isAudio ? "audio" : "video", startupPrimedSegments, STARTUP_BUFFER_SEGMENTS,
                     (unsigned long long)(startupAhead/1024ull), startupEdgeSq);
          if (doReport)
-            logInfo("[live-read-diag] type=%s spanMs=2000 calls=%llu bytes=%llu avgRead=%llu waitEvents=%llu waitMs=%llu waitMaxMs=%llu emptyPolls=%llu maxAvailableKB=%llu bufferedKB=%llu aheadKB=%llu positionKB=%llu windowStartKB=%llu nextSq=%ld segmentsAhead=%d newestSq=%ld publishAgeMs=%llu activeAudio=%d activeVideo=%d edgeSq=%ld httpError=%d\n",
+            if (g_liveSourceDetailedDiagnosticsEnabled) logInfo("[live-read-diag] type=%s spanMs=2000 calls=%llu bytes=%llu avgRead=%llu waitEvents=%llu waitMs=%llu waitMaxMs=%llu emptyPolls=%llu maxAvailableKB=%llu bufferedKB=%llu aheadKB=%llu positionKB=%llu windowStartKB=%llu nextSq=%ld segmentsAhead=%d newestSq=%ld publishAgeMs=%llu activeAudio=%d activeVideo=%d edgeSq=%ld httpError=%d\n",
                     source->isAudio ? "audio" : "video", (unsigned long long)reportCalls,
                     (unsigned long long)reportBytes, (unsigned long long)(reportCalls ? reportBytes/reportCalls : 0),
                     (unsigned long long)reportWaits, (unsigned long long)(reportWaitUs/1000ull),
@@ -693,7 +878,7 @@ int64_t readLiveSource(LiveSource *source, void *buffer, uint64_t length)
       int emptyFetchInFlight = source->fetchInFlight;
       int activeAudioFetches = g_liveAudioFetches, activeVideoFetches = g_liveVideoFetches;
       unlock(&source->lock);
-      if (startupReleasedNow)
+      if (startupReleasedNow && g_liveSourceDetailedDiagnosticsEnabled)
          logInfo("[live-startup-buffer] type=%s released segments=%d targetSegments=%d aheadKB=%llu edgeSq=%ld\n",
                  source->isAudio ? "audio" : "video", startupPrimedSegments, STARTUP_BUFFER_SEGMENTS,
                  (unsigned long long)(startupAhead/1024ull), startupEdgeSq);
@@ -703,7 +888,7 @@ int64_t readLiveSource(LiveSource *source, void *buffer, uint64_t length)
       if (!source->diagLastStallReportUs) source->diagLastStallReportUs = waitStartUs;
       if (nowUs - source->diagLastStallReportUs >= 2000000ull) {
          source->diagLastStallReportUs = nowUs;
-         logWarn("[live-read-stall] type=%s waitingMs=%llu emptyPolls=%llu bufferedKB=%llu aheadKB=%llu positionKB=%llu nextSq=%ld segmentsAhead=%d newestSq=%ld publishAgeMs=%llu fetchInFlight=%d activeAudio=%d activeVideo=%d edgeSq=%ld httpError=%d\n",
+         if (g_liveSourceDetailedDiagnosticsEnabled) logWarn("[live-read-stall] type=%s waitingMs=%llu emptyPolls=%llu bufferedKB=%llu aheadKB=%llu positionKB=%llu nextSq=%ld segmentsAhead=%d newestSq=%ld publishAgeMs=%llu fetchInFlight=%d activeAudio=%d activeVideo=%d edgeSq=%ld httpError=%d\n",
                  source->isAudio ? "audio" : "video", (unsigned long long)((nowUs-waitStartUs)/1000ull),
                  (unsigned long long)emptyPolls, (unsigned long long)(emptyBuffered/1024ull),
                  (unsigned long long)(emptyAhead/1024ull), (unsigned long long)(emptyPosition/1024ull),
@@ -751,6 +936,55 @@ int getLiveSourceError(const LiveSource *source)
    return source->sourceError;
 }
 
+int liveSourceNeedsRenewal(const LiveSource *source)
+{
+   if (!source || !source->refreshable) return 0;
+   LiveSource *mutableSource = (LiveSource *)source;
+   lock(&mutableSource->lock);
+   int needed = source->renewalPending;
+   unlock(&mutableSource->lock);
+   return needed;
+}
+
+int refreshLiveSourceBasePair(LiveSource *video, const char *videoBase, long videoEdgeSq,
+                              LiveSource *audio, const char *audioBase, long audioEdgeSq)
+{
+   if (!video || !videoBase || !videoBase[0] || strlen(videoBase) >= sizeof video->base ||
+       (audio && (!audioBase || !audioBase[0] || strlen(audioBase) >= sizeof audio->base))) return -1;
+   LiveSource *first = video, *second = audio;
+   if (second && (uintptr_t)second < (uintptr_t)first) { first = audio; second = video; }
+   lock(&first->lock);
+   if (second) lock(&second->lock);
+   int valid = video->refreshable && !video->ended && !video->cancel && video->running && !video->sourceError;
+   if (audio)
+      valid = valid && audio->refreshable && !audio->ended && !audio->cancel && audio->running && !audio->sourceError;
+   if (valid) {
+      strCopy(video->base, sizeof video->base, videoBase);
+      video->edgeSq = videoEdgeSq;
+      video->baseGeneration++;
+      video->forbiddenStreak = 0;
+      video->failStreak = 0;
+      video->httpError = 0;
+      video->renewalPending = 0;
+      if (audio) {
+         strCopy(audio->base, sizeof audio->base, audioBase);
+         audio->edgeSq = audioEdgeSq;
+         audio->baseGeneration++;
+         audio->forbiddenStreak = 0;
+         audio->failStreak = 0;
+         audio->httpError = 0;
+         audio->renewalPending = 0;
+      }
+   }
+   if (second) unlock(&second->lock);
+   unlock(&first->lock);
+   if (!valid) return -1;
+   __sync_synchronize();
+   logInfo("[live] Android signed BaseURL pair renewed in place; videoEdgeSq=%ld audio=%s\n",
+           videoEdgeSq, audio ? "updated" : "not-separate");
+   return 0;
+}
+
 void cancelLiveSource(LiveSource *source) { if (source) source->cancel = 1; }
 
 void closeLiveSource(LiveSource *source)
@@ -773,7 +1007,7 @@ void closeLiveSource(LiveSource *source)
    }
    if (source->lockReady) {
       lock(&source->lock);
-      logInfo("[live-final-diag] type=%s readCalls=%llu readBytes=%llu waitEvents=%llu waitMs=%llu waitMaxMs=%llu emptyPolls=%llu positionKB=%llu windowStartKB=%llu bufferedKB=%llu nextSq=%ld edgeSq=%ld failStreak=%d httpError=%d fetches=%llu fetchMB=%llu fetchAvgMs=%llu fetchFailures=%llu edgeWaits=%llu requestAvgMs=%llu completionGapAvgMs=%llu publishDelayAvgMs=%llu\n",
+      if (g_liveSourceDetailedDiagnosticsEnabled) logInfo("[live-final-diag] type=%s readCalls=%llu readBytes=%llu waitEvents=%llu waitMs=%llu waitMaxMs=%llu emptyPolls=%llu positionKB=%llu windowStartKB=%llu bufferedKB=%llu nextSq=%ld edgeSq=%ld failStreak=%d httpError=%d fetches=%llu fetchMB=%llu fetchAvgMs=%llu fetchFailures=%llu edgeWaits=%llu requestAvgMs=%llu completionGapAvgMs=%llu publishDelayAvgMs=%llu\n",
               source->isAudio ? "audio" : "video", (unsigned long long)source->totalReadCalls,
               (unsigned long long)source->totalReadBytes, (unsigned long long)source->totalWaitEvents,
               (unsigned long long)(source->totalWaitUs/1000ull), (unsigned long long)(source->totalWaitMaxUs/1000ull),

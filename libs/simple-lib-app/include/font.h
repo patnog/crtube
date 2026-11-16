@@ -63,6 +63,7 @@ typedef struct {
 } TextTexture;
 
 int   initFont(void);
+int   preloadSystemFontFallbacks(void); // preload system fallback faces before interactive screens
 void  termFont(void);
 // renders one glyph at `size` px into its own tight white texture (RGB=255, alpha=coverage) with no line
 // box or top crop, so tall glyphs are never clipped - for icon rendering. *offsetX/*offsetY (may be NULL)

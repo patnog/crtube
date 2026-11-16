@@ -60,6 +60,8 @@ struct FontData {
 
 static SharedFace faceCache[FACE_CACHE_MAX];
 static int        fontInited = 0;
+static Font       preloadedPopFont;
+static Font       preloadedGothicFont;
 
 int initFont(void)
 {
@@ -69,6 +71,8 @@ int initFont(void)
 
 void termFont(void)
 {
+   closeFont(&preloadedPopFont);
+   closeFont(&preloadedGothicFont);
    fontInited = 0;
 }
 
@@ -284,6 +288,31 @@ Font openSystemFont(int type)
          break;
    }
    return openFromFirstFace(d, 1);
+}
+
+// Keep these Font handles alive for the app lifetime: the shared-face cache releases file bytes
+// when the last Font closes, so a temporary open/close would not actually preload anything.
+int preloadSystemFontFallbacks(void)
+{
+   if (!fontInited) initFont();
+   if (!preloadedPopFont.open) preloadedPopFont = openSystemFont(FONT_POP);
+   if (!preloadedGothicFont.open) preloadedGothicFont = openSystemFont(FONT_GOTHIC_JP);
+   if (!preloadedPopFont.open || !preloadedGothicFont.open) {
+      logError("[font-preload] could not open one of the system fallback chains\n");
+      return -1;
+   }
+
+   Font *fonts[] = { &preloadedPopFont, &preloadedGothicFont };
+   int failed = 0;
+   for (unsigned f = 0; f < sizeof(fonts) / sizeof(fonts[0]); f++) {
+      struct FontData *data = fonts[f]->data;
+      for (int i = 0; data && i < data->nFaces; i++) {
+         SharedFace *face = data->faces[i];
+         if (face && !faceReady(face)) failed++;
+      }
+   }
+   logInfo("[font-preload] complete failures=%d\n", failed);
+   return failed ? -1 : 0;
 }
 
 // A font that owns its bytes: `data` is freed with the last reference.
