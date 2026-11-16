@@ -802,7 +802,9 @@ static void setSidebarForCategory(void)
 static void selectAccountFeed(AccountFeed feed)
 {
    int category = HOME_ACCOUNT + (int)feed;
-   if (isSignedIn()) {
+   // Recommended is the public home feed when signed out; the other account
+   // feeds still require OAuth and retain the existing sign-in prompt.
+   if (isSignedIn() || feed == ACCOUNT_FEED_HOME) {
       switchToCategory(category);
       return;
    }

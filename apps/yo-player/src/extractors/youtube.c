@@ -1994,6 +1994,22 @@ static int postTvBrowse(const char *body, int bodyLen, const char *accessToken, 
 static int fetchAccountFeed(AccountFeed feed, const char *continuation, SearchResults *out)
 {
    memset(out, 0, sizeof *out);
+
+   // Recommended is the public YouTube home feed; it does not require OAuth.
+   // Keep the authenticated TV client for the account-specific feeds.
+   if (feed == ACCOUNT_FEED_HOME && !isSignedIn()) {
+      char body[MAX_CONTINUATION + 512];
+      int bodyLen;
+      const char *gl = getContentRegionCode();
+      if (continuation)
+         bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, gl, continuation);
+      else
+         bodyLen = snprintf(body, sizeof body,
+                            WEB_CONTEXT_FMT ",\"browseId\":\"FEwhat_to_watch\"}", gl);
+      if (bodyLen < 0 || bodyLen >= (int)sizeof body) return -1;
+      return postAndParse(BROWSE_URL, body, bodyLen, out);
+   }
+
    char body[MAX_CONTINUATION + 512];
    int bodyLen = buildTvBrowseBody(body, sizeof body, feed, continuation);
    if (bodyLen < 0) return -1;

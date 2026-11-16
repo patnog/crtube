@@ -7,6 +7,7 @@
 #include "pad.h"
 #include "button-repeat.h"
 #include "thread.h"
+#include "account.h"
 #include "ui/label.h"
 #include "ui/icon-font.h"
 #include <string.h>
@@ -404,11 +405,18 @@ static void drawMainRows(int panelX)
       int iconSize = (int)(SIDEBAR_ICON_SIZE * (side.uiScale >= 1.25f ? 1.25f : 1.0f) + 0.5f);
       int iconY = rowY + (SIDEBAR_ROW_HEIGHT - iconSize) / 2;
       int contentOffset = side.screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
+      int accountLocked = !isSignedIn() &&
+         (mainRows[i].action == SIDEBAR_ACCOUNT_SUBSCRIPTIONS ||
+          mainRows[i].action == SIDEBAR_ACCOUNT_HISTORY ||
+          mainRows[i].action == SIDEBAR_ACCOUNT_WATCH_LATER ||
+          mainRows[i].action == SIDEBAR_PLAYLISTS);
       uint32_t iconColor = i == side.selected ? activeTheme->accent : activeTheme->textSecondary;
       if (mainRows[i].action == SIDEBAR_EXIT)
          drawExitDoorIcon(panelX + SIDEBAR_CONTENT_LEFT + contentOffset, iconY, iconColor);
       else
          drawSidebarRowIcon(&side.mainIcons[i], panelX + SIDEBAR_CONTENT_LEFT + contentOffset, iconY, iconColor);
+      setLabelColor(&side.mainNames[i], accountLocked ? activeTheme->textSecondary :
+                    (i == side.selected ? activeTheme->accent : activeTheme->textPrimary));
       refreshLabelScale(&side.mainNames[i]);
       moveLabel(&side.mainNames[i], panelX + SIDEBAR_TEXT_LEFT + contentOffset,
                 getCenteredLabelY(&side.mainNames[i], rowY, SIDEBAR_ROW_HEIGHT));
