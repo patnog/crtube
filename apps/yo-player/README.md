@@ -28,7 +28,7 @@ It reuses what this repo already has:
 - **Subscriptions** — subscribe / unsubscribe from inside a channel; the Subscriptions feed gathers the latest
   uploads from every channel you follow, newest first.
 - **Watch Later and PS3 playlists** — Watch Later remains its own list. The PS3-local Playlists page has Watch Later and PS3 tabs; create empty playlists, create a playlist while saving a video, add/remove videos, rename or delete playlists, and sort local playlists by Newest or A-Z.
-- **Download** — combine a video's video + audio into one `.mp4` file in the background, with a queue and progress readout. LIVE videos are rejected before queueing and checked again by the worker. Download settings let you choose resolution, audio language/source, primary subtitles that follow the selected audio language, and an optional secondary subtitle language. The Downloads category displays local thumbnails and video durations; downloaded videos can be played locally or deleted from that category.
+- **Downloads and download playlists** — combine a video's video + audio into one `.mp4` file in the background. Queue a single VOD or an entire account/PS3 playlist; playlist preparation counts missing videos, estimates their combined size, skips already-downloaded videos and queues the remainder as a batch. LIVE videos are excluded. Download settings control resolution, audio language/source, primary subtitles that follow the selected audio language, and an optional secondary subtitle language. The Downloads page has All, Videos and Playlists tabs, while Manage Downloads separates ongoing, completed and failed items and supports batch cancellation/deletion. Downloaded videos can be played locally.
 - **Volume** — adjust in the player with a pill meter; the level is remembered across videos.
 - **Description** — read the full video description over the playing video, scrollable, without pausing.
 - **Chapters** — jump around by chapter. Chapters come from the description's timestamps, falling back to
@@ -188,18 +188,32 @@ setting. Developer details are in
 
 ## Downloads
 
-Pressing **R3** on a video queues a download. The app rejects videos identified as currently LIVE, and the background worker performs a second LIVE check before fetching media. The picture and sound streams are combined into one `.mp4` file. Before downloading, configure **Settings → Download settings**: choose Auto / 480p / 720p / 1080p, the audio language (or Original upload), whether auto-dubbed audio is allowed for a translated language, whether primary subtitles should automatically match the selected audio language, and an optional secondary subtitle language. These preferences affect downloads, not streaming playback.
-Downloads run in the background so you can keep browsing, queue up if you start several, and show progress in
-the top-right corner. Live streams can't be downloaded.
+Press **R3** on a VOD to queue that video. On a playlist tile, **R3** opens the playlist-download preparation flow instead. LIVE videos are excluded from playlist batches and checked again by the individual download worker before media is fetched.
 
-The Downloads category keeps a local library entry with the thumbnail, title, description and duration; older MP4 files can have their duration recovered from the MP4 movie header. Select a completed item and press **X** to play it directly from local storage. Hold **Square** to open the delete confirmation. Downloaded subtitle files are kept with the video and can be used during local playback. That is what makes it appear in the XMB's Video column, named
-after the video, next to anything you would normally copy over from a USB stick. Copying a file into
-`/dev_hdd0/video` by hand does not work: the XMB lists videos from that database, not from the folder.
+For a playlist, the app reads its entries, resolves the selected streams for videos that are not already present, and displays the number of missing videos plus an approximate combined size before confirmation. Videos already downloaded are skipped. Confirming creates a named entry in the download-playlists library and queues the missing videos as a batch. This works with account playlists and supported PS3-local playlists; account playlist contents require sign-in. A playlist with no missing videos can still be saved to the download-playlists library without starting downloads.
 
-Two constraints came out of getting that working, and both shape the code. The export only accepts files from
-the directory the game content utility hands back, so downloads are written straight into the app's own
-`USRDIR`. And it rejects filenames containing spaces or brackets, so the file is staged under the video id;
-the name you actually see comes from the title passed to the export.
+Each video is remuxed into one `.mp4` file without re-encoding. Before downloading, configure **Home Settings → Download settings**: choose Auto / 480p / 720p / 1080p, the audio language (or Original upload), whether auto-dubbed audio is allowed for a translated language, whether primary subtitles should automatically match the selected audio language, and an optional secondary subtitle language. These preferences affect downloads, not streaming playback.
+
+Downloads run in the background while browsing continues. Individual and playlist batches use the same queue; completed work is reflected in the Downloads library. The library has three views:
+
+- **All** — videos and download playlists together.
+- **Videos** — downloaded videos, including videos that belong to a download playlist.
+- **Playlists** — named download playlists. Open one to browse its downloaded entries; remove individual videos from the playlist without deleting the underlying downloaded file.
+
+Press **X** on a completed video to play it from local storage. The video entry retains its thumbnail, title, description and duration; downloaded subtitle files remain available during local playback. The app also exports completed videos to the XMB Video library where supported by the active build's export implementation.
+
+### Manage Downloads
+
+Open **Manage Downloads** from the Downloads page. The manager separates **Ongoing**, **Completed** and **Failed** items. It supports multi-selection, selecting all entries in the current tab, cancelling selected ongoing downloads, and deleting selected completed/failed files. Deletion of videos that belong to download playlists also updates the corresponding playlist entries. Playlist-level deletion is a separate action and confirms the playlist's video count and storage impact before deleting its contents.
+
+The manager's HDD scan and used/available-space calculation are lazy: they start when the user enters Downloads or opens the manager, not during application startup. Storage totals are therefore populated asynchronously. The Downloads page also exposes used and available storage information.
+
+The download library is stored under the active build's `CRTUBE_DATA_DIR`:
+
+- PSL1GHT: `/dev_hdd0/tmp/crtube/downloads/`
+- Sony SDK: `/dev_hdd0/tmp/crtube_sdk/downloads/`
+
+Download playlists and their index are stored below the same `downloads/` directory. The manager's queue and library are local to the console; they are not synchronized with the YouTube account.
 
 ## Updates
 
