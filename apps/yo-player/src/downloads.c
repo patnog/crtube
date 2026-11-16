@@ -836,7 +836,10 @@ static uint64_t estimateFormatBytes(const StreamFormat *format, int durationSeco
    if (!format || durationSeconds <= 0) return 0;
    if (format->contentLength > 0) return format->contentLength;
    if (format->bitrate <= 0) return 0;
-   return (uint64_t)format->bitrate * (uint64_t)durationSeconds / 8ULL;
+   // When the extractor has no exact content length, its advertised bitrate can
+   // be a nominal/peak value. Use 90% as the expected average; the caller adds
+   // a small aggregate safety allowance for mux/container overhead.
+   return ((uint64_t)format->bitrate * (uint64_t)durationSeconds * 90ULL) / 800ULL;
 }
 
 static uint64_t estimateDownloadBytes(const StreamFormat *video, const StreamFormat *audio, int durationSeconds)
@@ -848,7 +851,7 @@ static uint64_t estimateDownloadBytes(const StreamFormat *video, const StreamFor
    uint64_t total = videoBytes + audioBytes;
    // A muxed format's bitrate already includes audio. Add a separate audio
    // stream only when the selected video format is video-only.
-   return total + total / 100ULL;
+   return total + total * 5ULL / 100ULL;
 }
 
 int estimateDownloadSizeForVideo(const SearchResult *item, uint64_t *bytesOut)
@@ -1200,6 +1203,7 @@ cancelled:
    if (partPath[0]) deleteFile(partPath);
    if (removeDownloadArtifacts(item->videoId) != 0)
       logError("[dl] cancellation cleanup incomplete for %s\n", item->videoId);
+   removeVideoFromAllDownloadPlaylists(item->videoId);
    logInfo("[dl] %s cancelled\n", item->videoId);
    return;
 
@@ -1423,6 +1427,9 @@ int cancelManagedDownload(const char *videoId)
    unlock(&dl.mutex);
 
    if (removedQueuedItem) {
+      // Removing a queued playlist item also removes its Downloads playlist membership.
+      // Do this after releasing dl.mutex to avoid nesting storage and queue locks.
+      removeVideoFromAllDownloadPlaylists(videoId);
       // A queued ID may have hidden a legacy staged MP4 from the library scan.
       // Refresh after releasing dl.mutex; never nest the two manager/download locks.
       lock(&manager.mutex);
@@ -1640,10 +1647,12 @@ void drawDownloadOverlay(int screenWidth)
    static float cachedUiScale = -1.0f;
 
    if (!dl.initialized) return;
-   if (dl.active && isSidebarFullyOpen()) {
-      int left = getSidebarPanelRightEdge() + 12;
+   if (dl.active) {
+      // Keep the notification anchored to the screen's right edge. Limit its
+      // width to the right half so long titles truncate instead of crossing
+      // the screen center. This is independent of sidebar animation state.
       int right = screenWidth - 12;
-      int available = right - left;
+      int available = right - screenWidth / 2;
       float baseScale = getGfxUiScaleFactor();
       if (baseScale < 1.0f) baseScale = 1.0f;
       if (available >= 52) {
@@ -1654,26 +1663,23 @@ void drawDownloadOverlay(int screenWidth)
             char clipped[sizeof dl.activeTitle];
             char text[128];
             int queued = dl.count, bestChars = 0, fitted = 0;
-            // Keep the notification at the same top-right anchor; shrink its
-            // font before shortening the title. No browse/navigation geometry moves.
-            for (float factor = 1.0f; factor >= 0.50f; factor -= 0.05f) {
-               setLabelFixedRenderScale(&overlayLabel, baseScale * factor, 0);
-               int low = 1, high = 64, charsBest = 0;
-               while (low <= high) {
-                  int chars = (low + high) / 2;
-                  int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, chars);
-                  if (queued > 0)
-                     snprintf(text, sizeof text, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
-                  else
-                     snprintf(text, sizeof text, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
-                  setLabelText(&overlayLabel, text);
-                  if (overlayLabel.tt.tex.w + 12 <= available) { charsBest = chars; low = chars + 1; }
-                  else high = chars - 1;
-               }
-               if (charsBest > 0) { fitted = 1; bestChars = charsBest; break; }
+            // Keep the font size stable and truncate only the title. The badge
+            // never starts left of screen center and remains right-aligned.
+            setLabelFixedRenderScale(&overlayLabel, baseScale, 0);
+            int low = 1, high = 64, charsBest = 0;
+            while (low <= high) {
+               int chars = (low + high) / 2;
+               int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, chars);
+               if (queued > 0)
+                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
+               else
+                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
+               setLabelText(&overlayLabel, text);
+               if (overlayLabel.tt.tex.w + 12 <= available) { charsBest = chars; low = chars + 1; }
+               else high = chars - 1;
             }
+            if (charsBest > 0) { fitted = 1; bestChars = charsBest; }
             if (!fitted) {
-               setLabelFixedRenderScale(&overlayLabel, baseScale * 0.50f, 0);
                char compact[32];
                snprintf(compact, sizeof compact, "DL %d%%", dl.percent);
                setLabelText(&overlayLabel, compact);

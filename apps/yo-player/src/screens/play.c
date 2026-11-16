@@ -5660,7 +5660,6 @@ static void drawPlay(void)
    if (!state.liveFailureVisible &&
        (controlsVisible() || (state.player && isVideoPaused(state.player))) &&
        !state.controlsDismissed)
-       drawDownloadOverlay(state.screenW);
    // Restore the selected library scale before the next screen is drawn.
    setGfxSdUiScale(selectedUiScale);
 

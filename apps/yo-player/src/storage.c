@@ -1085,17 +1085,19 @@ int getDownloadPlaylists(SearchResults *out)
    loadDownloadPlaylistIndex();
    memset(out, 0, sizeof *out);
    char *buffer = NULL;
-   int migrated = 0;
-   int migrationFailed = 0;
+   int changed = 0;
+   int scanFailed = 0;
    for (int i = downloadPlaylistCount - 1; i >= 0 && out->count < MAX_SEARCH_RESULTS; i--) {
       DownloadPlaylistMeta *meta = &downloadPlaylists[i];
-      if (meta->count < 0) {
-         if (!buffer) buffer = (char *)malloc(DOWNLOAD_PLAYLIST_BUFFER_BYTES);
-         if (buffer) {
-            migrated = 1;
-            char path[160];
-            downloadPlaylistPath(meta->id, path, sizeof path);
-            int length = readFile(path, buffer, DOWNLOAD_PLAYLIST_BUFFER_BYTES - 1);
+      if (!buffer) buffer = (char *)malloc(DOWNLOAD_PLAYLIST_BUFFER_BYTES);
+      if (buffer) {
+         char path[160];
+         int oldCount = meta->count;
+         char oldNewest[sizeof meta->newestVideoId];
+         strCopy(oldNewest, sizeof oldNewest, meta->newestVideoId);
+         downloadPlaylistPath(meta->id, path, sizeof path);
+         int length = readFile(path, buffer, DOWNLOAD_PLAYLIST_BUFFER_BYTES - 1);
+         if (length >= 0) {
             meta->count = 0;
             meta->newestVideoId[0] = 0;
             if (length > 0) {
@@ -1117,9 +1119,13 @@ int getDownloadPlaylists(SearchResults *out)
                   line = next + 1;
                }
             }
+            if (oldCount != meta->count || strcmp(oldNewest, meta->newestVideoId) != 0)
+               changed = 1;
          } else {
-            migrationFailed = 1;
+            scanFailed = 1;
          }
+      } else {
+         scanFailed = 1;
       }
       int displayCount = meta->count >= 0 ? meta->count : 0;
       SearchResult *tile = &out->items[out->count++];
@@ -1138,12 +1144,12 @@ int getDownloadPlaylists(SearchResults *out)
          downloadPlaylistPath(meta->id, path, sizeof path);
          if (statPath(path, &stat) == 0) meta->createdAt = stat.mtime;
          if (!meta->createdAt) meta->createdAt = nextDownloadPlaylistCreatedAt();
-         migrated = 1;
+         changed = 1;
       }
       tile->downloadedAt = meta->createdAt;
    }
    free(buffer);
-   if (migrated && !migrationFailed) saveDownloadPlaylistIndex();
+   if (changed && !scanFailed) saveDownloadPlaylistIndex();
    return out->count;
 }
 

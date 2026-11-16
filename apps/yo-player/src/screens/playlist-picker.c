@@ -40,6 +40,7 @@ static struct {
    int visible;
    int screenW, screenH;
    int panelW, panelH;
+   int titleH;
    int oskDone;
    char createdName[LOCAL_PLAYLIST_NAME_LEN];
    ButtonRepeat navigateRepeat;
@@ -88,25 +89,27 @@ static void initPicker(void)
    picker.count = picker.playlistCount + (picker.downloadsOnly ? 1 : 2); // Optional Watch Later + PS3 playlists + Create
    picker.selected = 0;
    picker.scroll = 0;
-   int maxRows = (picker.screenH - 150) / PICKER_ROW_H;
-   if (maxRows < 3) maxRows = 3;
-   if (maxRows > PICKER_VISIBLE_ROWS) maxRows = PICKER_VISIBLE_ROWS;
-   picker.visible = picker.count < maxRows ? picker.count : maxRows;
    picker.oskDone = 0;
    picker.createdName[0] = 0;
    memset(&picker.navigateRepeat, 0, sizeof picker.navigateRepeat);
 
-   float scale = getGfxUiScaleFactor();
-   if (scale < 1.0f) scale = 1.0f;
    picker.panelW = picker.screenW - 48;
    if (picker.panelW > PICKER_PANEL_MAX_W) picker.panelW = PICKER_PANEL_MAX_W;
-   picker.panelH = PICKER_TITLE_H + picker.visible * PICKER_ROW_H + PICKER_FOOTER_H;
-   if (picker.panelH > picker.screenH - 32) picker.panelH = picker.screenH - 32;
-
    pickerFont = openSystemFont(FONT_POP);
    initLabel(&pickerTitle, &pickerFont, 0, 0, picker.panelW - 48, AUTO, 26,
              activeTheme->textPrimary, TEXT_NOWRAP, "Add to playlist");
    setLabelScaleWithUi(&pickerTitle, 1);
+
+   // Keep a clear gap below the scaled title. At UI scale 1.5x the title
+   // becomes taller, so the first playlist row must move down with it.
+   picker.titleH = 18 + pickerTitle.tt.tex.h + 20;
+   if (picker.titleH < PICKER_TITLE_H) picker.titleH = PICKER_TITLE_H;
+   int maxRows = (picker.screenH - picker.titleH - PICKER_FOOTER_H - 37) / PICKER_ROW_H;
+   if (maxRows < 3) maxRows = 3;
+   if (maxRows > PICKER_VISIBLE_ROWS) maxRows = PICKER_VISIBLE_ROWS;
+   picker.visible = picker.count < maxRows ? picker.count : maxRows;
+   picker.panelH = picker.titleH + picker.visible * PICKER_ROW_H + PICKER_FOOTER_H + 5;
+   if (picker.panelH > picker.screenH - 32) picker.panelH = picker.screenH - 32;
    for (int i = 0; i < PICKER_MAX_ROWS; i++) {
       const char *name = "";
       if (!picker.downloadsOnly && i == 0) {
@@ -185,13 +188,20 @@ static void drawPicker(void)
    fillGfxRoundedRectangleFixed(x, y, picker.panelW, picker.panelH, 12, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x + 1, y + 1, picker.panelW - 2, picker.panelH - 2, 11,
                                 activeTheme->surface);
+   fillGfxRectangle(x, y, picker.panelW, 4, activeTheme->accent);
    moveLabel(&pickerTitle, x + 24, y + 18);
    drawLabel(&pickerTitle);
 
-   int listY = y + PICKER_TITLE_H;
+   int listY = y + picker.titleH;
    for (int row = 0; row < picker.visible; row++) {
       int index = picker.scroll + row;
       int rowY = listY + row * PICKER_ROW_H;
+      // Create playlist is an action, not a destination playlist. Separate it
+      // visually from the playlist rows with a divider and a little breathing room.
+      if (index == picker.count - 1) {
+         fillGfxRectangle(x + 20, rowY + 1, picker.panelW - 40, 1, activeTheme->textSecondary);
+         rowY += 5;
+      }
       if (index == picker.selected)
          fillGfxRoundedRectangleFixed(x + 10, rowY + 2, picker.panelW - 20, PICKER_ROW_H - 4,
                                       8, activeTheme->rowHighlight);

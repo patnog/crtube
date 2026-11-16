@@ -99,6 +99,7 @@ static int           accountRevisionSeen;      // sign-in state the category ord
 static uint64_t      accountFeedRefreshUs[ACCOUNT_FEED_COUNT];
 static uint64_t      playlistRefreshUs;
 static int           localPlaylistRevisionSeen;
+static int           downloadPlaylistRevisionSeen;
 static int           playlistWatchLaterRevisionSeen;
 static unsigned int  downloadLibraryRevisionSeen;
 
@@ -3642,6 +3643,7 @@ static void initHome(void)
    subsRevisionSeen = getSubscriptionsRevision();
    watchLaterRevisionSeen = getWatchLaterRevision();
    localPlaylistRevisionSeen = getLocalPlaylistRevision();
+   downloadPlaylistRevisionSeen = getDownloadPlaylistRevision();
    playlistWatchLaterRevisionSeen = getPlaylistWatchLaterRevision();
    downloadLibraryRevisionSeen = getDownloadLibraryRevision();
    accountRevisionSeen = getAccountRevision();
@@ -4305,7 +4307,7 @@ static void updateHome(void)
          setButtonHintCaption(&hints, homeSquareHint, "Remove (confirm) / Playlist (hold)");
       else if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS)
          setButtonHintCaption(&hints, homeSquareHint,
-            home.playlistReturnCategory == HOME_DOWNLOADS ? "Add to playlist / Delete (hold)" : "Remove (confirm)");
+            home.playlistReturnCategory == HOME_DOWNLOADS ? "Remove / Delete (hold)" : "Remove (confirm)");
       else if (home.category == HOME_DOWNLOADS) {
          const SearchResult *downloadHintItem = gridSelected(&home.grid);
          setButtonHintCaption(&hints, homeSquareHint,
@@ -4873,7 +4875,6 @@ static void drawHome(void)
    if (home.category == HOME_DOWNLOADS) drawDownloadSpaceStatus();
    drawButtonHintsFitted(&hints, home.screenW, homeFooterBottomY, HINT_ROW_GAP, MAX_HINT_ROWS);
    if (!home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen) drawSidebar();
-   drawDownloadOverlay(home.screenW);
    if (home.downloadPlaylistConfirmOpen) {
       int panelW = home.screenW * 90 / 100;
       if (panelW > 1200) panelW = 1200;
@@ -4942,8 +4943,6 @@ static void drawHome(void)
    }
    if (home.downloadManagerOpen) {
       drawDownloadManagement();
-      // The disk-space prompt must remain the topmost modal even over Downloads.
-      if (isDownloadSpacePromptOpen()) drawDownloadOverlay(home.screenW);
    }
 }
 
@@ -5025,6 +5024,14 @@ static void resumeHome(void)
       watchLaterRevisionSeen = getWatchLaterRevision();
       categoryCached[HOME_WATCHLATER] = 0;
       if (home.category == HOME_WATCHLATER) { loadCategory(); return; }
+   }
+   if (getDownloadPlaylistRevision() != downloadPlaylistRevisionSeen) {
+      downloadPlaylistRevisionSeen = getDownloadPlaylistRevision();
+      if (home.category == HOME_DOWNLOADS ||
+          (home.category == HOME_LOCAL_PLAYLIST_CONTENTS && home.playlistReturnCategory == HOME_DOWNLOADS)) {
+         loadCategory();
+         return;
+      }
    }
    if (getLocalPlaylistRevision() != localPlaylistRevisionSeen ||
        getPlaylistWatchLaterRevision() != playlistWatchLaterRevisionSeen) {

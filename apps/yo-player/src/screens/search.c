@@ -1138,7 +1138,6 @@ static void drawSearch(void)
       drawLabel(&historyConfirmFooter);
    }
    drawSidebar();
-   drawDownloadOverlay(search.screenW);
 }
 
 static void suspendSearch(void)

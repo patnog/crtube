@@ -311,6 +311,7 @@ int main(int argc, char **argv)
          diagStageStartUs = sys_time_get_system_time();
 #endif
          drawScreen();
+         drawDownloadOverlay(getGfxScreenWidth());
       }
 #if BUILD_DIAG_MAIN_LOOP
       diagDrawUs = sys_time_get_system_time() - diagStageStartUs;
