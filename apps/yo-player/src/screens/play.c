@@ -10,6 +10,7 @@
 // the UI thread adopts the built player and pulls frames each render frame.
 
 #include "app-config.h"
+#include "diagnostics.h"
 #include "screens/play.h"
 #include "screens/home.h"
 #include "downloads.h"
@@ -292,7 +293,8 @@ static struct {
    char             message[128];     // failure reason (worker writes, UI reads)
    VideoPlayer     *pendingPlayer;    // built by the worker, adopted by the UI thread
    volatile int     workerDone;
-   volatile int     cancelRequested; // cooperative cancellation for the initial playback worker
+   volatile int     cancelRequested; // cooperative cancellation for playback-owned work
+   HttpRequestGroup requestGroup;   // isolates playback network I/O from downloads and navigation
    int              pauseWhenReady; // preserve Cross presses made before the first frame/player adoption
    int              threadActive;
    sys_ppu_thread_t workerTid;
@@ -514,8 +516,8 @@ static void requestPlaybackCancel(void)
 {
    __sync_lock_test_and_set(&state.cancelRequested, 1);
    __sync_synchronize();
-   // Interrupt active resolver/stream requests before joining the playback worker.
-   setHttpRequestsCancelled(1);
+   // Interrupt playback-owned resolver, stream and prefetch requests before joining workers.
+   cancelHttpRequestGroup(&state.requestGroup);
 }
 
 static void fail(const char *reason)
@@ -1016,6 +1018,7 @@ static int getRequestedDownloadedId(char out[12])
 static void worker(uint64_t arg)
 {
    (void)arg;
+   setHttpRequestGroup(&state.requestGroup);
    StreamInfo *info = NULL;
    if (requestedIsLocal) {
       char fallback[256] = "Downloaded video";
@@ -1320,6 +1323,7 @@ done:
    free(info);
    __sync_synchronize();
    state.workerDone = 1;
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -1537,9 +1541,11 @@ static int isBareVideoId(const char *input)
 static void sponsorWorker(uint64_t arg)
 {
    (void)arg;
+   setHttpRequestGroup(&state.requestGroup);
    fetchSponsorSegments(requestedInput, &state.sb);
    __sync_synchronize();
    state.sbWorkerDone = 1;
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -1547,9 +1553,11 @@ static void sponsorWorker(uint64_t arg)
 static void chapterWorker(uint64_t arg)
 {
    (void)arg;
+   setHttpRequestGroup(&state.requestGroup);
    fetchChapters(requestedInput, &state.fetchedChapters);
    __sync_synchronize();
    state.chWorkerDone = 1;
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -1557,6 +1565,7 @@ static void chapterWorker(uint64_t arg)
 static void metadataWorker(uint64_t arg)
 {
    (void)arg;
+   setHttpRequestGroup(&state.requestGroup);
    char videoId[12] = "";
    char views[32] = "";
    char published[24] = "";
@@ -1590,6 +1599,7 @@ static void metadataWorker(uint64_t arg)
    }
    __sync_synchronize();
    state.metadataWorkerDone = 1;
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -1597,6 +1607,7 @@ static void metadataWorker(uint64_t arg)
 static void autoplayWorker(uint64_t arg)
 {
    (void)arg;
+   setHttpRequestGroup(&state.requestGroup);
    if (getNextVideoId(requestedInput, state.nextVideoId, sizeof state.nextVideoId,
                       state.nextVideoTitle, sizeof state.nextVideoTitle,
                       autoplayWatchedIds, autoplayWatchedCount) == 0) {
@@ -1622,6 +1633,7 @@ static void autoplayWorker(uint64_t arg)
    }
    __sync_synchronize();
    state.nextWorkerDone = 1;
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -1690,6 +1702,7 @@ static int launchPlaylistQueueIndex(int index)
    playlistQueueCursor = index;
    char videoId[16];
    strCopy(videoId, sizeof videoId, playlistQueue[index]);
+   requestPlaybackCancel();
    popScreen();
    launchVideo(videoId, 0);
    return 1;
@@ -1703,6 +1716,7 @@ static int launchDownloadedQueueIndex(int index)
       logInfo("[play] queued download unavailable: %s\n", downloadedQueue[index]);
       return 0;
    }
+   requestPlaybackCancel();
    popScreen();
    downloadedQueueCursor = index;
    requestedIsLocal = 1;
@@ -1881,9 +1895,9 @@ static void applyPlaybackUiLabelScale(float scale)
 
 static void initPlay(void)
 {
-   setHttpRequestsCancelled(0);
    loadingAnimationStartedUs = 0;
    memset(&state, 0, sizeof state);
+   state.requestGroup.cancelled = 0;
    state.askPromptShown = -1;
    state.screenW = getGfxScreenWidth();
    state.screenH = getGfxScreenHeight();
@@ -2150,12 +2164,14 @@ static void applyPreferredSubtitleTrack(void)
 static void subtitleWorker(uint64_t arg)
 {
    (void)arg;
+   setHttpRequestGroup(&state.requestGroup);
    CaptionTrack *track = &state.captionTracks[state.subtitleFetched];
    state.subtitleFetchResult = track->isLocalFile ?
       loadSubtitlesSrt(track->url, state.subtitleTrack) :
       fetchSubtitles(track->url, state.subtitleTrack);   // a failure leaves count 0
    __sync_synchronize();
    state.subWorkerDone = 1;
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -2184,6 +2200,7 @@ static void toggleSubtitles(void)
 static void audioSwitchWorker(uint64_t arg)
 {
    (void)arg;
+   setHttpRequestGroup(&state.requestGroup);
    int target = state.audioSwitchTarget;
    logInfo("[audio-diag] L3 switch begin old=%d target=%d id='%s' posMs=%d wasPaused=%d urlLen=%d\n",
            state.audioPick, target, state.audioIds[target],
@@ -2197,6 +2214,7 @@ static void audioSwitchWorker(uint64_t arg)
       logWarn("[audio-diag] L3 switch failed target=%d; previous video remains active\n", target);
    __sync_synchronize();
    state.audioSwitchDone = 1;
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -2239,6 +2257,7 @@ static VideoPlayer *openReadyResolutionPlayer(const char *videoUrl, const char *
 static void resolutionSwitchWorker(uint64_t arg)
 {
    (void)arg;
+   setHttpRequestGroup(&state.requestGroup);
    VideoPlayer *oldPlayer = state.retiringResolutionPlayer;
    state.retiringResolutionPlayer = NULL;
    if (oldPlayer) destroyVideoPlayer(oldPlayer);
@@ -2288,6 +2307,7 @@ static void resolutionSwitchWorker(uint64_t arg)
    state.pendingResolutionPlayer = replacement;
    __sync_synchronize();
    state.resolutionSwitchDone = 1;
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -2575,6 +2595,7 @@ static int isLiveBehindAtEdge(float behindSeconds)
 static void liveReopenWorker(uint64_t arg)
 {
    (void)arg;
+   setHttpRequestGroup(&state.requestGroup);
    VideoPlayer *old = state.liveRetiringPlayer;
    state.liveRetiringPlayer = NULL;
    if (old) destroyVideoPlayer(old);
@@ -2592,6 +2613,7 @@ static void liveReopenWorker(uint64_t arg)
    state.pendingPlayer = replacement;
    __sync_synchronize();
    state.workerDone = 1;
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -2905,7 +2927,7 @@ static void handlePlaybackInput(void)
             playlistQueueCursor = -1;
          }
          char previousId[12];
-         if (previousPlaybackId(previousId)) { popScreen(); launchVideo(previousId, 0); return; }
+         if (previousPlaybackId(previousId)) { requestPlaybackCancel(); popScreen(); launchVideo(previousId, 0); return; }
          showToast("No previous video");
       }
    }
@@ -2920,7 +2942,7 @@ static void handlePlaybackInput(void)
       } else {
          char nextId[12];
          if (state.nextThreadActive || state.nextNoticeVisible) showToast("Next video is already loading");
-         else if (playlistQueueCount == 0 && nextPlaybackId(nextId)) { popScreen(); launchVideo(nextId, 0); return; }
+         else if (playlistQueueCount == 0 && nextPlaybackId(nextId)) { requestPlaybackCancel(); popScreen(); launchVideo(nextId, 0); return; }
          else {
             state.nextAttempted = 1;
             state.nextWorkerDone = 0;
@@ -3970,7 +3992,7 @@ static void updatePlay(void)
    // consumed by the OSD, options, or any other playback overlay.
    if (isPadRemoteButtonPressed(PAD_REMOTE_STOP)) {
       logInfo("[yt] playback exit requested by user (BD Remote STOP)\n");
-      if (state.stage == STAGE_LOADING) requestPlaybackCancel();
+      requestPlaybackCancel();
       popScreen();
       return;
    }
@@ -3983,6 +4005,7 @@ static void updatePlay(void)
       if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_CIRCLE)) {
          if (isPadButtonPressed(PAD_BTN_CIRCLE))
             logInfo("[yt] playback exit requested by user (CIRCLE)\n");
+         requestPlaybackCancel();
          popScreen();
          return;
       }
@@ -4026,6 +4049,7 @@ static void updatePlay(void)
             hideVolumeMeter(&volumeMeter);
          } else {
             logInfo("[yt] playback exit requested by user (CIRCLE)\n");
+            requestPlaybackCancel();
             popScreen();
             return;
          }
@@ -4312,6 +4336,7 @@ static void updatePlay(void)
          playlistQueueCount = 0;
          playlistQueueCursor = -1;
       }
+      requestPlaybackCancel();
       popScreen();
       launchVideo(nextId, 1);
       return;
@@ -4421,6 +4446,7 @@ static void updatePlay(void)
    // return to the screen that launched this video instead of requesting /next.
    if (state.stage == STAGE_PLAYING && state.player && (!state.isLive || state.liveEnded) &&
        isVideoEnded(state.player) && !getAutoplayEnabled() && !state.nextAttempted) {
+      requestPlaybackCancel();
       popScreen();
       return;
    }
@@ -5052,6 +5078,11 @@ static void drawPlay(void)
       frame = getVideoFrame(state.player, &w, &h);
       uint64_t framePullUs = sys_time_get_system_time() - framePullStartUs;
       framePullElapsedUs = framePullUs;
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      if (framePullUs >= 25000ull)
+         logWarn("[play-render-stall] phase=frame-pull elapsedMs=%llu frame=%p stage=%d live=%d\n",
+                 (unsigned long long)(framePullUs / 1000ull), frame, state.stage, state.isLive);
+#endif
       renderHasFrame = frame != NULL;
       if (frame) {
          if (!state.firstFrameSeen) {
@@ -5106,6 +5137,11 @@ static void drawPlay(void)
          uint64_t drawStartUs = sys_time_get_system_time();
          drawGfxYuvFrame(dx, dy, dw, dh, frame, w, h);
          yuvDrawElapsedUs = sys_time_get_system_time() - drawStartUs;
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+         if (yuvDrawElapsedUs >= 25000ull)
+            logWarn("[play-render-stall] phase=yuv-draw elapsedMs=%llu source=%dx%d target=%dx%d\n",
+                    (unsigned long long)(yuvDrawElapsedUs / 1000ull), w, h, dw, dh);
+#endif
          recordVideoRenderDraw(framePullUs, yuvDrawElapsedUs, w, h);
          if (!state.diagFirstYuvDraw) {
             state.diagFirstYuvDraw = 1;
@@ -5191,6 +5227,16 @@ static void drawPlay(void)
       uint64_t totalUs = renderEndUs >= renderStartUs ? renderEndUs - renderStartUs : 0;
       uint64_t restUs = totalUs > clearElapsedUs + framePullElapsedUs + yuvDrawElapsedUs
                       ? totalUs - clearElapsedUs - framePullElapsedUs - yuvDrawElapsedUs : 0;
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      if (totalUs >= 25000ull)
+         logWarn("[play-render-stall] phase=draw-play totalMs=%llu clearMs=%llu pullMs=%llu yuvMs=%llu restMs=%llu stage=%d live=%d paused=%d seeking=%d\n",
+                 (unsigned long long)(totalUs / 1000ull),
+                 (unsigned long long)(clearElapsedUs / 1000ull),
+                 (unsigned long long)(framePullElapsedUs / 1000ull),
+                 (unsigned long long)(yuvDrawElapsedUs / 1000ull),
+                 (unsigned long long)(restUs / 1000ull),
+                 state.stage, state.isLive, state.player ? isVideoPaused(state.player) : 0, state.seeking);
+#endif
       if (!renderDiagWindowUs) renderDiagWindowUs = renderStartUs;
       renderDiagCalls++;
       renderDiagIntervalsUs += renderIntervalUs;
@@ -5263,8 +5309,8 @@ static void termPlay(void)
    uint64_t teardownStartedUs = sys_time_get_system_time();
    cropPanX = cropPanY = 0.0f;
    cropPanLastUpdateUs = 0;
-   // Wake worker threads blocked in TLS connect/read before joining them. Without this, leaving during
-   // a slow YouTube resolve can make the screen manager wait through several 10-second socket timeouts.
+   // Shut down playback-owned sockets before joining workers. This wakes resolver, stream and
+   // prefetch threads without cancelling downloads or unrelated HTTP work.
    requestPlaybackCancel();
    state.resolutionSwitchAborting = 1;
    if (state.threadActive) { joinPlaybackWorker("playback", state.workerTid); state.threadActive = 0; }
@@ -5352,7 +5398,6 @@ static void termPlay(void)
    closeFont(&uiFont);
    logInfo("[play-cancel] teardownComplete totalMs=%llu\n",
            (unsigned long long)((sys_time_get_system_time() - teardownStartedUs) / 1000ull));
-   setHttpRequestsCancelled(0);
 }
 
 void getPlaybackReturnVideoIds(char origin[16], char current[16])

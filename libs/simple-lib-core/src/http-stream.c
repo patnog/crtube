@@ -52,6 +52,7 @@ struct HttpStream {
    int              inUse;
    volatile int     readerCancelled;
    char             url[HTTP_URL_MAX];
+   HttpRequestGroup *requestGroup;
    uint8_t         *ring;
    uint64_t         position;      // reader's logical read position (guarded by stateLock)
    uint64_t         ringStart;     // lowest file offset still in the ring (prefetch advances it)
@@ -233,8 +234,9 @@ static void prefetchThread(uint64_t arg)
 {
    HttpStream *stream = (HttpStream *)(uintptr_t)arg;
    const HttpTransport *transport = getActiveTransport();
+   setHttpRequestGroup(stream->requestGroup);
 
-   while (stream->running) {
+   while (stream->running && !isHttpRequestGroupCancelled()) {
       if (stream->error) { sleepMs(ERROR_IDLE_MS); continue; }   // latched failure: idle until the reader closes us
 
       lock(&stream->stateLock);
@@ -388,6 +390,7 @@ static void prefetchThread(uint64_t arg)
       unlock(&stream->stateLock);
       if (recvRetryDelay > 0) sleepMs((unsigned)recvRetryDelay);
    }
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -417,6 +420,7 @@ HttpStream *openHttpStream(const char *url)
    logInfo("[http] s%d allocated; active streams=%d/%d\n", stream->slot, active, MAX_STREAMS);
 
    stream->ring = ring;
+   stream->requestGroup = getHttpRequestGroup();
    strCopy(stream->url, sizeof stream->url, url);
    createLock(&stream->stateLock);
    stream->lockReady = 1;
@@ -449,7 +453,11 @@ int64_t readHttpStream(HttpStream *stream, void *buffer, uint64_t length)
    int recoveryAttempts = 0;
    for (;;) {
       lock(&stream->stateLock);
-      if (!stream->inUse || stream->readerCancelled) { unlock(&stream->stateLock); return -1; }
+      if (!stream->inUse || stream->readerCancelled ||
+          (stream->requestGroup && stream->requestGroup->cancelled)) {
+         unlock(&stream->stateLock);
+         return -1;
+      }
 
       // reader moved off the buffered window (backward past the history): ask the prefetch to reopen. clear
       // atEof too - it described the old position; the reconnect re-establishes end-of-stream at the new one.

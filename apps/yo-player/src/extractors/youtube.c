@@ -77,6 +77,7 @@ static const char *LIVE_UA =
    "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
 static const char *LIVE_BODY_FMT =
    "{\"context\":{\"client\":{" LIVE_CLIENT ",\"visitorData\":\"%s\"}},\"videoId\":\"%s\",\"contentCheckOk\":true,\"racyCheckOk\":true}";
+#define LIVE_PLAYER_FALLBACK_ATTEMPTS 9
 
 static const char *VISITOR_BODY   = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"}}}";   // visitor session stays on its original fixed region
 // Search keeps YouTube's mixed result types (videos and playlists). These params apply only the sort
@@ -818,17 +819,22 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
    const int count = (int)(sizeof clients / sizeof clients[0]);
    // The initial LIVE request already used ANDROID_VR. Retry other identities first;
    // keep the VOD order unchanged so this recovery path does not alter normal playback.
-   static const int liveOrder[] = { 8, 4, 3, 2, 1, 0, 5, 6, 7 };
-   const int attempts = liveMode ? (int)(sizeof liveOrder / sizeof liveOrder[0]) : count;
+   // Try distinct non-primary identities in descending likelihood of exposing a
+   // usable DASH timeline. ANDROID_VR (index 9) was already used by LIVE_BODY_FMT.
+   // Every remaining client appears exactly once; no retry loop can revisit one.
+   static const int liveOrder[] = { 3, 2, 1, 0, 7, 6, 5, 4, 8 };
+   const int attempts = liveMode ? LIVE_PLAYER_FALLBACK_ATTEMPTS : count;
    for (int attempt = 0; attempt < attempts; attempt++) {
+      if (isHttpRequestGroupCancelled()) return 0;
       int i = liveMode ? liveOrder[attempt] : attempt;
-      logInfo("[yt] UNPLAYABLE; retrying video=%s with client=%s mode=%s\n",
-              videoId, clients[i].name, liveMode ? "LIVE" : "VOD");
+      logInfo("[yt] player fallback video=%s mode=%s attempt=%d/%d client=%s\n",
+              videoId, liveMode ? "LIVE" : "VOD", attempt + 1, attempts, clients[i].name);
       int rc = fetchPlayerClient(clients[i].fields, clients[i].ua,
                                  (i == 0 ? "1" : i == 1 ? "3" : i == 2 ? "5" :
                                   i == 3 ? "56" : i == 4 ? "85" : i == 5 ? "67" :
                                   i == 6 ? "21" : i == 7 ? "2" : i == 8 ? "7" : "28"),
                                  clients[i].version, videoId, resp, respLen);
+      if (isHttpRequestGroupCancelled()) return 0;
       if (rc != 0) {
          logError("[yt] retry client=%s request failed rc=%d\n", clients[i].name, rc);
          continue;

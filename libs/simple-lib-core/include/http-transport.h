@@ -43,6 +43,8 @@ typedef struct {
 
    // Query cancellation from the calling worker. Used by CPU-bound parsers after HTTP completes.
    int (*isRequestGroupCancelled)(void);
+   // Return the current thread's group so library-owned child threads can inherit it.
+   HttpRequestGroup *(*getRequestGroup)(void);
 } HttpTransport;
 
 // wire a transport into http.c. an `override` bind claims the slot permanently (modern wins over system

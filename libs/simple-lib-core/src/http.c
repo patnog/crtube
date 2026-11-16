@@ -43,6 +43,11 @@ void setHttpRequestGroup(HttpRequestGroup *group)
    if (transport && transport->setRequestGroup) transport->setRequestGroup(group);
 }
 
+HttpRequestGroup *getHttpRequestGroup(void)
+{
+   return transport && transport->getRequestGroup ? transport->getRequestGroup() : NULL;
+}
+
 void cancelHttpRequestGroup(HttpRequestGroup *group)
 {
    if (!group) return;

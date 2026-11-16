@@ -302,9 +302,14 @@ static int isRequestGroupCancelledBearssl(void)
    return cancelled && *cancelled;
 }
 
+static HttpRequestGroup *getRequestGroupBearssl(void)
+{
+   return (HttpRequestGroup *)(void *)getTlsRequestGroup();
+}
+
 static const HttpTransport BEARSSL_TRANSPORT = {
    openBearssl, readBearssl, closeBearssl, shutdownBearssl, getHeaderBearssl, setRequestsCancelledBearssl,
-   setRequestGroupBearssl, cancelRequestGroupBearssl, isRequestGroupCancelledBearssl
+   setRequestGroupBearssl, cancelRequestGroupBearssl, isRequestGroupCancelledBearssl, getRequestGroupBearssl
 };
 
 void initModernHttp(void)

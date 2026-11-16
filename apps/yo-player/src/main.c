@@ -13,6 +13,7 @@
 #endif
 
 #include "app-config.h"
+#include "diagnostics.h"
 #include "app.h"
 #include "vfs.h"
 #include "http.h"
@@ -192,10 +193,39 @@ int main(int argc, char **argv)
    int screensaverTimeoutLogged = 0;
 
    while (!appExitRequested) {
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      static uint64_t diagPreviousLoopEndUs;
+      uint64_t diagLoopStartUs = sys_time_get_system_time();
+      uint64_t diagGapUs = diagPreviousLoopEndUs && diagLoopStartUs >= diagPreviousLoopEndUs
+                         ? diagLoopStartUs - diagPreviousLoopEndUs : 0;
+      uint64_t diagStageStartUs;
+      uint64_t diagAppPollUs = 0, diagTeeUs = 0, diagExportUs = 0, diagPadUs = 0;
+      uint64_t diagInputUs = 0, diagSaverUs = 0, diagUpdateUs = 0;
+      uint64_t diagGfxBeginUs = 0, diagClearUs = 0, diagDrawUs = 0, diagGfxEndUs = 0;
+#endif
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      diagStageStartUs = sys_time_get_system_time();
+#endif
       appPoll();
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      diagAppPollUs = sys_time_get_system_time() - diagStageStartUs;
+      diagStageStartUs = sys_time_get_system_time();
+#endif
       applyPendingTeeDisableRequest();
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      diagTeeUs = sys_time_get_system_time() - diagStageStartUs;
+      diagStageStartUs = sys_time_get_system_time();
+#endif
       updateVideoExport();   // right after the sysutil pump, which is what delivers its results
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      diagExportUs = sys_time_get_system_time() - diagStageStartUs;
+      diagStageStartUs = sys_time_get_system_time();
+#endif
       updatePad();
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      diagPadUs = sys_time_get_system_time() - diagStageStartUs;
+      diagStageStartUs = sys_time_get_system_time();
+#endif
 
       // Treat both digital controls and deliberate analogue-stick movement as activity.
       unsigned downButtons = getPadDownButtons();
@@ -208,6 +238,10 @@ int main(int argc, char **argv)
          rightStick.y < -20 || rightStick.y > 20;
       uint64_t nowUs = getTimeUs();
       updateScreenSaver(); // also polls the asynchronous logo decode before activation
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      diagInputUs = sys_time_get_system_time() - diagStageStartUs;
+      diagStageStartUs = sys_time_get_system_time();
+#endif
 
       if (isScreenSaverActive()) {
          if (hasPadActivity) {
@@ -243,17 +277,67 @@ int main(int argc, char **argv)
 
       // Keep the underlying screen and its input handlers untouched while the overlay is visible.
       // Background workers continue independently; updateScreen is resumed after dismissal.
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      diagSaverUs = sys_time_get_system_time() - diagStageStartUs;
+      diagStageStartUs = sys_time_get_system_time();
+#endif
       if (!isScreenSaverActive() && !screensaverReleaseGuard)
          updateScreen();
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      diagUpdateUs = sys_time_get_system_time() - diagStageStartUs;
+      diagStageStartUs = sys_time_get_system_time();
+#endif
 
       beginGfxFrame();
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      diagGfxBeginUs = sys_time_get_system_time() - diagStageStartUs;
+      diagStageStartUs = sys_time_get_system_time();
+#endif
       if (isScreenSaverActive()) {
          drawScreenSaver();
       } else {
          clearGfx(activeTheme->appBg);
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+         diagClearUs = sys_time_get_system_time() - diagStageStartUs;
+         diagStageStartUs = sys_time_get_system_time();
+#endif
          drawScreen();
       }
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      diagDrawUs = sys_time_get_system_time() - diagStageStartUs;
+      diagStageStartUs = sys_time_get_system_time();
+#endif
       endGfxFrame();
+#if YO_PLAYER_DETAILED_DIAGNOSTICS
+      {
+         uint64_t diagLoopEndUs = sys_time_get_system_time();
+         uint64_t diagLoopUs = diagLoopEndUs - diagLoopStartUs;
+         diagGfxEndUs = diagLoopEndUs - diagStageStartUs;
+         if (diagGapUs >= 25000ull || diagLoopUs >= 25000ull ||
+             diagAppPollUs >= 25000ull || diagTeeUs >= 25000ull ||
+             diagExportUs >= 25000ull || diagPadUs >= 25000ull ||
+             diagInputUs >= 25000ull || diagSaverUs >= 25000ull ||
+             diagUpdateUs >= 25000ull || diagGfxBeginUs >= 25000ull || diagClearUs >= 25000ull ||
+             diagDrawUs >= 25000ull || diagGfxEndUs >= 25000ull) {
+            logWarn("[main-loop-stall] gapMs=%llu loopMs=%llu appPollMs=%llu teeMs=%llu exportMs=%llu padMs=%llu inputMs=%llu saverMs=%llu updateMs=%llu gfxBeginMs=%llu clearMs=%llu drawMs=%llu gfxEndMs=%llu saver=%d guard=%d screen=%d\n",
+                    (unsigned long long)(diagGapUs / 1000ull),
+                    (unsigned long long)(diagLoopUs / 1000ull),
+                    (unsigned long long)(diagAppPollUs / 1000ull),
+                    (unsigned long long)(diagTeeUs / 1000ull),
+                    (unsigned long long)(diagExportUs / 1000ull),
+                    (unsigned long long)(diagPadUs / 1000ull),
+                    (unsigned long long)(diagInputUs / 1000ull),
+                    (unsigned long long)(diagSaverUs / 1000ull),
+                    (unsigned long long)(diagUpdateUs / 1000ull),
+                    (unsigned long long)(diagGfxBeginUs / 1000ull),
+                    (unsigned long long)(diagClearUs / 1000ull),
+                    (unsigned long long)(diagDrawUs / 1000ull),
+                    (unsigned long long)(diagGfxEndUs / 1000ull),
+                    isScreenSaverActive(), screensaverReleaseGuard, playScreen.status);
+         }
+         diagPreviousLoopEndUs = diagLoopEndUs;
+      }
+#endif
 
    }
 

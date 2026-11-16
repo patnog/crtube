@@ -12,6 +12,7 @@
 #include "decode-h264-tee.h"
 #include "decode-aac.h"
 #include "audio.h"
+#include "http.h"
 #include "thread.h"
 #include "dbg.h"
 #include <stdlib.h>
@@ -1005,12 +1006,14 @@ silent:
 // opens the split audio demuxer on a side thread, in parallel with the video open (each open costs
 // an https connect + header parse, so doing them together nearly halves startup). create joins this
 // before anything touches the audio demuxer.
-typedef struct { VideoPlayer *player; const char *path; int ok; } AudioOpenJob;
+typedef struct { VideoPlayer *player; const char *path; int ok; HttpRequestGroup *requestGroup; } AudioOpenJob;
 
 static void audioOpenThread(uint64_t arg)
 {
    AudioOpenJob *job = (AudioOpenJob *)(uintptr_t)arg;
+   setHttpRequestGroup(job->requestGroup);
    job->ok = openAudioDemuxer(&job->player->audioDemuxer, job->path) == 0;
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -1057,7 +1060,7 @@ VideoPlayer *createVideoPlayerSplitCancelable(const char *videoPath, const char 
 
    // adaptive streams carry audio in a separate url; open it in parallel with the video open below.
    // failure just means silent playback, so it never fails the whole player.
-   AudioOpenJob audioJob = { player, audioPath, 0 };
+   AudioOpenJob audioJob = { player, audioPath, 0, getHttpRequestGroup() };
    player->audioExpected = 0;
    sys_ppu_thread_t audioOpenTid;
    int audioOpening = audioPath && audioPath[0] &&

@@ -83,6 +83,7 @@ struct LiveSource {
    volatile int     running;
    volatile int     cancel;
    int              isAudio;
+   HttpRequestGroup *requestGroup;
    uint8_t         *specBuffer;
    int              specCapacity;
 
@@ -164,6 +165,7 @@ typedef struct {
    int result;
    long sq;
    int isAudio;
+   HttpRequestGroup *requestGroup;
    sys_ppu_thread_t thread;
    uint64_t startedUs;
    uint64_t finishedUs;
@@ -173,6 +175,7 @@ typedef struct {
 static void liveSpecFetchThread(uint64_t arg)
 {
    LiveSpecFetch *job = (LiveSpecFetch *)(uintptr_t)arg;
+   setHttpRequestGroup(job->requestGroup);
    HttpHeader headers[] = { { "User-Agent", SEGMENT_UA }, { "Accept-Encoding", "identity" } };
    char contentLength[24];
    HttpHeaderCapture whole = { "content-length", contentLength, sizeof contentLength };
@@ -187,6 +190,7 @@ static void liveSpecFetchThread(uint64_t arg)
    job->finishedUs = sys_time_get_system_time();
    __sync_synchronize();
    job->done = 1;   // last access to the stack-owned job before this worker exits
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -273,6 +277,7 @@ static int fetchNextSegment(LiveSource *source)
          spec.capacity = source->specCapacity;
          spec.sq = source->nextSq + 1;
          spec.isAudio = source->isAudio;
+         spec.requestGroup = source->requestGroup;
          if (spawnJoinableThread(&spec.thread, liveSpecFetchThread, (uint64_t)(uintptr_t)&spec,
                                  THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "live-spec-fetch") == 0) {
             specStarted = 1;
@@ -465,7 +470,9 @@ static int fetchNextSegment(LiveSource *source)
 static void prefetchThread(uint64_t arg)
 {
    LiveSource *source = (LiveSource *)(uintptr_t)arg;
-   while (source->running && !source->cancel && !source->sourceError) {
+   setHttpRequestGroup(source->requestGroup);
+   while (source->running && !source->cancel && !source->sourceError &&
+          !isHttpRequestGroupCancelled()) {
       lock(&source->lock);
       uint64_t end = source->windowStart + (uint64_t)source->windowLen;
       uint64_t ahead = end > source->position ? end - source->position : 0;
@@ -514,6 +521,7 @@ static void prefetchThread(uint64_t arg)
       if (!fetch) { sleepMs(PREFETCH_IDLE_MS); continue; }
 
       int rc = fetchNextSegment(source);
+      if (isHttpRequestGroupCancelled()) break;
       if (rc == 2) {                              // an ended stream is all in: the reader ends after it
          __sync_synchronize();
          source->finished = 1;
@@ -527,9 +535,10 @@ static void prefetchThread(uint64_t arg)
             delay = delay > RECONNECT_MAX_MS / 2 ? RECONNECT_MAX_MS : delay * 2;
          if (delay > RECONNECT_MAX_MS) delay = RECONNECT_MAX_MS;
          for (unsigned waited = 0; waited < delay && source->running &&
-              !source->cancel && !source->sourceError; waited += 50) sleepMs(50);
+              !source->cancel && !source->sourceError && !isHttpRequestGroupCancelled(); waited += 50) sleepMs(50);
       }
    }
+   setHttpRequestGroup(NULL);
    exitThread();
 }
 
@@ -541,6 +550,7 @@ LiveSource *openLiveSource(const char *baseUrl, long startSq, long edgeSq, long 
    // manifest's path): an audio stream's segments need a fraction of a video stream's window
    int audio = strstr(baseUrl, "audio%2F") != NULL || strstr(baseUrl, "audio/mp4") != NULL;
    source->isAudio = audio;
+   source->requestGroup = getHttpRequestGroup();
    source->windowCap = audio ? WINDOW_AUDIO : WINDOW_VIDEO;
    source->window = (uint8_t *)malloc(source->windowCap);
    if (!source->window) { closeLiveSource(source); return NULL; }
@@ -567,7 +577,7 @@ int64_t readLiveSource(LiveSource *source, void *buffer, uint64_t length)
 {
    uint64_t waitStartUs = 0;
    for (;;) {
-      if (source->cancel) return 0;
+      if (source->cancel || (source->requestGroup && source->requestGroup->cancelled)) return 0;
       __sync_synchronize();
       if (source->sourceError) return -1;
       int finished = source->finished;

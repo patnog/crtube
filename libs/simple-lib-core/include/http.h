@@ -15,9 +15,10 @@
 
 typedef struct { const char *name; const char *value; } HttpHeader;
 
-// Groups one navigation operation's HTTP requests without affecting downloads or playback.
+// Groups one operation's HTTP requests without affecting unrelated operations.
 typedef struct { volatile int cancelled; } HttpRequestGroup;
 void setHttpRequestGroup(HttpRequestGroup *group);
+HttpRequestGroup *getHttpRequestGroup(void); // current thread group; for child-thread propagation
 void cancelHttpRequestGroup(HttpRequestGroup *group);
 // True on the calling worker when its bound operation has been cancelled.
 int isHttpRequestGroupCancelled(void);
