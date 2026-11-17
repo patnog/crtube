@@ -4617,11 +4617,13 @@ static void updateHome(void)
       setButtonHintShown(&hints, homeSquareHint, 1);
    }
 
-   // Downloaded playlist contents have no category tabs and no download action.
+   // Playlist contents have no category tabs, regardless of their source.
+   // The Downloads and PS3 Playlists roots always retain the L1/R1 Category hints.
    int inDownloadedPlaylist = home.category == HOME_LOCAL_PLAYLIST_CONTENTS &&
                               home.playlistReturnCategory == HOME_DOWNLOADS;
-   int inOnlinePlaylist = home.category == HOME_PLAYLIST_CONTENTS;
-   int showCategoryHints = !inDownloadedPlaylist && !inOnlinePlaylist;
+   int inPlaylistContents = home.category == HOME_PLAYLIST_CONTENTS ||
+                            home.category == HOME_LOCAL_PLAYLIST_CONTENTS;
+   int showCategoryHints = !inPlaylistContents;
    if (homeL1Hint >= 0) setButtonHintShown(&hints, homeL1Hint, showCategoryHints);
    if (homeR1Hint >= 0) setButtonHintShown(&hints, homeR1Hint, showCategoryHints);
    if (homeDownloadHint >= 0 && inDownloadedPlaylist) {
