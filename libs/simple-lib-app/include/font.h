@@ -96,6 +96,11 @@ void renderFont(TextTexture *tt, Font *f, int size, const char *text, uint32_t c
 // Use this for text that comes from outside the app (file contents, filenames, ...), where a
 // stray '{' or '[' must never be swallowed as (or mistaken for) markup.
 void renderFontRaw(TextTexture *tt, Font *f, int size, const char *text, uint32_t color, int maxWidth, TextWrap wrap);
+// Render text plus a small outline into one texture, for single-draw subtitle rendering.
+void renderFontOutlined(TextTexture *tt, Font *f, int size, const char *text, uint32_t color,
+                        int maxWidth, TextWrap wrap, uint32_t outlineColor, int outlineRadius);
+void renderFontRawOutlined(TextTexture *tt, Font *f, int size, const char *text, uint32_t color,
+                           int maxWidth, TextWrap wrap, uint32_t outlineColor, int outlineRadius);
 
 // where the laid-out text ENDS, reported by renderFontEx -- for placing inline
 // decorations (carets, click-to-continue icons) right after the final glyph.
@@ -111,6 +116,9 @@ typedef struct {
    int inkBottom;  // bottom of the union ink box over all glyphs (texture px)
    int valid;      // 1 when at least one glyph was laid out
 } TextEnd;
+
+void renderFontRawEx(TextTexture *tt, Font *f, int size, const char *text, uint32_t color,
+                     int maxWidth, TextWrap wrap, const TextShadow *shadow, TextEnd *end);
 
 // Per-item layout positions for a typewriter reveal: where each laid-out item (char/space/
 // newline) ENDS, in the rendered texture's pixel space. The text is rendered ONCE in full;

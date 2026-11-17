@@ -17,6 +17,7 @@ typedef struct {
    uint32_t color;
    TextWrap wrap;
    int raw;   // skip {i}/{b}/{color=} style-tag parsing - see initLabelRaw
+   int highlightMode; // 0 none, 1 pre-composed shadow, 2 pre-composed outline
    int scaleWithUi; // opt in to font re-rasterisation using the selected UI scale
    float fixedRenderScale; // optional fixed raster scale, independent of the selected UI zoom
    int scalePositionWithUi; // scale the anchor but keep the rasterised texture dimensions fixed
@@ -35,6 +36,7 @@ void initLabel(Label *l, Font *font, int x, int y, int width, int height, int si
 void initLabelRaw(Label *l, Font *font, int x, int y, int width, int height, int size, uint32_t color, TextWrap wrap, const char *text);
 
 void setLabelText(Label *l, const char *text);
+void setLabelHighlight(Label *l, int mode);
 void refreshLabelScale(Label *l);
 void refreshLabelLayout(Label *l);
 void setLabelScaleWithUi(Label *l, int enabled);

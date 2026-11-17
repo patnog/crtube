@@ -40,8 +40,15 @@ static void renderLabel(Label *l)
    float scale = l->fixedRenderScale > 0.0f ? l->fixedRenderScale : (l->scaleWithUi ? getGfxUiScaleFactor() : 1.0f);
    int renderSize = (int)(l->size * scale + 0.5f);
    if (renderSize < 1) renderSize = 1;
-   if (l->raw) renderFontRaw(&l->tt, l->font, renderSize, l->text, l->color, l->width, l->wrap);
-   else        renderFont(&l->tt, l->font, renderSize, l->text, l->color, l->width, l->wrap);
+   if (l->highlightMode == 1) {
+      const TextShadow shadow = { 4, 4, 0xFF000000 };
+      if (l->raw) renderFontRawEx(&l->tt, l->font, renderSize, l->text, l->color, l->width, l->wrap, &shadow, NULL);
+      else        renderFontEx(&l->tt, l->font, renderSize, l->text, l->color, l->width, l->wrap, &shadow, NULL);
+   } else if (l->highlightMode == 2) {
+      if (l->raw) renderFontRawOutlined(&l->tt, l->font, renderSize, l->text, l->color, l->width, l->wrap, 0xFF000000, 2);
+      else        renderFontOutlined(&l->tt, l->font, renderSize, l->text, l->color, l->width, l->wrap, 0xFF000000, 2);
+   } else if (l->raw) renderFontRaw(&l->tt, l->font, renderSize, l->text, l->color, l->width, l->wrap);
+   else             renderFont(&l->tt, l->font, renderSize, l->text, l->color, l->width, l->wrap);
    l->renderedScale = scale;
    l->renderedFont = l->font;
    l->renderedSize = l->size;
@@ -91,6 +98,16 @@ void setLabelText(Label *l, const char *text)
    if (strncmp(l->text, text, LABEL_MAX_TEXT) == 0) return;
    strCopy(l->text, LABEL_MAX_TEXT, text);
    renderLabel(l);
+}
+
+void setLabelHighlight(Label *l, int mode)
+{
+   if (!l) return;
+   if (mode < 0) mode = 0;
+   if (mode > 2) mode = 2;
+   if (l->highlightMode == mode) return;
+   l->highlightMode = mode;
+   if (l->text[0]) renderLabel(l);
 }
 
 void setLabelColor(Label *l, uint32_t color)

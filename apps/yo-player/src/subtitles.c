@@ -57,11 +57,17 @@ static const char *parseCue(const char *element, const char *end, SubtitleTrack 
       SubtitleCue *previous = out->count ? &out->cues[out->count - 1] : NULL;
       if (previous && strcmp(previous->text, raw) == 0 && start <= previous->end + 0.5f) {
          if (start + dur > previous->end) previous->end = start + dur;
+         if (previous->end > previous->prefixMaxEnd) previous->prefixMaxEnd = previous->end;
       } else {
          SubtitleCue *cue = &out->cues[out->count++];
          strCopy(cue->text, sizeof cue->text, raw);
          cue->start = start;
          cue->end   = start + dur;
+         cue->prefixMaxEnd = cue->end;
+         if (out->count > 1) {
+            float previousMax = out->cues[out->count - 2].prefixMaxEnd;
+            if (previousMax > cue->prefixMaxEnd) cue->prefixMaxEnd = previousMax;
+         }
       }
    }
    return close + 7;
@@ -256,26 +262,43 @@ const char *getSubtitleCueText(const SubtitleTrack *track, float seconds, int *s
 {
    if (activeCue) *activeCue = -1;
    if (activePending) *activePending = 0;
-   if (*scanFrom >= track->count || seconds < track->cues[*scanFrom].start) *scanFrom = 0;   // sought backwards
+   if (!track || track->count <= 0 || !scanFrom) return "";
 
-   // auto captions "roll up": cue windows overlap the next line's, so among the cues covering this
-   // moment always show the LATEST-started one - returning the first match displays the previous
-   // sentence for its whole overlap and reads as lagging subtitles.
+   int lastStarted = *scanFrom;
+   // On first lookup or after a backwards seek, locate the last cue whose start is <= time.
+   if (lastStarted < 0 || lastStarted >= track->count || seconds < track->cues[lastStarted].start) {
+      int lo = 0, hi = track->count;
+      while (lo < hi) {
+         int mid = lo + (hi - lo) / 2;
+         if (track->cues[mid].start <= seconds) lo = mid + 1;
+         else hi = mid;
+      }
+      lastStarted = lo - 1;
+   } else {
+      // Normal playback: advance only over cues that have just entered the timeline.
+      while (lastStarted + 1 < track->count && track->cues[lastStarted + 1].start <= seconds)
+         lastStarted++;
+   }
+   *scanFrom = lastStarted;
+   if (lastStarted < 0) return "";
+
+   // Walk backwards from the latest-started cue. Usually the first cue is active, so
+   // normal playback costs one end-time check. prefixMaxEnd lets us stop as soon as
+   // no earlier cue can still overlap this position.
    const char *text = "";
-   for (int i = *scanFrom; i < track->count; i++) {
-      if (track->cues[i].start > seconds) break;
-      *scanFrom = i;
+   for (int i = lastStarted; i >= 0; i--) {
+      if (track->cues[i].prefixMaxEnd <= seconds) break;
       if (seconds < track->cues[i].end) {
          int pending = ((volatile const SubtitleCue *)&track->cues[i])->pending;
          text = pending ? "" : track->cues[i].text;
          if (activeCue) *activeCue = i;
          if (activePending) *activePending = pending;
+         break; // latest-started active cue wins
       }
    }
    __sync_synchronize();
    return text;
 }
-
 
 #define SUBTITLE_SRT_CAP (1024 * 1024)
 
@@ -371,6 +394,9 @@ int loadSubtitlesSrt(const char *path, SubtitleTrack *out)
       SubtitleCue *cue = &out->cues[out->count];
       cue->start = startMs / 1000.0f;
       cue->end = endMs / 1000.0f;
+      cue->prefixMaxEnd = cue->end;
+      if (out->count > 0 && out->cues[out->count - 1].prefixMaxEnd > cue->prefixMaxEnd)
+         cue->prefixMaxEnd = out->cues[out->count - 1].prefixMaxEnd;
       size_t used = 0;
       while ((line = nextSrtLine(&cursor)) != NULL && line[0]) {
          size_t add = strlen(line);

@@ -1832,7 +1832,7 @@ static void scheduleVodHttpRefresh(void)
    state.subtitlePick = -1;
    lastSubtitlePick = -1;
    state.subtitlesReady = 0;
-   state.subtitleScanFrom = 0;
+   state.subtitleScanFrom = -1;
    state.subtitleDisplayedCue = -1;
    state.subtitleDisplayedPending = 0;
    state.subtitleLastPosition = 0.0f;
@@ -1926,7 +1926,7 @@ static void scheduleLiveRefresh(void)
    state.subtitlePick = -1;
    lastSubtitlePick = -1;
    state.subtitlesReady = 0;
-   state.subtitleScanFrom = 0;
+   state.subtitleScanFrom = -1;
    state.subtitleDisplayedCue = -1;
    state.subtitleDisplayedPending = 0;
    state.subtitleLastPosition = 0.0f;
@@ -2422,6 +2422,7 @@ static void initPlay(void)
                 playbackFontSize(16), activeTheme->textPrimary, TEXT_NOWRAP, "Keep");
 
    state.subtitlePick = state.subtitleFetched = -1;   // default off (memset left them 0)
+   state.subtitleScanFrom = -1;
    state.subtitleDisplayedCue = -1;
    state.subtitleDisplayedPending = 0;
    state.subtitleLastPosition = 0.0f;
@@ -2529,7 +2530,7 @@ static void setSubtitleTrack(int trackIndex)
    state.subtitlePick = trackIndex;
    if (trackIndex >= 0) lastSubtitlePick = trackIndex;
    state.subtitlesReady = 0;
-   state.subtitleScanFrom = 0;
+   state.subtitleScanFrom = -1;
    state.subtitleDisplayedCue = -1;
    state.subtitleDisplayedPending = 0;
    state.subtitleLastPosition = 0.0f;
@@ -4219,28 +4220,23 @@ static void drawPlaybackSettings(void)
    }
 }
 
-static void drawSubtitleLabelWithHighlight(Label *label, int x, int y, uint32_t textColor)
+static void prepareSubtitleLabel(Label *label, uint32_t textColor)
 {
-   int highlight = getSubtitleStyle(3);
-
-   // setLabelColor() rasterises the complete string again. Do it only when the
-   // selected text colour actually changes, never for the temporary black shadow.
+   // Shadow/outline are rasterized into the label texture when its text or style changes.
+   setLabelHighlight(label, getSubtitleStyle(3));
    if (label->color != textColor) setLabelColor(label, textColor);
+}
 
-   if (highlight == 1) {
-      // Tint the existing glyph texture black instead of re-rasterising it.
-      drawGfxTexture(x + 3, y + 3, label->tt.tex.w, label->tt.tex.h,
-                     label->tt.tex, 0.0f, 0.0f, 1.0f, 1.0f, 0xFF000000, GFX_FILTER_NEAREST);
-      drawGfxTexture(x + 5, y + 5, label->tt.tex.w, label->tt.tex.h,
-                     label->tt.tex, 0.0f, 0.0f, 1.0f, 1.0f, 0xFF000000, GFX_FILTER_NEAREST);
-   } else if (highlight == 2) {
-      // Keep the existing outline geometry, but reuse the rasterised texture.
-      for (int oy = -2; oy <= 2; oy++) for (int ox = -2; ox <= 2; ox++)
-         if (ox == -2 || ox == 2 || oy == -2 || oy == 2)
-            drawGfxTexture(x + ox, y + oy, label->tt.tex.w, label->tt.tex.h,
-                           label->tt.tex, 0.0f, 0.0f, 1.0f, 1.0f,
-                           0xFF000000, GFX_FILTER_NEAREST);
-   }
+static void getSubtitleLabelPadding(const Label *label, int *left, int *top, int *right, int *bottom)
+{
+   *left = *top = *right = *bottom = 0;
+   if (label->highlightMode == 1) { *right = 4; *bottom = 4; }
+   else if (label->highlightMode == 2) { *left = *top = *right = *bottom = 2; }
+}
+
+static void drawSubtitleLabelWithHighlight(Label *label, int x, int y)
+{
+   // The pre-composed shadow/outline and foreground are submitted as one texture draw.
    drawLabelAt(label, x, y);
 }
 
@@ -4271,14 +4267,15 @@ static void drawPlaybackSubtitleStyle(void)
    uint32_t color = textColors[getSubtitleStyle(0)];
    playbackSubtitlePreview.size = playbackSubtitleFontSize(22 + getSubtitleStyle(4) * 4);
    setLabelText(&playbackSubtitlePreview, "Lorem Ipsum");
-   setLabelColor(&playbackSubtitlePreview, color);
+   prepareSubtitleLabel(&playbackSubtitlePreview, color);
    refreshLabelScale(&playbackSubtitlePreview);
-   int textW = playbackSubtitlePreview.tt.tex.w + 24;
-   int textH = playbackSubtitlePreview.tt.tex.h + 12;
-   int tx = state.screenW / 2 - textW / 2, ty = previewY + (previewH - textH) / 2;
-   fillGfxRoundedRectangleFixed(tx, ty, textW, textH, 4, bg);
-   drawSubtitleLabelWithHighlight(&playbackSubtitlePreview,
-      state.screenW / 2 - playbackSubtitlePreview.tt.tex.w / 2, ty + 6, color);
+   int padL, padT, padR, padB;
+   getSubtitleLabelPadding(&playbackSubtitlePreview, &padL, &padT, &padR, &padB);
+   int textW = playbackSubtitlePreview.tt.tex.w - padL - padR;
+   int textH = playbackSubtitlePreview.tt.tex.h - padT - padB;
+   int tx = state.screenW / 2 - textW / 2, ty = previewY + (previewH - (textH + 12)) / 2 + 6;
+   fillGfxRoundedRectangleFixed(tx - 12, ty - 6, textW + 24, textH + 12, 4, bg);
+   drawSubtitleLabelWithHighlight(&playbackSubtitlePreview, tx - padL, ty - padT);
    for (int i = 0; i < PLAYBACK_SUBTITLE_STYLE_COUNT; i++) {
       int rowY = y + 176 + i * 52;
       Label *name = &playbackSubtitleStyleLabels[i]; refreshLabelScale(name);
@@ -5008,7 +5005,7 @@ static void updatePlay(void)
       if (!state.subtitleTrack) state.subtitleTrack = malloc(sizeof *state.subtitleTrack);
       if (state.subtitleTrack) {
          state.subtitlesReady = 0;
-         state.subtitleScanFrom = 0;
+         state.subtitleScanFrom = -1;
          state.subtitleDisplayedCue = -1;
          state.subtitleDisplayedPending = 0;
          state.subtitleLastPosition = 0.0f;
@@ -5038,7 +5035,7 @@ static void updatePlay(void)
 #else
       float subtitlePosition = getVideoPositionSeconds(state.player);
 #endif
-      if (subtitlePosition + 0.05f < state.subtitleLastPosition) state.subtitleScanFrom = 0;
+      if (subtitlePosition + 0.05f < state.subtitleLastPosition) state.subtitleScanFrom = -1;
       state.subtitleLastPosition = subtitlePosition;
       int activeCue = -1, activePending = 0;
       const char *subtitleCueText = getSubtitleCueText(state.subtitleTrack, subtitlePosition,
@@ -5450,7 +5447,14 @@ static void drawSubtitle(void)
 #if BUILD_DIAG_SUBTITLE_RENDER
    uint64_t subtitleDrawStartUs = sys_time_get_system_time();
 #endif
-   int x = state.screenW / 2 - subtitleLabel.tt.tex.w / 2;
+   static const uint32_t textColors[] = { 0xFFFFFFFF, 0xFFFFFF00, 0xFF00FFFF, 0xFF00FF00, 0xFF4488FF, 0xFFFF4444 };
+   static const uint32_t bgColors[] = { 0xFF000000, 0xFF303030, 0xFF777777, 0xFF102040, 0x00000000 };
+   prepareSubtitleLabel(&subtitleLabel, textColors[getSubtitleStyle(0)]);
+   int padL, padT, padR, padB;
+   getSubtitleLabelPadding(&subtitleLabel, &padL, &padT, &padR, &padB);
+   int textW = subtitleLabel.tt.tex.w - padL - padR;
+   int textH = subtitleLabel.tt.tex.h - padT - padB;
+   int textX = state.screenW / 2 - textW / 2;
    // Move captions above the seek HUD only while that HUD is actually visible.
    // Once the OSD times out (or a full-screen overlay hides it), restore the
    // original subtitle baseline instead of leaving captions permanently raised.
@@ -5459,17 +5463,17 @@ static void drawSubtitle(void)
    int subtitleAnchorY = seekHudVisible
       ? playbackSeekBarY()
       : (int)(state.screenH * 0.94f);
-   int y = subtitleAnchorY - 40 - subtitleLabel.tt.tex.h;
-   y -= getSubtitleOffset();
-   if (y < 12) y = 12;
+   int textY = subtitleAnchorY - 40 - textH - getSubtitleOffset();
+   int labelY = textY - padT;
+   if (labelY < 12) labelY = 12;
    int maxY = state.screenH - subtitleLabel.tt.tex.h - 12;
-   if (y > maxY) y = maxY;
-   static const uint32_t textColors[] = { 0xFFFFFFFF, 0xFFFFFF00, 0xFF00FFFF, 0xFF00FF00, 0xFF4488FF, 0xFFFF4444 };
-   static const uint32_t bgColors[] = { 0xFF000000, 0xFF303030, 0xFF777777, 0xFF102040, 0x00000000 };
+   if (labelY > maxY) labelY = maxY;
+   textY = labelY + padT;
+   static const uint32_t bgOpacity[] = { 0, 64, 128, 204, 255 };
    uint32_t bg = bgColors[getSubtitleStyle(1)];
-   bg = (bg & 0x00FFFFFF) | ((uint32_t[]){ 0, 64, 128, 204, 255 }[getSubtitleStyle(2)] << 24);
-   fillGfxRectangle(x - 12, y - 6, subtitleLabel.tt.tex.w + 24, subtitleLabel.tt.tex.h + 12, bg);
-   drawSubtitleLabelWithHighlight(&subtitleLabel, x, y, textColors[getSubtitleStyle(0)]);
+   bg = (bg & 0x00FFFFFF) | (bgOpacity[getSubtitleStyle(2)] << 24);
+   fillGfxRectangle(textX - 12, textY - 6, textW + 24, textH + 12, bg);
+   drawSubtitleLabelWithHighlight(&subtitleLabel, textX - padL, labelY);
 #if BUILD_DIAG_SUBTITLE_RENDER
    recordSubtitleRenderDiag(SUB_DIAG_DRAW, sys_time_get_system_time() - subtitleDrawStartUs);
 #endif

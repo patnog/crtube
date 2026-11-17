@@ -12,6 +12,7 @@
 
 typedef struct {
    float start, end;              // seconds
+   float prefixMaxEnd;            // maximum cue end through this index; bounds overlap searches
    char  text[SUBTITLE_TEXT_MAX];
    int   pending;                 // translation is still in progress; not shown until published
 } SubtitleCue;
@@ -37,6 +38,6 @@ void touchSubtitleTranslationCache(const char *path);
 int reserveSubtitleTranslationCacheSpace(const char *newPath, uint64_t newSize);
 
 // the cue text covering `seconds`, or "" if none. *scanFrom caches the search position across
-// calls (cues are time-ordered); reset it to 0 after a seek or track switch.
+// calls (cues are time-ordered); reset it to -1 after a seek or track switch to trigger a binary lookup.
 const char *getSubtitleCueText(const SubtitleTrack *track, float seconds, int *scanFrom,
                                int *activeCue, int *activePending);

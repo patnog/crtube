@@ -214,6 +214,9 @@ static int layOutSentences(const Lines *lines, SubtitleTrack *track)
       cue->start = startAt;
       cue->end = endTime(lines, begin + length) + LINGER_SECONDS;
       if (cue->end < cue->start + MIN_SECONDS) cue->end = cue->start + MIN_SECONDS;
+      cue->prefixMaxEnd = cue->end;
+      if (count > 1 && track->cues[count - 2].prefixMaxEnd > cue->prefixMaxEnd)
+         cue->prefixMaxEnd = track->cues[count - 2].prefixMaxEnd;
       cue->pending = 1;
    }
    return count;

@@ -40,7 +40,7 @@
 // Subtitle render profiling is independent from the general playback diagnostics.
 // Set to 1 to measure subtitle clock lookup, cue selection, label update and drawing.
 #ifndef BUILD_DIAG_SUBTITLE_RENDER
-#define BUILD_DIAG_SUBTITLE_RENDER 1
+#define BUILD_DIAG_SUBTITLE_RENDER 0
 #endif
 
 // Additional network/frame diagnostics retain their previous conservative defaults.

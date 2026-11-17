@@ -746,13 +746,63 @@ static float getLineStartOffset(int align, const float *lineW, float maxLineW, i
    return (align == TEXT_ALIGN_CENTER) ? d * 0.5f : d;
 }
 
+// Expands the alpha mask of a rasterized text buffer into a one-time outline layer,
+// then composites the original text over it. This avoids rasterizing every glyph repeatedly.
+static void applyTextOutline(uint8_t *pixels, int width, int height, int radius, uint32_t color)
+{
+   if (!pixels || radius <= 0 || width <= 0 || height <= 0) return;
+   size_t pixelCount = (size_t)width * (size_t)height;
+   uint8_t *mask = (uint8_t *)malloc(pixelCount);
+   if (!mask) return; // preserve readable text if the optional outline buffer cannot be allocated
+   memset(mask, 0, pixelCount);
+
+   int cr = (int)((color >> 16) & 0xFF);
+   int cg = (int)((color >> 8) & 0xFF);
+   int cb = (int)(color & 0xFF);
+   int colorAlpha = (int)((color >> 24) & 0xFF);
+   for (int y = 0; y < height; y++) {
+      const uint8_t *srcRow = pixels + (size_t)y * width * 4u;
+      for (int x = 0; x < width; x++) {
+         int alpha = srcRow[x * 4];
+         if (!alpha) continue;
+         alpha = alpha * colorAlpha / 255;
+         if (!alpha) continue;
+         for (int oy = -radius; oy <= radius; oy++) {
+            int ty = y + oy;
+            if (ty < 0 || ty >= height) continue;
+            for (int ox = -radius; ox <= radius; ox++) {
+               if (ox > -radius && ox < radius && oy > -radius && oy < radius) continue;
+               int tx = x + ox;
+               if (tx < 0 || tx >= width) continue;
+               size_t target = (size_t)ty * width + tx;
+               if (alpha > mask[target]) mask[target] = (uint8_t)alpha;
+            }
+         }
+      }
+   }
+
+   // Place the outline behind the foreground, including antialiased glyph edges.
+   for (size_t i = 0; i < pixelCount; i++) {
+      uint8_t *dst = pixels + i * 4u;
+      if (!mask[i]) continue;
+      int textAlpha = dst[0];
+      uint8_t textR = dst[1], textG = dst[2], textB = dst[3];
+      dst[0] = mask[i];
+      dst[1] = (uint8_t)cr;
+      dst[2] = (uint8_t)cg;
+      dst[3] = (uint8_t)cb;
+      if (textAlpha) composePixel(dst, textAlpha, textR, textG, textB);
+   }
+   free(mask);
+}
+
 // rasterizes text into a CPU buffer. returns the actual content dimensions
 // via outW/outH. surfW is the buffer row width (may be larger than content).
 // caller must free the returned buffer. `end` (optional) receives where the
 // final glyph landed (texture coords). `align` aligns each line within the block.
 static uint8_t *rasterize(Font *f, int size, const char *text, uint32_t color, int maxWidth, TextWrap wrap,
                           const TextShadow *shadow, TextEnd *end, TextReveal *reveal, int align, int rawMode,
-                          int *outW, int *outH, int *outSurfW)
+                          int outlineRadius, uint32_t outlineColor, int *outW, int *outH, int *outSurfW)
 {
    *outW = *outH = *outSurfW = 0;
 
@@ -819,7 +869,8 @@ static uint8_t *rasterize(Font *f, int size, const char *text, uint32_t color, i
    }
 
    int surfW = (maxWidth > 0) ? maxWidth : FONT_MAX_RENDER_W;
-   int surfH = (int)(lineH * lineCount + fsize) + 4;
+   if (outlineRadius > 0) surfW += outlineRadius * 2;
+   int surfH = (int)(lineH * lineCount + fsize) + 4 + (outlineRadius > 0 ? outlineRadius * 2 : 0);
    if (hasShadow && sdy > 0) surfH += sdy;   // room for the shadow below the last line
 
    size_t bufSize64 = (size_t)surfW * (size_t)surfH * 4u;
@@ -843,10 +894,13 @@ static uint8_t *rasterize(Font *f, int size, const char *text, uint32_t color, i
       for (int i = 0; i < 3; i++) ellipsisW += measureFontChar(f, size, '.');
    }
 
-   for (int pass = hasShadow ? 0 : 1; pass < 2; pass++) {
-      int shadowPass = (pass == 0);
+   int passCount = hasShadow ? 2 : 1;
+   for (int pass = 0; pass < passCount; pass++) {
+      int shadowPass = hasShadow && pass == 0;
+      int mainPass = !shadowPass;
       int bdx = shadowPass ? sdx : 0;
       int bdy = shadowPass ? sdy : 0;
+      uint32_t passColor = shadowPass ? shadowArgb : color;
       int lineIndex = 0;   // which wrapped line the pen is on (for the reveal map)
       float penX = 0.0f;   // line-relative pen (wrap/kern/advance all use this; offset added at draw)
       float lineOffX = getLineStartOffset(align, lineW, maxLineW, lineCount, 0);   // this line's draw offset
@@ -858,7 +912,7 @@ static uint8_t *rasterize(Font *f, int size, const char *text, uint32_t color, i
 
          if (code == '\n') {
             if (wrap == TEXT_WRAP) { penX = 0.0f; penY += lineH; prev = 0; lineIndex++; lineOffX = getLineStartOffset(align, lineW, maxLineW, lineCount, lineIndex); if (penY + lineH > (float)surfH) break; }
-            if (!shadowPass && reveal) recordRevealItem(reveal, i, penX, lineIndex);
+            if (mainPass && reveal) recordRevealItem(reveal, i, penX, lineIndex);
             continue;
          }
 
@@ -872,7 +926,7 @@ static uint8_t *rasterize(Font *f, int size, const char *text, uint32_t color, i
                   if (penX + advance + wordW > (float)maxWidth && penX > 0.0f) {
                      penX = 0.0f; penY += lineH; prev = 0; lineIndex++;   // the space wraps to the next line
                      lineOffX = getLineStartOffset(align, lineW, maxLineW, lineCount, lineIndex);
-                     if (!shadowPass && reveal) recordRevealItem(reveal, i, penX, lineIndex);
+                     if (mainPass && reveal) recordRevealItem(reveal, i, penX, lineIndex);
                      if (penY + lineH > (float)surfH) break;
                      continue;
                   }
@@ -883,12 +937,12 @@ static uint8_t *rasterize(Font *f, int size, const char *text, uint32_t color, i
                   for (int d = 0; d < 3; d++) {
                      GlyphBitmap gb;
                      if (rasterGlyph(f, '.', fsize, 0, penX + lineOffX, &gb) == 0) {
-                        blitGlyph(&gb, gb.ox + gb.x, baseline + gb.y, buf, surfW, surfH, bdx, bdy, shadowPass ? shadowArgb : color, 0);
+                        blitGlyph(&gb, gb.ox + gb.x + outlineRadius, baseline + gb.y + outlineRadius, buf, surfW, surfH, bdx, bdy, passColor, 0);
                         penX += gb.advance;
                         free(gb.bitmap);
                      }
                   }
-                  int endX = (int)(penX + lineOffX + 0.5f); if (endX > maxX) maxX = endX;
+                  int endX = (int)(penX + lineOffX + 0.5f) + outlineRadius; if (endX > maxX) maxX = endX;
                   break;
                }
             } else {
@@ -904,13 +958,13 @@ static uint8_t *rasterize(Font *f, int size, const char *text, uint32_t color, i
             // synthetic-bold strength = pixel size / 10 (the FreeType convention; 0 at
             // tiny sizes = no embolden), and the pen advance widens by the same amount.
             int overhang = items[i].bold ? ((int)(fsize + 0.5f)) / 10 : 0;
-            int gx = gb.ox + gb.x;
-            int gy = (int)floorf(penY + baseY + 0.5f) + gb.y;
+            int gx = gb.ox + gb.x + outlineRadius;
+            int gy = (int)floorf(penY + baseY + 0.5f) + gb.y + outlineRadius;
             blitGlyph(&gb, gx, gy, buf, surfW, surfH, bdx, bdy,
                       shadowPass ? shadowArgb : items[i].color, overhang);
             penX += quantAdvance(f, gb.advance) + (float)overhang;
-            int endX = (int)(penX + lineOffX + 0.5f); if (endX > maxX) maxX = endX;
-            if (!shadowPass) {
+            int endX = (int)(penX + lineOffX + 0.5f) + outlineRadius; if (endX > maxX) maxX = endX;
+            if (mainPass) {
                if (gb.bitmap) {
                   if (gy < inkMinY) inkMinY = gy;                                   // union ink box
                   if (gy + gb.h > inkMaxY) inkMaxY = gy + gb.h;
@@ -932,10 +986,12 @@ static uint8_t *rasterize(Font *f, int size, const char *text, uint32_t color, i
          } else {
             penX += fsize;
          }
-         if (!shadowPass && reveal) recordRevealItem(reveal, i, penX, lineIndex);
+         if (mainPass && reveal) recordRevealItem(reveal, i, penX, lineIndex);
          prev = code;
       }
    }
+
+   if (outlineRadius > 0) applyTextOutline(buf, surfW, surfH, outlineRadius, outlineColor);
 
    if (reveal) reveal->count = nItems < TEXT_REVEAL_MAX ? nItems : TEXT_REVEAL_MAX;
 
@@ -949,7 +1005,7 @@ static uint8_t *rasterize(Font *f, int size, const char *text, uint32_t color, i
       end->inkTop    = (inkMinY <= inkMaxY) ? inkMinY - skip : 0;  if (end->inkTop < 0) end->inkTop = 0;
       end->inkBottom = (inkMinY <= inkMaxY) ? inkMaxY - skip : 0;  if (end->inkBottom < 0) end->inkBottom = 0;
    }
-   *outW = maxX + (hasShadow && sdx > 0 ? sdx : 0);
+   *outW = maxX + outlineRadius + (hasShadow && sdx > 0 ? sdx : 0);
    if (*outW > surfW) *outW = surfW;
    *outH = surfH - skip;
    *outSurfW = surfW;
@@ -975,7 +1031,7 @@ void freeTextTexture(TextTexture *tt)
    tt->slotH = 0;
 }
 
-static void renderImpl(TextTexture *tt, Font *f, int size, const char *text, uint32_t color, int maxWidth, TextWrap wrap, const TextShadow *shadow, TextEnd *end, TextReveal *reveal, int align, int rawMode);
+static void renderImpl(TextTexture *tt, Font *f, int size, const char *text, uint32_t color, int maxWidth, TextWrap wrap, const TextShadow *shadow, TextEnd *end, TextReveal *reveal, int align, int rawMode, int outlineRadius, uint32_t outlineColor);
 
 void renderFont(TextTexture *tt, Font *f, int size, const char *text, uint32_t color, int maxWidth, TextWrap wrap)
 {
@@ -989,17 +1045,41 @@ void renderFontEx(TextTexture *tt, Font *f, int size, const char *text, uint32_t
 
 void renderFontAligned(TextTexture *tt, Font *f, int size, const char *text, uint32_t color, int maxWidth, TextWrap wrap, const TextShadow *shadow, TextEnd *end, TextAlign align)
 {
-   renderImpl(tt, f, size, text, color, maxWidth, wrap, shadow, end, NULL, align, 0);
+   renderImpl(tt, f, size, text, color, maxWidth, wrap, shadow, end, NULL, align, 0, 0, 0);
 }
 
 void renderFontTyped(TextTexture *tt, Font *f, int size, const char *text, uint32_t color, int maxWidth, TextWrap wrap, const TextShadow *shadow, TextEnd *end, TextReveal *reveal)
 {
-   renderImpl(tt, f, size, text, color, maxWidth, wrap, shadow, end, reveal, TEXT_ALIGN_LEFT, 0);
+   renderImpl(tt, f, size, text, color, maxWidth, wrap, shadow, end, reveal, TEXT_ALIGN_LEFT, 0, 0, 0);
 }
 
 void renderFontRaw(TextTexture *tt, Font *f, int size, const char *text, uint32_t color, int maxWidth, TextWrap wrap)
 {
-   renderImpl(tt, f, size, text, color, maxWidth, wrap, NULL, NULL, NULL, TEXT_ALIGN_LEFT, 1);
+   renderImpl(tt, f, size, text, color, maxWidth, wrap, NULL, NULL, NULL, TEXT_ALIGN_LEFT, 1, 0, 0);
+}
+
+void renderFontRawEx(TextTexture *tt, Font *f, int size, const char *text, uint32_t color,
+                     int maxWidth, TextWrap wrap, const TextShadow *shadow, TextEnd *end)
+{
+   renderImpl(tt, f, size, text, color, maxWidth, wrap, shadow, end, NULL, TEXT_ALIGN_LEFT, 1, 0, 0);
+}
+
+void renderFontOutlined(TextTexture *tt, Font *f, int size, const char *text, uint32_t color,
+                        int maxWidth, TextWrap wrap, uint32_t outlineColor, int outlineRadius)
+{
+   if (outlineRadius < 1) { renderFont(tt, f, size, text, color, maxWidth, wrap); return; }
+   if (outlineRadius > 3) outlineRadius = 3;
+   renderImpl(tt, f, size, text, color, maxWidth, wrap, NULL, NULL, NULL,
+              TEXT_ALIGN_LEFT, 0, outlineRadius, outlineColor);
+}
+
+void renderFontRawOutlined(TextTexture *tt, Font *f, int size, const char *text, uint32_t color,
+                           int maxWidth, TextWrap wrap, uint32_t outlineColor, int outlineRadius)
+{
+   if (outlineRadius < 1) { renderFontRaw(tt, f, size, text, color, maxWidth, wrap); return; }
+   if (outlineRadius > 3) outlineRadius = 3;
+   renderImpl(tt, f, size, text, color, maxWidth, wrap, NULL, NULL, NULL,
+              TEXT_ALIGN_LEFT, 1, outlineRadius, outlineColor);
 }
 
 // renders ONE glyph at `size` px into its own tightly-cropped white texture (each pixel [A,R,G,B] with
@@ -1040,7 +1120,7 @@ int renderGlyphTexture(Font *f, int size, uint32_t code, GfxTexture *out, int *o
    return 0;
 }
 
-static void renderImpl(TextTexture *tt, Font *f, int size, const char *text, uint32_t color, int maxWidth, TextWrap wrap, const TextShadow *shadow, TextEnd *end, TextReveal *reveal, int align, int rawMode)
+static void renderImpl(TextTexture *tt, Font *f, int size, const char *text, uint32_t color, int maxWidth, TextWrap wrap, const TextShadow *shadow, TextEnd *end, TextReveal *reveal, int align, int rawMode, int outlineRadius, uint32_t outlineColor)
 {
    if (end) memset(end, 0, sizeof *end);
    if (reveal) reveal->count = 0;
@@ -1056,7 +1136,7 @@ static void renderImpl(TextTexture *tt, Font *f, int size, const char *text, uin
    }
 
    int drawW, drawH, surfW;
-   uint8_t *buf = rasterize(f, size, text, color, maxWidth, wrap, shadow, end, reveal, align, rawMode, &drawW, &drawH, &surfW);
+   uint8_t *buf = rasterize(f, size, text, color, maxWidth, wrap, shadow, end, reveal, align, rawMode, outlineRadius, outlineColor, &drawW, &drawH, &surfW);
    if (!buf) {
       // nothing rasterized (e.g. all-whitespace after wrapping): keep any
       // existing slot but show nothing.
