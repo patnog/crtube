@@ -791,6 +791,17 @@ static void updateHomeSortHint(void)
    }
 }
 
+// Keep category navigation hints derived from the active page, never from the
+// page visited before it. Playlist contents have no category navigation.
+static void updateHomeCategoryHints(void)
+{
+   int inPlaylistContents = home.category == HOME_PLAYLIST_CONTENTS ||
+                            home.category == HOME_LOCAL_PLAYLIST_CONTENTS;
+   int showCategoryHints = !inPlaylistContents;
+   if (homeL1Hint >= 0) setButtonHintShown(&hints, homeL1Hint, showCategoryHints);
+   if (homeR1Hint >= 0) setButtonHintShown(&hints, homeR1Hint, showCategoryHints);
+}
+
 static int homeSortGroupLeft(void)
 {
    int count = homeSupportsPlaylistSort() ? PLAYLIST_SORT_COUNT : SORT_COUNT;
@@ -938,6 +949,7 @@ static void switchToCategory(int category)
        category == home.category) return;
    cacheCurrent();
    home.category = category;
+   updateHomeCategoryHints();
    if (category == HOME_DOWNLOADS) {
       // Only request work here; HDD enumeration and legacy-file migration happen
       // on the low-priority library worker, never on the screen transition path.
@@ -994,6 +1006,7 @@ void openHomePlaylistFromSearch(const char *playlistId, const char *title, const
 
 static void switchCategory(int delta)
 {
+   updateHomeCategoryHints();
    if (home.category == HOME_DOWNLOADS) {
       home.downloadCategory = (home.downloadCategory + 3 + delta) % 3;
       loadCategory();
@@ -1021,6 +1034,7 @@ static void switchCategory(int delta)
    while (position < count && order[position] != home.category) position++;
    if (position == count) position = 0;   // the category left the cycle (signed out): restart it
    home.category = order[(position + delta + count) % count];
+   updateHomeCategoryHints();
    loadCategory();
    setSidebarForCategory();
    updateHomeSortHint();
@@ -1038,6 +1052,7 @@ static void applyAccountChange(void)
    categoryCached[HOME_PLAYLISTS] = 0;
    playlistRefreshUs = 0;
    home.category = isSignedIn() ? HOME_ACCOUNT + ACCOUNT_FEED_HOME : HOME_SUBS;
+   updateHomeCategoryHints();
    loadCategory();
    setSidebarForCategory();
    updateHomeSortHint();
@@ -3666,6 +3681,7 @@ static void initHome(void)
    accountRevisionSeen = getAccountRevision();
    // signed in, start on the account's Recommended feed; otherwise on Subscriptions, as before
    home.category = isSignedIn() ? HOME_ACCOUNT + ACCOUNT_FEED_HOME : HOME_SUBS;
+   updateHomeCategoryHints();
    loadCategory();
    setSidebarForCategory();
    updateHomeSortHint();
@@ -3938,6 +3954,7 @@ static void openHomeDownloadManager(void)
 
 static void updateHome(void)
 {
+   updateHomeCategoryHints();
    static int previousUpdateDownloadState;
    int currentUpdateDownloadState = getUpdateDownloadState();
    if (previousUpdateDownloadState == 1 && currentUpdateDownloadState != 1) {
@@ -4311,6 +4328,9 @@ static void updateHome(void)
    else if (isPadButtonPressed(PAD_BTN_L1)) { switchCategory(-1); return; }
 
    updateVideoGrid(&home.grid);
+
+   updateHomeCategoryHints();
+
    int playlistPage = home.category == HOME_PLAYLISTS || home.category == HOME_PLAYLIST_CONTENTS ||
                       home.category == HOME_LOCAL_PLAYLISTS || home.category == HOME_LOCAL_PLAYLIST_CONTENTS ||
                       home.category == HOME_DOWNLOADS;
@@ -4617,15 +4637,8 @@ static void updateHome(void)
       setButtonHintShown(&hints, homeSquareHint, 1);
    }
 
-   // Playlist contents have no category tabs, regardless of their source.
-   // The Downloads and PS3 Playlists roots always retain the L1/R1 Category hints.
    int inDownloadedPlaylist = home.category == HOME_LOCAL_PLAYLIST_CONTENTS &&
                               home.playlistReturnCategory == HOME_DOWNLOADS;
-   int inPlaylistContents = home.category == HOME_PLAYLIST_CONTENTS ||
-                            home.category == HOME_LOCAL_PLAYLIST_CONTENTS;
-   int showCategoryHints = !inPlaylistContents;
-   if (homeL1Hint >= 0) setButtonHintShown(&hints, homeL1Hint, showCategoryHints);
-   if (homeR1Hint >= 0) setButtonHintShown(&hints, homeR1Hint, showCategoryHints);
    if (homeDownloadHint >= 0 && inDownloadedPlaylist) {
       setButtonHintCaption(&hints, homeDownloadHint, "Manage downloads");
       setButtonHintShown(&hints, homeDownloadHint, 1);

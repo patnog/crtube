@@ -56,3 +56,8 @@
 #ifndef BUILD_DIAG_YOUTUBE_RESOLVE
 #define BUILD_DIAG_YOUTUBE_RESOLVE BUILD_DIAG_LIVE_NETWORK_DETAILS
 #endif
+
+// Logs YouTube description metadata extraction and WEB fallback decisions.
+#ifndef BUILD_DIAG_YOUTUBE_DESCRIPTION
+#define BUILD_DIAG_YOUTUBE_DESCRIPTION 0
+#endif

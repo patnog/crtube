@@ -10,6 +10,7 @@
 // and serves full-length urls. Expect this to need swapping again in future.
 
 #include "app-config.h"
+#include "../../BUILD_CONFIG.h"
 #include "extractor.h"
 #include "http.h"               // fetchHttp
 #include "string-utilities.h"   // strCopy
@@ -1322,10 +1323,18 @@ static int extract(const char *input, StreamInfo *out)
            videoId, PLAYER_VERSION, respLen);
 
    // metadata, copied into out so it survives a live re-fetch overwriting resp below
-   const char *details = strstr(resp, "\"videoDetails\"");
+   const char *details = findInRange(resp, end, "\"videoDetails\"");
+   int descriptionFieldPresent = details && findInRange(details, end, "\"shortDescription\":\"") != NULL;
+   int descriptionParsed = jsonString(details ? details : resp, end, "shortDescription",
+                                      out->description, sizeof out->description);
+#if BUILD_DIAG_YOUTUBE_DESCRIPTION
+   logInfo("[yt-description] primary video=%s client=VISIONOS respLen=%d videoDetails=%s shortDescriptionField=%s parsed=%d bytes=%d\n",
+           videoId, respLen, details ? "present" : "missing",
+           descriptionFieldPresent ? "present" : "missing", descriptionParsed,
+           (int)strlen(out->description));
+#endif
    jsonString(details ? details : resp, end, "title", out->title, sizeof out->title);
    jsonString(details ? details : resp, end, "author", out->author, sizeof out->author);
-   jsonString(details ? details : resp, end, "shortDescription", out->description, sizeof out->description);
    char lenText[16];
    if (jsonString(details ? details : resp, end, "lengthSeconds", lenText, sizeof lenText))
       out->durationSeconds = atoi(lenText);
@@ -1460,18 +1469,38 @@ static int extract(const char *input, StreamInfo *out)
       int metadataRc = fetchPlayerClient(
          "\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"",
          WEB_UA, "1", WEB_VERSION, videoId, resp, &metadataLen);
+      int metadataDetailsPresent = 0;
+      int metadataDescriptionFieldPresent = 0;
+      int metadataDescriptionParsed = 0;
       if (metadataRc == 0 && metadataLen > 0) {
          const char *metadataEnd = resp + metadataLen;
-         const char *metadataDetails = strstr(resp, "\"videoDetails\"");
+         const char *metadataDetails = findInRange(resp, metadataEnd, "\"videoDetails\"");
+         metadataDetailsPresent = metadataDetails != NULL;
+         metadataDescriptionFieldPresent = metadataDetails &&
+            findInRange(metadataDetails, metadataEnd, "\"shortDescription\":\"") != NULL;
          if (metadataDetails)
-            jsonString(metadataDetails, metadataEnd, "shortDescription", out->description, sizeof out->description);
+            metadataDescriptionParsed = jsonString(metadataDetails, metadataEnd, "shortDescription",
+                                                   out->description, sizeof out->description);
       }
+#if BUILD_DIAG_YOUTUBE_DESCRIPTION
+      logInfo("[yt-description] WEB fallback video=%s rc=%d respLen=%d videoDetails=%s shortDescriptionField=%s parsed=%d bytes=%d\n",
+              videoId, metadataRc, metadataLen,
+              metadataDetailsPresent ? "present" : "missing",
+              metadataDescriptionFieldPresent ? "present" : "missing",
+              metadataDescriptionParsed, (int)strlen(out->description));
+#endif
       if (out->description[0])
          logInfo("[yt] description recovered from WEB metadata video=%s bytes=%d\n",
                  videoId, (int)strlen(out->description));
       else
          logWarn("[yt] description unavailable from player clients video=%s\n", videoId);
    }
+
+#if BUILD_DIAG_YOUTUBE_DESCRIPTION
+   logInfo("[yt-description] final video=%s available=%s bytes=%d capacity=%d\n",
+           videoId, out->description[0] ? "yes" : "no",
+           (int)strlen(out->description), (int)sizeof out->description);
+#endif
 
    free(resp);
    return membersOnly && out->formatCount == 0 ? -2 : 0;
