@@ -21,6 +21,9 @@ typedef struct {
    float fixedRenderScale; // optional fixed raster scale, independent of the selected UI zoom
    int scalePositionWithUi; // scale the anchor but keep the rasterised texture dimensions fixed
    float renderedScale; // font-scale factor used to build tt; refreshed when the selected UI scale changes
+   Font *renderedFont;
+   int renderedSize, renderedWidth, renderedHeight, renderedRaw;
+   TextWrap renderedWrap;
    char text[LABEL_MAX_TEXT];
 } Label;
 
@@ -33,6 +36,7 @@ void initLabelRaw(Label *l, Font *font, int x, int y, int width, int height, int
 
 void setLabelText(Label *l, const char *text);
 void refreshLabelScale(Label *l);
+void refreshLabelLayout(Label *l);
 void setLabelScaleWithUi(Label *l, int enabled);
 void setLabelFixedRenderScale(Label *l, float scale, int scalePositionWithUi);
 

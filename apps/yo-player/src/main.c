@@ -34,6 +34,7 @@
 #include "video-player.h"
 #include "live-source.h"
 #include "downloads.h"
+#include "subtitles.h"
 #include "video-export.h"
 #include "ui/console-glyphs.h"
 #include "ui/icon-font.h"
@@ -185,6 +186,7 @@ int main(int argc, char **argv)
 
    initStats(5, 5, 14, activeTheme->textSecondary);
    initStorage();          // prefs (last category) + watch history, under this build’s private data directory
+   maintainSubtitleTranslationCache(); // daily 30-day expiry + orphaned temporary-file cleanup
    initAccount();          // saved YouTube sign-in, if any (account.txt beside the prefs)
    loadSettings();         // user-editable settings.txt (created with defaults on first launch)
    loadConsoleGlyphs();    // decode the console's own button glyphs for the on-screen hints

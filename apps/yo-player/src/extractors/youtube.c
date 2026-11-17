@@ -482,28 +482,6 @@ static int parseCaptionEntry(const char *entry, const char *entryEnd, CaptionTra
    return 1;
 }
 
-static int buildTranslatedCaptionUrl(const char *sourceUrl, const char *languageCode,
-                                     char *out, int outCap)
-{
-   char base[MAX_STREAM_URL];
-   strCopy(base, sizeof base, sourceUrl);
-
-   // Remove any existing format/translation parameters. Keep the signed URL's
-   // remaining query fields intact, then append tlang and srv1 explicitly.
-   const char *parameterNames[] = { "&fmt=", "?fmt=", "&tlang=", "?tlang=" };
-   for (int i = 0; i < 4; i++) {
-      char *parameter = strstr(base, parameterNames[i]);
-      if (!parameter) continue;
-      char *next = strchr(parameter + 1, '&');
-      if (next) memmove(parameter, next, strlen(next) + 1);
-      else *parameter = 0;
-   }
-
-   int length = snprintf(out, outCap, "%s%ctlang=%s&fmt=srv1", base,
-                         strchr(base, '?') ? '&' : '?', languageCode);
-   return length >= 0 && length < outCap;
-}
-
 static int appendCaptionTrack(StreamInfo *out, const CaptionTrack *track)
 {
    if (out->captionCount >= out->captionCapacity) {
@@ -517,6 +495,20 @@ static int appendCaptionTrack(StreamInfo *out, const CaptionTrack *track)
    return 1;
 }
 
+// Language comparison ignores a regional suffix (for example, pt-BR matches pt).
+static int captionLanguageMatches(const char *a, const char *b)
+{
+   int i = 0;
+   while (a[i] && b[i] && a[i] != '-' && b[i] != '-') {
+      char ca = a[i], cb = b[i];
+      if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+      if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+      if (ca != cb) return 0;
+      i++;
+   }
+   return i > 0 && (a[i] == 0 || a[i] == '-') && (b[i] == 0 || b[i] == '-');
+}
+
 static void parseCaptionTracks(const char *resp, const char *end, StreamInfo *out)
 {
    const char *captions = strstr(resp, "\"captionTracks\"");
@@ -525,8 +517,7 @@ static void parseCaptionTracks(const char *resp, const char *end, StreamInfo *ou
    if (!listEnd) listEnd = strstr(captions, "\"translationLanguages\"");
    if (!listEnd || listEnd > end) listEnd = end;
 
-   // Keep every source track in YouTube's original order. The old implementation
-   // reserved only eight slots and discarded all but six non-preferred languages.
+   // Keep every source track in YouTube's original order.
    const char *scan = captions;
    while (scan < listEnd) {
       const char *entry = strstr(scan, "\"baseUrl\"");
@@ -543,8 +534,20 @@ static void parseCaptionTracks(const char *resp, const char *end, StreamInfo *ou
       scan = entryEnd;
    }
 
-   // YouTube exposes translation targets separately from captionTracks. Build
-   // translated URLs only from a source track explicitly marked translatable.
+   // The Region setting is authoritative for the regional caption option.
+   // Playback track choices must not replace this target: otherwise selecting
+   // an English source track can hide the Region language on the next video.
+   // Do not synthesize a translation if a source caption already exists in it.
+   const char *targetLanguage = getContentRegionLanguageCode();
+   if (!targetLanguage || !targetLanguage[0] || strcmp(targetLanguage, "off") == 0)
+      return;
+   for (int i = 0; i < out->captionCount; i++) {
+      if (captionLanguageMatches(out->captions[i].languageCode, targetLanguage))
+         return;
+   }
+
+   // Prefer a creator-provided translatable track. If none exists, use the best
+   // available translatable track, including automatic speech recognition.
    CaptionTrack sourceTrack;
    int hasSource = 0;
    for (int i = 0; i < out->captionCount; i++) {
@@ -563,73 +566,60 @@ static void parseCaptionTracks(const char *resp, const char *end, StreamInfo *ou
          }
       }
    }
+   if (!hasSource) return;
+
    const char *translations = strstr(captions, "\"translationLanguages\"");
-   if (!hasSource && translations && translations < end)
-      logInfo("[yt] translation targets present but no caption track is marked translatable\n");
-   if (hasSource && translations && translations < end) {
-      const char *array = strchr(translations, '[');
-      const char *arrayEnd = array ? jsonArrayEnd(array, end) : NULL;
-      if (array && arrayEnd) {
-         scan = array + 1;
-         while (scan < arrayEnd - 1) {
-            const char *entry = strchr(scan, '{');
-            if (!entry || entry >= arrayEnd - 1) break;
-            const char *entryEnd = jsonObjectEnd(entry, arrayEnd);
-            if (!entryEnd) break;
+   if (!translations || translations >= end) return;
+   const char *array = strchr(translations, '[');
+   const char *arrayEnd = array ? jsonArrayEnd(array, end) : NULL;
+   if (!array || !arrayEnd) return;
 
-            CaptionTrack translated;
-            memset(&translated, 0, sizeof translated);
-            if (jsonString(entry, entryEnd, "languageCode", translated.languageCode,
-                           sizeof translated.languageCode) &&
-                translated.languageCode[0]) {
-               int duplicate = 0;
-               for (int i = 0; i < out->captionCount; i++) {
-                  if (out->captions[i].isAutoTranslated &&
-                      strcmp(out->captions[i].languageCode, translated.languageCode) == 0) {
-                     duplicate = 1;
-                     break;
-                  }
-               }
+   scan = array + 1;
+   while (scan < arrayEnd - 1) {
+      const char *entry = strchr(scan, '{');
+      if (!entry || entry >= arrayEnd - 1) break;
+      const char *entryEnd = jsonObjectEnd(entry, arrayEnd);
+      if (!entryEnd) break;
 
-               if (!duplicate) {
-                  // translationLanguages may expose languageName as a plain string
-                  // or as a nested simpleText/text object depending on the client.
-                  jsonString(entry, entryEnd, "languageName", translated.name,
-                             sizeof translated.name);
-                  if (!translated.name[0])
-                     jsonString(entry, entryEnd, "simpleText", translated.name,
-                                sizeof translated.name);
-                  if (!translated.name[0])
-                     jsonString(entry, entryEnd, "text", translated.name,
-                                sizeof translated.name);
-                  if (!translated.name[0])
-                     strCopy(translated.name, sizeof translated.name, translated.languageCode);
+      CaptionTrack translated;
+      memset(&translated, 0, sizeof translated);
+      if (jsonString(entry, entryEnd, "languageCode", translated.languageCode,
+                     sizeof translated.languageCode) &&
+          translated.languageCode[0] &&
+          captionLanguageMatches(translated.languageCode, targetLanguage)) {
+         // translationLanguages may expose languageName as a plain string
+         // or as a nested simpleText/text object depending on the client.
+         jsonString(entry, entryEnd, "languageName", translated.name, sizeof translated.name);
+         if (!translated.name[0])
+            jsonString(entry, entryEnd, "simpleText", translated.name, sizeof translated.name);
+         if (!translated.name[0])
+            jsonString(entry, entryEnd, "text", translated.name, sizeof translated.name);
+         if (!translated.name[0])
+            strCopy(translated.name, sizeof translated.name, translated.languageCode);
 
-                  char languageName[sizeof translated.name];
-                  strCopy(languageName, sizeof languageName, translated.name);
-                  snprintf(translated.name, sizeof translated.name, "%.*s (auto-translated)",
-                           (int)sizeof translated.name - 19, languageName);
+         char languageName[sizeof translated.name];
+         strCopy(languageName, sizeof languageName, translated.name);
+         snprintf(translated.name, sizeof translated.name, "%.*s (auto-translated)",
+                  (int)sizeof translated.name - 19, languageName);
 
-                  if (buildTranslatedCaptionUrl(sourceTrack.url, translated.languageCode,
-                                                translated.url, sizeof translated.url)) {
-                     translated.isAutoTranslated = 1;
-                     translated.isTranslatable = 0;
-                     translated.isAutoGenerated = 0;
-                     if (!appendCaptionTrack(out, &translated)) {
-                        logError("[yt] unable to allocate translated caption list\n");
-                        return;
-                     }
-                  } else {
-                     logWarn("[yt] translated caption URL too long for %s\n", translated.languageCode);
-                  }
-               }
-            }
-            scan = entryEnd;
-         }
+         // Keep the regional target (for example pt-BR) for Google Translate.
+         // Fetch the original source URL; do not use YouTube's tlang endpoint.
+         strCopy(translated.languageCode, sizeof translated.languageCode, targetLanguage);
+         strCopy(translated.sourceLanguageCode, sizeof translated.sourceLanguageCode,
+                 sourceTrack.languageCode);
+         strCopy(translated.url, sizeof translated.url, sourceTrack.url);
+         translated.isAutoTranslated = 1;
+         translated.isTranslatable = 0;
+         translated.isAutoGenerated = 0;
+         if (!appendCaptionTrack(out, &translated))
+            logError("[yt] unable to allocate translated caption list\n");
+         else
+            logInfo("[yt] added local translation %s from the %s source track\n",
+                    translated.name, sourceTrack.languageCode);
+         return;
       }
+      scan = entryEnd;
    }
-   if (out->captionCount)
-      logInfo("[yt] %d caption track(s), including translated languages\n", out->captionCount);
 }
 
 // parse both stream arrays. iOS returns only adaptiveFormats (separate video and

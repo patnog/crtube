@@ -23,14 +23,14 @@ static const char *DEFAULT_SETTINGS =
    "# on = check GitHub releases at startup; off = only check manually in Settings > Updates\n"
    "enable-1080p60=off\n"
    "# on = allow experimental TEE 1080p50/60 playback; off = Sony VDEC only, up to 1080p30\n"
-   "subtitle-language=en\n"
+   "subtitle-language=auto\n"
    "subtitle-text-color=0\n"
    "subtitle-background-color=0\n"
    "subtitle-background-opacity=3\n"
    "subtitle-highlight=0\n"
    "subtitle-font-size=2\n"
    "# Subtitle style: text color 0-5, background 0-4, opacity 0-4, highlight 0-2\n"
-   "# preferred subtitle language code; the player tries creator-provided tracks before English auto-generated\n"
+   "# subtitle language: auto follows the content region; otherwise a language code is a manual override\n"
    "region=US\n"
    "# country used for YouTube content lists (two-letter gl code); default US\n"
    "\n"
@@ -91,7 +91,7 @@ static const char *SPONSOR_SETTING_KEYS[SPONSOR_CATEGORY_COUNT] = {
 };
 static int autoplayEnabled = 1;
 static int enable1080p60 = 0;
-static char subtitleLanguage[12] = "en";
+static char subtitleLanguage[12] = "auto";
 static int overscanPercent = 0;
 static int cropToFillOverscanPercent = 0;
 static int screensaverTimeout = 30;
@@ -137,17 +137,17 @@ static const DownloadLanguage DOWNLOAD_LANGUAGES[] = {
 #define DOWNLOAD_LANGUAGE_COUNT ((int)(sizeof DOWNLOAD_LANGUAGES / sizeof DOWNLOAD_LANGUAGES[0]))
 
 static const ContentRegion REGIONS[] = {
-   { "DE", "Germany" }, { "AT", "Austria" }, { "CH", "Switzerland" },
-   { "AU", "Australia" }, { "BE", "Belgium" }, { "BR", "Brazil" },
-   { "BG", "Bulgaria" }, { "CA", "Canada" }, { "HR", "Croatia" },
-   { "CZ", "Czechia" }, { "DK", "Denmark" }, { "FI", "Finland" },
-   { "FR", "France" }, { "GR", "Greece" }, { "HU", "Hungary" },
-   { "IE", "Ireland" }, { "IT", "Italy" }, { "JP", "Japan" },
-   { "MX", "Mexico" }, { "NL", "Netherlands" }, { "NO", "Norway" },
-   { "PL", "Poland" }, { "PT", "Portugal" }, { "RO", "Romania" },
-   { "RU", "Russia" }, { "RS", "Serbia" }, { "KR", "South Korea" },
-   { "ES", "Spain" }, { "SE", "Sweden" }, { "TR", "Turkey" },
-   { "UA", "Ukraine" }, { "GB", "United Kingdom" }, { "US", "United States" }
+   { "DE", "Germany", "de" }, { "AT", "Austria", "de" }, { "CH", "Switzerland", "de" },
+   { "AU", "Australia", "en" }, { "BE", "Belgium", "nl" }, { "BR", "Brazil", "pt-BR" },
+   { "BG", "Bulgaria", "bg" }, { "CA", "Canada", "en" }, { "HR", "Croatia", "hr" },
+   { "CZ", "Czechia", "cs" }, { "DK", "Denmark", "da" }, { "FI", "Finland", "fi" },
+   { "FR", "France", "fr" }, { "GR", "Greece", "el" }, { "HU", "Hungary", "hu" },
+   { "IE", "Ireland", "en" }, { "IT", "Italy", "it" }, { "JP", "Japan", "ja" },
+   { "MX", "Mexico", "es" }, { "NL", "Netherlands", "nl" }, { "NO", "Norway", "no" },
+   { "PL", "Poland", "pl" }, { "PT", "Portugal", "pt" }, { "RO", "Romania", "ro" },
+   { "RU", "Russia", "ru" }, { "RS", "Serbia", "sr" }, { "KR", "South Korea", "ko" },
+   { "ES", "Spain", "es" }, { "SE", "Sweden", "sv" }, { "TR", "Turkey", "tr" },
+   { "UA", "Ukraine", "uk" }, { "GB", "United Kingdom", "en" }, { "US", "United States", "en" }
 };
 #define REGION_COUNT ((int)(sizeof REGIONS / sizeof REGIONS[0]))
 static volatile int regionIndex = -1;
@@ -171,6 +171,7 @@ int getContentRegionIndex(void)
    return index >= 0 && index < REGION_COUNT ? index : defaultRegionIndex();
 }
 const char *getContentRegionCode(void) { return REGIONS[getContentRegionIndex()].code; }
+const char *getContentRegionLanguageCode(void) { return REGIONS[getContentRegionIndex()].languageCode; }
 unsigned getContentRegionRevision(void) { return regionRevision; }
 
 static int parseRegion(const char *value)
@@ -264,8 +265,8 @@ void loadSettings(void)
 
    const char *subtitleLang = findSettingValue(text, "subtitle-language");
    if (!subtitleLang) {
-      snprintf(subtitleLanguage, sizeof subtitleLanguage, "en");
-      if (rewriteSettingKey(SETTINGS_PATH, "subtitle-language", "en") != 0)
+      snprintf(subtitleLanguage, sizeof subtitleLanguage, "auto");
+      if (rewriteSettingKey(SETTINGS_PATH, "subtitle-language", "auto") != 0)
          logWarn("[settings] could not add default subtitle language\n");
    } else {
       int length = 0, valid = 1;
@@ -278,9 +279,9 @@ void loadSettings(void)
          if (length >= (int)sizeof subtitleLanguage) { valid = 0; break; }
       }
       if (length < 2 || !valid) {
-         snprintf(subtitleLanguage, sizeof subtitleLanguage, "en");
-         logWarn("[settings] invalid subtitle-language, using en\n");
-         if (rewriteSettingKey(SETTINGS_PATH, "subtitle-language", "en") != 0)
+         snprintf(subtitleLanguage, sizeof subtitleLanguage, "auto");
+         logWarn("[settings] invalid subtitle-language, using auto\n");
+         if (rewriteSettingKey(SETTINGS_PATH, "subtitle-language", "auto") != 0)
             logWarn("[settings] could not reset subtitle language\n");
       } else {
          memcpy(subtitleLanguage, subtitleLang, (size_t)length);
@@ -549,11 +550,24 @@ int setAutoplayEnabled(int enabled)
    return 0;
 }
 
-const char *getSubtitleLanguage(void) { return subtitleLanguage; }
+const char *getSubtitleLanguage(void)
+{
+   return strcmp(subtitleLanguage, "auto") == 0 ? getContentRegionLanguageCode() : subtitleLanguage;
+}
 
 int setSubtitleLanguage(const char *languageCode)
 {
    if (!languageCode) return -1;
+   if (strcmp(languageCode, "auto") == 0) {
+      if (strcmp(subtitleLanguage, "auto") == 0) return 0;
+      if (rewriteSettingKey(SETTINGS_PATH, "subtitle-language", "auto") != 0) {
+         logWarn("[settings] couldn't persist subtitle-language=auto\n");
+         return -1;
+      }
+      strCopy(subtitleLanguage, sizeof subtitleLanguage, "auto");
+      logInfo("[settings] subtitle-language=auto (region %s)\n", getContentRegionLanguageCode());
+      return 0;
+   }
    int length = 0;
    while (languageCode[length]) {
       char c = languageCode[length];

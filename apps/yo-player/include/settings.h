@@ -53,7 +53,8 @@ int setAutoplayEnabled(int enabled);
 int getEnable1080p60(void);
 int setEnable1080p60(int enabled);
 
-// Preferred subtitle language code (e.g. en or pt-BR); persisted to settings.txt.
+// Preferred subtitle language: "auto" follows the content region; a language code is a manual override.
+// getSubtitleLanguage() returns the resolved language code, not the literal "auto" value.
 const char *getSubtitleLanguage(void);
 int setSubtitleLanguage(const char *languageCode);
 
@@ -77,11 +78,12 @@ int getSubtitleOffset(void);
 int setSubtitleOffset(int pixels);  // 0 on success, -1 if persistence fails
 
 // YouTube content region (gl): changes the country used by browse/search list requests.
-typedef struct { const char *code; const char *name; } ContentRegion;
+typedef struct { const char *code; const char *name; const char *languageCode; } ContentRegion;
 int getContentRegionCount(void);
 const ContentRegion *getContentRegionAt(int index);
 int getContentRegionIndex(void);
 const char *getContentRegionCode(void);
+const char *getContentRegionLanguageCode(void);
 int setContentRegionIndex(int index);
 unsigned getContentRegionRevision(void);
 

@@ -43,6 +43,12 @@ static void renderLabel(Label *l)
    if (l->raw) renderFontRaw(&l->tt, l->font, renderSize, l->text, l->color, l->width, l->wrap);
    else        renderFont(&l->tt, l->font, renderSize, l->text, l->color, l->width, l->wrap);
    l->renderedScale = scale;
+   l->renderedFont = l->font;
+   l->renderedSize = l->size;
+   l->renderedWidth = l->width;
+   l->renderedHeight = l->height;
+   l->renderedWrap = l->wrap;
+   l->renderedRaw = l->raw;
 }
 
 void refreshLabelScale(Label *l)
@@ -50,6 +56,15 @@ void refreshLabelScale(Label *l)
    if (!l || !l->scaleWithUi || l->fixedRenderScale > 0.0f) return;
    float scale = getGfxUiScaleFactor();
    if (scale != l->renderedScale) renderLabel(l);
+}
+
+void refreshLabelLayout(Label *l)
+{
+   if (!l) return;
+   if (l->renderedFont != l->font || l->renderedSize != l->size ||
+       l->renderedWidth != l->width || l->renderedHeight != l->height ||
+       l->renderedWrap != l->wrap || l->renderedRaw != l->raw)
+      renderLabel(l);
 }
 
 void setLabelScaleWithUi(Label *l, int enabled)

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 // subtitles - fetch + parse one YouTube timed-text track into timestamped cues.
 //
 // The play screen picks a CaptionTrack (extractor.h), calls fetchSubtitles on a worker thread,
@@ -11,6 +13,7 @@
 typedef struct {
    float start, end;              // seconds
    char  text[SUBTITLE_TEXT_MAX];
+   int   pending;                 // translation is still in progress; not shown until published
 } SubtitleCue;
 
 // one whole parsed track (~800 KB); heap-allocate it, never on the stack.
@@ -23,9 +26,17 @@ typedef struct {
 int fetchSubtitles(const char *url, SubtitleTrack *out);
 // Download one timed-text track and persist the parsed cues as a compact SRT sidecar.
 int saveSubtitlesSrt(const char *url, const char *path);
+// Persist an already parsed (or translated) track without fetching it again.
+int saveSubtitleTrackSrt(const SubtitleTrack *track, const char *path);
 // Load an SRT sidecar into the same cue structure used by online playback.
 int loadSubtitlesSrt(const char *path, SubtitleTrack *out);
+// Run the once-per-day online translation-cache expiry and temporary-file cleanup.
+void maintainSubtitleTranslationCache(void);
+void touchSubtitleTranslationCache(const char *path);
+// Make room in the 10 MB FIFO cache for a completed entry; downloaded-video sidecars are separate.
+int reserveSubtitleTranslationCacheSpace(const char *newPath, uint64_t newSize);
 
 // the cue text covering `seconds`, or "" if none. *scanFrom caches the search position across
 // calls (cues are time-ordered); reset it to 0 after a seek or track switch.
-const char *getSubtitleCueText(const SubtitleTrack *track, float seconds, int *scanFrom);
+const char *getSubtitleCueText(const SubtitleTrack *track, float seconds, int *scanFrom,
+                               int *activeCue, int *activePending);

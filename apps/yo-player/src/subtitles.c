@@ -6,6 +6,8 @@
 // time-ordered cue array the player scans forward through during playback.
 
 #include "subtitles.h"
+#include "app-config.h"
+#include "thread.h"             // getTimeUs
 #include "http.h"
 #include "text-sanitize.h"      // decodeXmlEntities / stripMarkupTags / removeInvisibleMarks / flattenWhitespace
 #include "string-utilities.h"   // strCopy, truncateUtf8
@@ -107,8 +109,153 @@ int fetchSubtitles(const char *url, SubtitleTrack *out)
    return 0;
 }
 
-const char *getSubtitleCueText(const SubtitleTrack *track, float seconds, int *scanFrom)
+
+
+#define SUBTITLE_CACHE_DIR CRTUBE_DATA_DIR "/subtitle-cache"
+#define SUBTITLE_CACHE_MARKER SUBTITLE_CACHE_DIR "/.cleanup"
+#define SUBTITLE_CACHE_LIMIT (10ULL * 1024ULL * 1024ULL)
+#define SUBTITLE_CACHE_MAX_AGE (30ULL * 24ULL * 60ULL * 60ULL)
+#define SUBTITLE_CACHE_CLEAN_INTERVAL (24ULL * 60ULL * 60ULL)
+
+static int hasSuffix(const char *name, const char *suffix)
 {
+   size_t nameLength = strlen(name), suffixLength = strlen(suffix);
+   return nameLength >= suffixLength && strcmp(name + nameLength - suffixLength, suffix) == 0;
+}
+
+static int isCacheSrt(const char *name)
+{
+   return hasSuffix(name, ".srt");
+}
+
+static int isCacheTemporary(const char *name)
+{
+   return hasSuffix(name, ".tmp");
+}
+
+static void subtitleCacheAccessPath(const char *path, char *out, int capacity)
+{
+   snprintf(out, capacity, "%s.access", path);
+}
+
+void touchSubtitleTranslationCache(const char *path)
+{
+   if (!path || !path[0]) return;
+   char accessPath[MAX_PATH_LEN];
+   subtitleCacheAccessPath(path, accessPath, sizeof accessPath);
+   writeFile(accessPath, "1", 1);
+}
+
+static int scanCache(uint64_t *totalBytes, char *oldestPath, int oldestCapacity,
+                     uint64_t *oldestMtime, const char *excludePath)
+{
+   VfsDir dir;
+   char name[256], path[MAX_PATH_LEN];
+   VfsEntryType type;
+   int result = 0;
+   *totalBytes = 0;
+   *oldestMtime = UINT64_MAX;
+   if (oldestPath && oldestCapacity > 0) oldestPath[0] = 0;
+   if (openDir(SUBTITLE_CACHE_DIR, &dir) != 0) return -1;
+   while ((result = readDir(&dir, name, sizeof name, &type)) > 0) {
+      if (type != VFS_ENTRY_FILE || !isCacheSrt(name)) continue;
+      snprintf(path, sizeof path, "%s/%s", SUBTITLE_CACHE_DIR, name);
+      if (excludePath && strcmp(path, excludePath) == 0) continue;
+      VfsStat stat;
+      if (statPath(path, &stat) != 0 || stat.isDir) continue;
+      *totalBytes += stat.size;
+      if (oldestPath && stat.mtime < *oldestMtime) {
+         *oldestMtime = stat.mtime;
+         strCopy(oldestPath, oldestCapacity, path);
+      }
+   }
+   closeDir(&dir);
+   return result < 0 ? -1 : 0;
+}
+
+void maintainSubtitleTranslationCache(void)
+{
+   makeDir(SUBTITLE_CACHE_DIR);
+   uint64_t now = getTimeUs() / 1000000ULL;
+   VfsStat marker;
+   int dailyDue = statPath(SUBTITLE_CACHE_MARKER, &marker) != 0 || marker.mtime == 0 ||
+      (now >= marker.mtime && now - marker.mtime >= SUBTITLE_CACHE_CLEAN_INTERVAL);
+
+   // Remove abandoned writes on every launch. Expire completed online translations once per day.
+   // Delete one item per scan: directory backends need not support deleting the current entry.
+   for (;;) {
+      VfsDir dir;
+      char name[256], path[MAX_PATH_LEN];
+      VfsEntryType type;
+      int found = 0;
+      if (openDir(SUBTITLE_CACHE_DIR, &dir) != 0) break;
+      int readResult;
+      while ((readResult = readDir(&dir, name, sizeof name, &type)) > 0) {
+         if (type != VFS_ENTRY_FILE || (!isCacheTemporary(name) &&
+             !(isCacheSrt(name) && dailyDue) && !hasSuffix(name, ".access"))) continue;
+         snprintf(path, sizeof path, "%s/%s", SUBTITLE_CACHE_DIR, name);
+         int remove = isCacheTemporary(name);
+         if (hasSuffix(name, ".access")) {
+            char subtitlePath[MAX_PATH_LEN];
+            strCopy(subtitlePath, sizeof subtitlePath, path);
+            subtitlePath[strlen(subtitlePath) - strlen(".access")] = 0;
+            remove = !fileExists(subtitlePath); // orphaned access marker
+         } else if (!remove && dailyDue && isCacheSrt(name)) {
+            VfsStat stat, accessStat;
+            char accessPath[MAX_PATH_LEN];
+            uint64_t lastAccess = 0;
+            if (statPath(path, &stat) == 0) lastAccess = stat.mtime;
+            subtitleCacheAccessPath(path, accessPath, sizeof accessPath);
+            if (statPath(accessPath, &accessStat) == 0 && accessStat.mtime > 0)
+               lastAccess = accessStat.mtime;
+            if (lastAccess > 0 && now >= lastAccess && now - lastAccess >= SUBTITLE_CACHE_MAX_AGE)
+               remove = 1;
+         }
+         if (remove) { found = 1; break; }
+      }
+      closeDir(&dir);
+      if (readResult < 0 || !found) break;
+      int wasSubtitle = isCacheSrt(path);
+      if (deleteFile(path) != 0) break;
+      if (wasSubtitle) {
+         char accessPath[MAX_PATH_LEN];
+         subtitleCacheAccessPath(path, accessPath, sizeof accessPath);
+         deleteFile(accessPath);
+      }
+   }
+   if (dailyDue) {
+      writeFile(SUBTITLE_CACHE_MARKER, "1", 1);
+      logInfo("[subs] translation cache daily expiry checked (30 days)\n");
+   }
+}
+
+int reserveSubtitleTranslationCacheSpace(const char *newPath, uint64_t newSize)
+{
+   if (!newPath || newSize > SUBTITLE_CACHE_LIMIT) return -1;
+   uint64_t total = 0, oldestMtime = 0;
+   char oldest[MAX_PATH_LEN];
+   // Exclude the previous entry at newPath: it will be replaced after the temporary file is complete.
+   if (scanCache(&total, oldest, sizeof oldest, &oldestMtime, newPath) != 0) return -1;
+   while (total > SUBTITLE_CACHE_LIMIT - newSize) {
+      if (!oldest[0]) return -1;
+      VfsStat stat;
+      uint64_t freed = 0;
+      if (statPath(oldest, &stat) == 0) freed = stat.size;
+      if (deleteFile(oldest) != 0 || freed == 0) return -1;
+      char accessPath[MAX_PATH_LEN];
+      subtitleCacheAccessPath(oldest, accessPath, sizeof accessPath);
+      deleteFile(accessPath);
+      total = total > freed ? total - freed : 0;
+      if (scanCache(&total, oldest, sizeof oldest, &oldestMtime, newPath) != 0) return -1;
+   }
+   return 0;
+}
+
+const char *getSubtitleCueText(const SubtitleTrack *track, float seconds, int *scanFrom,
+                               int *activeCue, int *activePending)
+{
+   if (activeCue) *activeCue = -1;
+   if (activePending) *activePending = 0;
    if (*scanFrom >= track->count || seconds < track->cues[*scanFrom].start) *scanFrom = 0;   // sought backwards
 
    // auto captions "roll up": cue windows overlap the next line's, so among the cues covering this
@@ -118,8 +265,14 @@ const char *getSubtitleCueText(const SubtitleTrack *track, float seconds, int *s
    for (int i = *scanFrom; i < track->count; i++) {
       if (track->cues[i].start > seconds) break;
       *scanFrom = i;
-      if (seconds < track->cues[i].end) text = track->cues[i].text;
+      if (seconds < track->cues[i].end) {
+         int pending = ((volatile const SubtitleCue *)&track->cues[i])->pending;
+         text = pending ? "" : track->cues[i].text;
+         if (activeCue) *activeCue = i;
+         if (activePending) *activePending = pending;
+      }
    }
+   __sync_synchronize();
    return text;
 }
 
@@ -136,17 +289,12 @@ static void formatSrtTime(char *out, int cap, float seconds)
    snprintf(out, cap, "%02ld:%02ld:%02ld,%03ld", hours, minutes, secs, ms);
 }
 
-int saveSubtitlesSrt(const char *url, const char *path)
+int saveSubtitleTrackSrt(const SubtitleTrack *track, const char *path)
 {
-   if (!url || !path) return -1;
-   SubtitleTrack *track = (SubtitleTrack *)malloc(sizeof *track);
-   if (!track) return -1;
-   int rc = fetchSubtitles(url, track);
-   if (rc != 0 || track->count <= 0) { free(track); return rc != 0 ? rc : -1; }
-
+   if (!track || !path || track->count <= 0) return -1;
    size_t capacity = (size_t)track->count * (SUBTITLE_TEXT_MAX + 64) + 1;
    char *output = (char *)malloc(capacity);
-   if (!output) { free(track); return -1; }
+   if (!output) return -1;
    size_t used = 0;
    for (int i = 0; i < track->count; i++) {
       char start[24], end[24];
@@ -157,8 +305,19 @@ int saveSubtitlesSrt(const char *url, const char *path)
       if (written < 0 || (size_t)written >= capacity - used) { used = 0; break; }
       used += (size_t)written;
    }
-   rc = used ? writeFile(path, output, (uint64_t)used) : -1;
+   int rc = used ? writeFile(path, output, (uint64_t)used) : -1;
    free(output);
+   return rc;
+}
+
+int saveSubtitlesSrt(const char *url, const char *path)
+{
+   if (!url || !path) return -1;
+   SubtitleTrack *track = (SubtitleTrack *)malloc(sizeof *track);
+   if (!track) return -1;
+   int rc = fetchSubtitles(url, track);
+   if (rc == 0 && track->count > 0) rc = saveSubtitleTrackSrt(track, path);
+   else if (rc == 0) rc = -1;
    free(track);
    return rc;
 }
