@@ -436,12 +436,12 @@ void loadSettings(void)
    applicationLanguage = APP_LANGUAGE_EN;
    if (appLanguage) {
       for (int i = 0; i < APP_LANGUAGE_COUNT; i++) {
-         if (strcmp(appLanguage, getAppLanguageCode(i)) == 0) {
+         if (settingValueEquals(appLanguage, getAppLanguageCode(i))) {
             applicationLanguage = i;
             break;
          }
       }
-      if (applicationLanguage == APP_LANGUAGE_EN && strcmp(appLanguage, "en") != 0)
+      if (applicationLanguage == APP_LANGUAGE_EN && !settingValueEquals(appLanguage, "en"))
          logWarn("[settings] unsupported app-language '%s', using en\n", appLanguage);
    }
    setAppLanguage(applicationLanguage);
