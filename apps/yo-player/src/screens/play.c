@@ -552,6 +552,7 @@ static uint64_t loadingAnimationStartedUs;
 static Label statLabels[STAT_LINES];
 static Label timeLeftLabel, timeRightLabel;   // seek bar: current time (left) / total (right)
 static Label liveBadgeLabel, backToLabel;
+static int liveBadgeLanguage = -1;
 static Label liveFailureTitleLabel, liveFailureBodyLabel;
 static ButtonHints liveFailureHints, playbackHints;
 static Label toastLabel;                      // brief centred toast ("Skipped ...", "Subtitles: ...")
@@ -2487,6 +2488,7 @@ static void initPlay(void)
    initLabel(&timeLeftLabel,  &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabel(&timeRightLabel, &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabelRaw(&liveBadgeLabel, &uiFont, 0, 0, 120, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_LIVE_BADGE));
+   liveBadgeLanguage = getAppLanguage();
    initLabelRaw(&backToLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_BACK_TO));
    initLabelRaw(&liveFailureTitleLabel, &uiFont, 0, 0, 760, AUTO, playbackFontSize(30), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_LIVE_PLAYBACK_FAILED));
    initLabelRaw(&liveFailureBodyLabel, &uiFont, 0, 0, 760, AUTO, playbackFontSize(22), activeTheme->textSecondary, TEXT_WRAP, LOC(STR_LIVE_RENEW_FAILED));
@@ -2576,7 +2578,7 @@ static void initPlay(void)
       initLabelRaw(&playbackSubtitleStyleLabels[i], &uiFont, 0, 0, 300, AUTO,
                    playbackFontSize(20), activeTheme->textPrimary, TEXT_NOWRAP, subtitleStyleNames[i]);
    initLabelRaw(&playbackSubtitlePreview, &uiFont, 0, 0, 520, AUTO,
-                playbackSubtitleFontSize(22 + getSubtitleStyle(4) * 4), 0xFFFFFFFF, TEXT_WRAP, "Lorem Ipsum");
+                playbackSubtitleFontSize(22 + getSubtitleStyle(4) * 4), 0xFFFFFFFF, TEXT_WRAP, LOC(STR_SUBTITLE_PREVIEW));
    initLabelRaw(&playbackSponsorTitle, &uiFont, 0, 0, PLAYBACK_SPONSOR_PANEL_W - 48, AUTO,
                 playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_SPONSORBLOCK));
    for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++)
@@ -4699,13 +4701,25 @@ static void handlePlaybackOptionsInput(void)
 
 static int playbackSettingsPanelWidth(void)
 {
+   // Measure the active locale directly. The labels may still contain the
+   // previous language when this function is called immediately after a
+   // language change, so measuring their cached textures can underestimate
+   // the width required by Portuguese.
+   const char *localizedSettingsNames[PLAYBACK_SETTINGS_COUNT] = {
+      LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING), LOC(STR_OVERSCAN), LOC(STR_OVERSCAN_CROP),
+      LOC(STR_SUBTITLE_STYLE), LOC(STR_SUBTITLE_OFFSET), LOC(STR_AUTO_TRANSLATE_SUBTITLES),
+      LOC(STR_SPONSORBLOCK), LOC(STR_OSD_TIMEOUT)
+   };
    int widest = 0;
    int renderSize = (int)(playbackFontSize(20) * playbackFontScale + 0.5f);
    for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
-      int measured = (int)(measureFontText(&uiFont, renderSize, playbackSettingsLabels[i].text) + 0.5f);
+      int measured = (int)(measureFontText(&uiFont, renderSize, localizedSettingsNames[i]) + 0.5f);
       if (measured > widest) widest = measured;
    }
-   int preferred = widest + 40 + 250 + 80;
+
+   // Keep the right-hand value/control column and both horizontal margins.
+   // The label area in drawPlaybackSettings ends at panelW - 220.
+   int preferred = widest + 40 + 220 + 40 + 24;
    if (preferred < PLAYBACK_SETTINGS_PANEL_W) preferred = PLAYBACK_SETTINGS_PANEL_W;
    int maxWidth = state.screenW - 48;
    return preferred < maxWidth ? preferred : maxWidth;
@@ -4949,7 +4963,7 @@ static void drawPlaybackSubtitleStyle(void)
    bg = (bg & 0x00FFFFFF) | ((uint32_t[]){ 0, 64, 128, 204, 255 }[getSubtitleStyle(2)] << 24);
    uint32_t color = textColors[getSubtitleStyle(0)];
    playbackSubtitlePreview.size = playbackSubtitleFontSize(22 + getSubtitleStyle(4) * 4);
-   setLabelText(&playbackSubtitlePreview, "Lorem Ipsum");
+   setLabelText(&playbackSubtitlePreview, LOC(STR_SUBTITLE_PREVIEW));
    prepareSubtitleLabel(&playbackSubtitlePreview, color);
    refreshLabelScale(&playbackSubtitlePreview);
    int padL, padT, padR, padB;
@@ -5028,11 +5042,13 @@ static void drawPlaybackSponsorSettings(void)
 
 static void setOptionsCurrentValue(Label *label, const char *value, int width)
 {
+   char valueCopy[sizeof label->text];
+   strCopy(valueCopy, sizeof valueCopy, value ? value : LOC(STR_UNAVAILABLE));
    if (label->width != width) {
       label->width = width;
       label->text[0] = '\0'; // force a reraster with the new available width
    }
-   setLabelText(label, value ? value : LOC(STR_UNAVAILABLE));
+   setLabelText(label, valueCopy);
    refreshLabelScale(label);
 }
 
@@ -5095,8 +5111,17 @@ static void drawPlaybackOptions(void)
       if (measured > widestAudioValue) widestAudioValue = measured;
    }
    int requiredW = widestLabel + 38 + 240;
+   int widestSubtitleValue = 0;
+   int subtitleRenderSize = (int)(playbackFontSize(27) * playbackFontScale + 0.5f);
+   for (int i = 0; i < state.captionCount; i++) {
+      const char *name = state.captionTracks[i].name;
+      int measured = (int)(measureFontText(&uiFont, subtitleRenderSize, name ? name : "") + 0.5f);
+      if (measured > widestSubtitleValue) widestSubtitleValue = measured;
+   }
    int audioRequiredW = 38 + widestAudioValue + 38 + 44 + 80;
+   int subtitleRequiredW = 38 + widestSubtitleValue + 38 + 44 + 80;
    if (audioRequiredW > requiredW) requiredW = audioRequiredW;
+   if (subtitleRequiredW > requiredW) requiredW = subtitleRequiredW;
    if (requiredW > panelW) panelW = requiredW;
    if (panelW > state.screenW - 32) panelW = state.screenW - 32;
    int rowH = state.screenH < 560 ? 44 : 54;
@@ -5122,25 +5147,10 @@ static void drawPlaybackOptions(void)
       }
    }
 
-   // Audio and subtitle names must use the available value area before being
-   // shortened. At 1.5x, Portuguese labels otherwise get ellipsized too early.
-   for (int valueIndex = 1; valueIndex <= 2; valueIndex++) {
-      Label *value = &optionsCurrentValueLabels[valueIndex];
-      refreshLabelScale(value);
-      int baseSize = playbackFontSize(27);
-      int renderSize = (int)(baseSize * playbackFontScale + 0.5f);
-      int measured = (int)(measureFontText(&uiFont, renderSize, value->text) + 0.5f);
-      int fitSize = baseSize;
-      if (measured > valueWidth && measured > 0) {
-         fitSize = (int)(baseSize * ((float)valueWidth / (float)measured));
-         if (fitSize < 12) fitSize = 12;
-      }
-      if (value->size != fitSize) {
-         value->size = fitSize;
-         value->fixedRenderScale = 0.0f;
-         setLabelFixedRenderScale(value, playbackFontScale, 0);
-      }
-   }
+   // Preserve the interface font size. The label's logical width controls
+   // ellipsis; do not shrink the font to compensate for a narrow value column.
+   for (int valueIndex = 1; valueIndex <= 2; valueIndex++)
+      refreshLabelScale(&optionsCurrentValueLabels[valueIndex]);
 
    // Quality is never ellipsized: right-align it immediately before the arrow.
    // If a future quality label is unusually long, reduce only that value's font
@@ -6146,6 +6156,11 @@ static void drawSponsorSegments(int barLeft, int span, int barTopY, int barH, fl
 // Keep the LIVE badge brand-red in every theme, with compact 6x4 padding.
 static void drawLiveBadgeAt(int x, int y)
 {
+   if (liveBadgeLanguage != getAppLanguage()) {
+      setLabelText(&liveBadgeLabel, LOC(STR_LIVE_BADGE));
+      setLabelScaleWithUi(&liveBadgeLabel, 1);
+      liveBadgeLanguage = getAppLanguage();
+   }
    const int padX = 6, padY = 4;
    int width = liveBadgeLabel.tt.tex.w + 2 * padX;
    int height = liveBadgeLabel.tt.tex.h + 2 * padY;

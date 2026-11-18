@@ -58,7 +58,8 @@ typedef struct {
    Label            rows[MAX_SEARCH_RESULTS];              // per-tile title
    Label            metas[MAX_SEARCH_RESULTS];             // per-tile "author - views - age"
    Label            durations[MAX_SEARCH_RESULTS];         // per-tile duration / LIVE badge
-   Label            watchLaterBadge;                       // shared "Watch Later" tag drawn on queued tiles
+   Label            watchLaterBadge;                       // shared localized Watch Later tag drawn on queued tiles
+   int              watchLaterBadgeLanguage;
    Label            membersOnlyBadge;                       // shared "*Members only" tag drawn on restricted tiles
    volatile GridMemberState membersOnly[MAX_SEARCH_RESULTS];
    int              memberCheckIndex;

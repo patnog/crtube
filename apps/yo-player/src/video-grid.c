@@ -1554,6 +1554,7 @@ void initVideoGrid(VideoGrid *grid, Font *font, int x, int y, int width, int hei
       setLabelScaleWithUi(&grid->durations[i], 1);
    }
    initLabel(&grid->watchLaterBadge, font, 0, 0, AUTO, AUTO, WATCHLATER_BADGE_SIZE, 0xFFFFFFFF, TEXT_NOWRAP, LOC(STR_WATCH_LATER_BADGE));
+   grid->watchLaterBadgeLanguage = getAppLanguage();
    setLabelScaleWithUi(&grid->watchLaterBadge, 1);
    initLabel(&grid->membersOnlyBadge, font, 0, 0, AUTO, AUTO, DUR_SIZE, 0xFF00FF00, TEXT_NOWRAP, LOC(STR_MEMBERS_ONLY));
    float badgeScale = getGfxUiScaleFactor();
@@ -1835,6 +1836,14 @@ static void drawTile(VideoGrid *grid, int i)
       int badgeX = tx + edgeGap, badgeY = ty + grid->thumbH - badgeH - edgeGap;
       fillGfxRectangleFixed(badgeX, badgeY, badgeW, badgeH, 0xFF000000);
       drawLabelAt(&grid->membersOnlyBadge, badgeX + padX, badgeY + padY);
+   }
+
+   if (grid->watchLaterBadgeLanguage != getAppLanguage()) {
+      setLabelText(&grid->watchLaterBadge, LOC(STR_WATCH_LATER_BADGE));
+      setLabelText(&grid->membersOnlyBadge, LOC(STR_MEMBERS_ONLY));
+      setLabelScaleWithUi(&grid->watchLaterBadge, 1);
+      setLabelScaleWithUi(&grid->membersOnlyBadge, 1);
+      grid->watchLaterBadgeLanguage = getAppLanguage();
    }
 
    if (!grid->suppressWatchLaterBadge &&

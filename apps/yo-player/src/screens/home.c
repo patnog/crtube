@@ -395,6 +395,11 @@ static unsigned regionRevisionSeen;
 #define HOME_SORT_PAD_X 7
 #define HOME_SORT_GAP 4
 #define HOME_SORT_HEIGHT 48
+static int trendingHeaderCategoryPad = TREND_CHIP_PAD_X;
+static int trendingHeaderCategoryGap = TREND_CHIP_GAP;
+static int trendingHeaderSortPad = HOME_SORT_PAD_X;
+static int trendingHeaderSortGap = HOME_SORT_GAP;
+static int trendingHeaderLayoutReady;
 static Label trendingChipLabels[TREND_COUNT];
 static Icon trendingChipIcons[TREND_COUNT];
 static Label liveChipLabels[LIVE_COUNT];
@@ -802,6 +807,27 @@ static void updateHomeSortHint(void)
    }
 }
 
+/* Refresh labels whose localized text is cached in home-screen widgets. */
+static void refreshHomeLocalizedLabels(void)
+{
+   for (int i = 0; i < TREND_COUNT; i++)
+      setLabelText(&trendingChipLabels[i], LOC(TrendingNameIds[i]));
+   trendingHeaderLayoutReady = 0;
+   for (int i = 0; i < LIVE_COUNT; i++)
+      setLabelText(&liveChipLabels[i], LOC(LiveNameIds[i]));
+   for (int i = 0; i < SORT_COUNT; i++)
+      setLabelText(&homeSortLabels[i], LOC(((AppStringId[]){ STR_RELEVANCE, STR_VIEWS, STR_NEWEST })[i]));
+   for (int i = 0; i < PLAYLIST_SORT_COUNT; i++)
+      setLabelText(&playlistSortLabels[i], LOC(((AppStringId[]){ STR_NEWEST, STR_A_TO_Z })[i]));
+   setLabelText(&localPlaylistTabLabels[0], LOC(STR_WATCH_LATER));
+   setLabelText(&localPlaylistTabLabels[1], LOC(STR_PS3));
+   setLabelText(&downloadCategoryLabels[0], LOC(STR_ALL));
+   setLabelText(&downloadCategoryLabels[1], LOC(STR_VIDEOS));
+   setLabelText(&downloadCategoryLabels[2], LOC(STR_PLAYLISTS));
+   setHeading();
+   updateHomeSortHint();
+}
+
 // Keep category navigation hints derived from the active page, never from the
 // page visited before it. Playlist contents have no category navigation.
 static void updateHomeCategoryHints(void)
@@ -816,13 +842,90 @@ static void updateHomeCategoryHints(void)
 static int homeSortGroupLeft(void)
 {
    int count = homeSupportsPlaylistSort() ? PLAYLIST_SORT_COUNT : SORT_COUNT;
-   int total = HOME_SORT_GAP * (count - 1);
+   int pad = home.category < TREND_COUNT ? trendingHeaderSortPad : HOME_SORT_PAD_X;
+   int gap = home.category < TREND_COUNT ? trendingHeaderSortGap : HOME_SORT_GAP;
+   int total = gap * (count - 1);
    for (int i = 0; i < count; i++) {
       Label *label = homeSupportsPlaylistSort() ? &playlistSortLabels[i] : &homeSortLabels[i];
       refreshLabelScale(label);
-      total += label->tt.tex.w + HOME_SORT_PAD_X * 2;
+      total += label->tt.tex.w + pad * 2;
    }
    return home.screenW - MARGIN_X - total;
+}
+
+/* Keep all three Trending categories and all three sort pills in the header.
+ * Portuguese has the widest labels, so fit both groups together by reducing
+ * horizontal padding first and then uniformly scaling their text. Icons remain
+ * at their normal size and category order never changes. */
+static void fitTrendingHeaderLayout(void)
+{
+   if (home.category >= TREND_COUNT) {
+      if (trendingHeaderLayoutReady) {
+         for (int i = 0; i < TREND_COUNT; i++) {
+            setLabelFixedRenderScale(&trendingChipLabels[i], 0.0f, 0);
+            refreshLabelScale(&trendingChipLabels[i]);
+         }
+         for (int i = 0; i < SORT_COUNT; i++) {
+            setLabelFixedRenderScale(&homeSortLabels[i], 0.0f, 0);
+            refreshLabelScale(&homeSortLabels[i]);
+         }
+         trendingHeaderCategoryPad = TREND_CHIP_PAD_X;
+         trendingHeaderCategoryGap = TREND_CHIP_GAP;
+         trendingHeaderSortPad = HOME_SORT_PAD_X;
+         trendingHeaderSortGap = HOME_SORT_GAP;
+         trendingHeaderLayoutReady = 0;
+      }
+      return;
+   }
+   if (trendingHeaderLayoutReady) return;
+
+   for (int i = 0; i < TREND_COUNT; i++) {
+      setLabelFixedRenderScale(&trendingChipLabels[i], 0.0f, 0);
+      refreshLabelScale(&trendingChipLabels[i]);
+   }
+   for (int i = 0; i < SORT_COUNT; i++) {
+      setLabelFixedRenderScale(&homeSortLabels[i], 0.0f, 0);
+      refreshLabelScale(&homeSortLabels[i]);
+   }
+
+   int left = titleLabel.x + titleLabel.tt.tex.w + 18;
+   int available = home.screenW - MARGIN_X - left - 14;
+   float factor = 1.0f;
+   int categoryPad = TREND_CHIP_PAD_X, categoryGap = TREND_CHIP_GAP;
+   int sortPad = HOME_SORT_PAD_X, sortGap = HOME_SORT_GAP;
+   float baseScale = getGfxUiScaleFactor();
+
+   for (;;) {
+      for (int i = 0; i < TREND_COUNT; i++)
+         setLabelFixedRenderScale(&trendingChipLabels[i], baseScale * factor, 0);
+      for (int i = 0; i < SORT_COUNT; i++)
+         setLabelFixedRenderScale(&homeSortLabels[i], baseScale * factor, 0);
+
+      int categoryWidth = 0;
+      for (int i = 0; i < TREND_COUNT; i++)
+         categoryWidth += trendingChipLabels[i].tt.tex.w + TREND_CHIP_ICON_SIZE +
+                          TREND_CHIP_ICON_GAP + categoryPad * 2;
+      categoryWidth += categoryGap * (TREND_COUNT - 1);
+
+      int sortWidth = 0;
+      for (int i = 0; i < SORT_COUNT; i++)
+         sortWidth += homeSortLabels[i].tt.tex.w + sortPad * 2;
+      sortWidth += sortGap * (SORT_COUNT - 1);
+
+      if (categoryWidth + sortWidth <= available) break;
+      if (categoryPad > 3) categoryPad--;
+      else if (categoryGap > 2) categoryGap--;
+      else if (sortPad > 3) sortPad--;
+      else if (sortGap > 2) sortGap--;
+      else if (factor > 0.55f) factor -= 0.025f;
+      else break;
+   }
+
+   trendingHeaderCategoryPad = categoryPad;
+   trendingHeaderCategoryGap = categoryGap;
+   trendingHeaderSortPad = sortPad;
+   trendingHeaderSortGap = sortGap;
+   trendingHeaderLayoutReady = 1;
 }
 
 static void refreshCurrentCategory(void)
@@ -1255,7 +1358,7 @@ static const char *getActivePickerName(int index)
 static const char *getActivePickerCode(int index)
 {
    if (home.regionPickerLanguage)
-      return index == APP_LANGUAGE_PT_BR ? "pt-BR" : "en";
+      return getAppLanguageCode(index);
    const ContentRegion *region = getContentRegionAt(index);
    return region ? region->code : "";
 }
@@ -1329,8 +1432,10 @@ static void updateLanguageConfirm(void)
       home.languageConfirmSelected = 1 - home.languageConfirmSelected;
 
    if (isPadButtonPressed(PAD_BTN_CROSS)) {
-      if (home.languageConfirmSelected == 0)
-         setApplicationLanguage(home.languagePending);
+      if (home.languageConfirmSelected == 0) {
+         if (setApplicationLanguage(home.languagePending) == 0)
+            refreshHomeLocalizedLabels();
+      }
       home.languageConfirmOpen = 0;
    }
 }
@@ -2880,11 +2985,13 @@ static void drawHomeSortPills(void)
    int playlistMode = homeSupportsPlaylistSort();
    int count = playlistMode ? PLAYLIST_SORT_COUNT : SORT_COUNT;
    int x = homeSortGroupLeft();
+   int pad = home.category < TREND_COUNT ? trendingHeaderSortPad : HOME_SORT_PAD_X;
+   int gap = home.category < TREND_COUNT ? trendingHeaderSortGap : HOME_SORT_GAP;
    int y = titleLabel.y + (titleLabel.tt.tex.h - HOME_SORT_HEIGHT) / 2;
    if (y < titleLabel.y) y = titleLabel.y;
    for (int i = 0; i < count; i++) {
       Label *label = playlistMode ? &playlistSortLabels[i] : &homeSortLabels[i];
-      int width = label->tt.tex.w + HOME_SORT_PAD_X * 2;
+      int width = label->tt.tex.w + pad * 2;
       int selected = playlistMode ? i == (int)home.playlistSort : i == (int)home.sort;
       uint32_t edge = selected ? activeTheme->accent : activeTheme->rowHighlight;
       uint32_t fill = selected ? activeTheme->rowHighlight : activeTheme->surface;
@@ -2899,7 +3006,7 @@ static void drawHomeSortPills(void)
       drawLabelAt(label, textX - 1, textY + 1); drawLabelAt(label, textX + 1, textY + 1);
       setLabelColor(label, selected ? 0xFFFFFFFF : 0xFFAAAAAA);
       drawLabelAt(label, textX, textY);
-      x += width + HOME_SORT_GAP;
+      x += width + gap;
    }
 }
 
@@ -3259,54 +3366,23 @@ static void drawLocalPlaylistTabs(void)
 static void drawTrendingTabs(void)
 {
    int x = titleLabel.x + titleLabel.tt.tex.w + 18;
-   int right = homeSortGroupLeft() - 14;
-   int gap = TREND_CHIP_GAP;
-   int pad = TREND_CHIP_PAD_X;
+   int pad = trendingHeaderCategoryPad;
+   int gap = trendingHeaderCategoryGap;
    int iconSize = TREND_CHIP_ICON_SIZE;
    for (int i = 0; i < TREND_COUNT; i++) refreshLabelScale(&trendingChipLabels[i]);
 
-   int active = home.category;
-   int first = 0, last = TREND_COUNT - 1;
-   int total = 0;
-   for (int i = first; i <= last; i++)
-      total += iconSize + TREND_CHIP_ICON_GAP + trendingChipLabels[i].tt.tex.w + 2 * pad +
-               (i > first ? gap : 0);
-   while (x + total > right && pad > 3) {
-      pad--;
-      total = 0;
-      for (int i = first; i <= last; i++)
-         total += iconSize + TREND_CHIP_ICON_GAP + trendingChipLabels[i].tt.tex.w + 2 * pad +
-                  (i > first ? gap : 0);
-   }
-   while (x + total > right && gap > 2) {
-      gap--;
-      total = 0;
-      for (int i = first; i <= last; i++)
-         total += iconSize + TREND_CHIP_ICON_GAP + trendingChipLabels[i].tt.tex.w + 2 * pad +
-                  (i > first ? gap : 0);
-   }
-   if (x + total > right) {
-      first = last = active;
-      pad = 3;
-      gap = 0;
-      iconSize = 0;
-      if (x + trendingChipLabels[active].tt.tex.w + 2 * pad > right) return;
-   }
-
    int chipY = titleLabel.y + (titleLabel.tt.tex.h - TREND_CHIP_HEIGHT) / 2;
    if (chipY < titleLabel.y - 4) chipY = titleLabel.y - 4;
-   for (int i = first; i <= last; i++) {
+   for (int i = 0; i < TREND_COUNT; i++) {
       Label *label = &trendingChipLabels[i];
-      int chipW = label->tt.tex.w + 2 * pad;
-      if (iconSize > 0) chipW += iconSize + TREND_CHIP_ICON_GAP;
+      int chipW = label->tt.tex.w + 2 * pad + iconSize + TREND_CHIP_ICON_GAP;
       int selected = home.category == i;
       fillGfxRectangleFixed(x, chipY, chipW, TREND_CHIP_HEIGHT,
                             selected ? activeTheme->rowHighlight : activeTheme->surface);
-      if (iconSize > 0)
-         drawHomeIconFixed(&trendingChipIcons[i], x + pad,
-                           chipY + (TREND_CHIP_HEIGHT - TREND_CHIP_ICON_SIZE) / 2,
-                           selected ? activeTheme->accent : activeTheme->textSecondary);
-      moveLabel(label, x + pad + (iconSize > 0 ? iconSize + TREND_CHIP_ICON_GAP : 0),
+      drawHomeIconFixed(&trendingChipIcons[i], x + pad,
+                        chipY + (TREND_CHIP_HEIGHT - iconSize) / 2,
+                        selected ? activeTheme->accent : activeTheme->textSecondary);
+      moveLabel(label, x + pad + iconSize + TREND_CHIP_ICON_GAP,
                 getCenteredLabelY(label, chipY, TREND_CHIP_HEIGHT));
       setLabelColor(label, selected ? activeTheme->accent : activeTheme->textPrimary);
       drawLabel(label);
@@ -5131,6 +5207,7 @@ static void drawHome(void)
    }
    // Draw the header after the grid so the category chips remain above any
    // selection glow that reaches into the header band.
+   fitTrendingHeaderLayout();
    drawLabel(&titleLabel);
    if (home.category < TREND_COUNT) drawTrendingTabs();
    else if (home.category == HOME_LIVE) drawLiveTabs();
@@ -5171,7 +5248,11 @@ static void drawHome(void)
    }
    if (updateDialogOpen) drawUpdateDialog();
    if (updateNotesOpen) drawUpdateNotes();
-   if (home.exitConfirmOpen) drawExitConfirmation();
+   if (home.exitConfirmOpen) {
+      setLabelText(&exitConfirmTitle, LOC(STR_EXIT_CRTUBE));
+      setLabelText(&exitConfirmMessage, LOC(STR_CONFIRM_CLOSE_APP));
+      drawExitConfirmation();
+   }
    if (playlistToastShownAt && getTimeUs() - playlistToastShownAt < 1000000ULL &&
        !home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen && !home.playlistDeleteConfirmOpen) {
       refreshLabelScale(&playlistToastLabel);

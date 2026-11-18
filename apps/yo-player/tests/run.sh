@@ -7,6 +7,8 @@ set -e
 here=$(cd "$(dirname "$0")" && pwd)
 app=$here/..
 libs=$app/../../libs
+
+python3 "$here/localization-format-test.py" "$app/src/localization.c"
 out=${TMPDIR:-/tmp}
 flags="-std=gnu11 -O1 -g -Wall -Wextra -Werror -Wno-misleading-indentation -fsanitize=address,undefined -pthread"
 includes="-I$here/host-include -I$app/include -I$libs/simple-lib-core/include"

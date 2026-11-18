@@ -435,8 +435,13 @@ void loadSettings(void)
    const char *appLanguage = findSettingValue(text, "app-language");
    applicationLanguage = APP_LANGUAGE_EN;
    if (appLanguage) {
-      if (strcmp(appLanguage, "pt-BR") == 0) applicationLanguage = APP_LANGUAGE_PT_BR;
-      else if (strcmp(appLanguage, "en") != 0)
+      for (int i = 0; i < APP_LANGUAGE_COUNT; i++) {
+         if (strcmp(appLanguage, getAppLanguageCode(i)) == 0) {
+            applicationLanguage = i;
+            break;
+         }
+      }
+      if (applicationLanguage == APP_LANGUAGE_EN && strcmp(appLanguage, "en") != 0)
          logWarn("[settings] unsupported app-language '%s', using en\n", appLanguage);
    }
    setAppLanguage(applicationLanguage);
@@ -925,7 +930,7 @@ int getApplicationLanguage(void)
 int setApplicationLanguage(int language)
 {
    if (language < 0 || language >= APP_LANGUAGE_COUNT) return -1;
-   const char *code = language == APP_LANGUAGE_PT_BR ? "pt-BR" : "en";
+   const char *code = getAppLanguageCode(language);
    if (rewriteSettingKey(SETTINGS_PATH, "app-language", code) != 0) {
       logWarn("[settings] could not persist app-language=%s\n", code);
       return -1;

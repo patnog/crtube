@@ -5,6 +5,9 @@
 typedef enum {
    APP_LANGUAGE_EN = 0,
    APP_LANGUAGE_PT_BR,
+   APP_LANGUAGE_ES,
+   APP_LANGUAGE_FR,
+   APP_LANGUAGE_DE,
    APP_LANGUAGE_COUNT
 } AppLanguageId;
 
@@ -525,6 +528,7 @@ typedef enum {
 void initLocalization(void);
 int getAppLanguage(void);
 int setAppLanguage(int language);
+const char *getAppLanguageCode(int language);
 const char *getAppLanguageName(int language);
 const char *localizeString(AppStringId id);
 
