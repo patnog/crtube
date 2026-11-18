@@ -2530,7 +2530,7 @@ static void initPlay(void)
    suppressPlaybackCrossUntilRelease = 0;
    const char *localizedOptionsNames[OPTIONS_COUNT] = { LOC(STR_QUALITY), LOC(STR_AUDIO), LOC(STR_SUBTITLES), LOC(STR_SUBS_LANGUAGE), LOC(STR_CHAPTERS), LOC(STR_CROP_TO_FILL), LOC(STR_AUTOPLAY), LOC(STR_DOWNLOAD), LOC(STR_PLAYBACK_SETTINGS) };
    for (int i = 0; i < OPTIONS_COUNT; i++)
-      initLabelRaw(&optionsLabels[i], &uiFont, 0, 0, 520, AUTO, playbackFontSize(27), activeTheme->textPrimary, TEXT_NOWRAP, localizedOptionsNames[i]);
+      initLabelRaw(&optionsLabels[i], &uiFont, 0, 0, state.screenW - 96, AUTO, playbackFontSize(27), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, localizedOptionsNames[i]);
    for (int i = 0; i < OPTIONS_DROPDOWN_MAX; i++)
       initLabelRaw(&optionsValueLabels[i], &uiFont, 0, 0, 360, AUTO, playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabelRaw(&optionsDownloadLabel, &uiFont, 0, 0, 150, AUTO, playbackFontSize(23), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_START));
@@ -3545,8 +3545,24 @@ static void handlePlaybackInput(void)
 
    updateCropPan();
 
+   // PLAY and PAUSE keep their legacy CROSS alias for every other screen and
+   // playback overlay. Here, while normal playback owns input, treat them as
+   // independent transport commands and suppress the CROSS toggle they alias.
+   PadButtonState remotePlayState = getPadRemoteButtonState(PAD_REMOTE_PLAY);
+   PadButtonState remotePauseState = getPadRemoteButtonState(PAD_REMOTE_PAUSE);
+   int remoteTransportActive = remotePlayState != PAD_BUTTON_STATE_UP ||
+                               remotePauseState != PAD_BUTTON_STATE_UP;
+
+   if (remotePlayState == PAD_BUTTON_STATE_PRESSED && isVideoPaused(state.player)) {
+      setVideoPaused(state.player, 0);
+      showControls();
+   } else if (remotePauseState == PAD_BUTTON_STATE_PRESSED && !isVideoPaused(state.player)) {
+      setVideoPaused(state.player, 1);
+      showFullPlaybackHud();
+   }
+
    if (state.isLive) {
-      if (isPadButtonPressed(PAD_BTN_CROSS)) {
+      if (!remoteTransportActive && isPadButtonPressed(PAD_BTN_CROSS)) {
          setVideoPaused(state.player, !isVideoPaused(state.player));
          if (isVideoPaused(state.player)) showFullPlaybackHud();
          else showControls();
@@ -3554,7 +3570,8 @@ static void handlePlaybackInput(void)
    } else {
       static uint64_t crossHoldStartUs;
       static int crossRestartTriggered;
-      PadButtonState crossState = getPadButtonState(PAD_BTN_CROSS);
+      PadButtonState crossState = remoteTransportActive ? PAD_BUTTON_STATE_UP :
+                                  getPadButtonState(PAD_BTN_CROSS);
 
       if (crossState == PAD_BUTTON_STATE_PRESSED) {
          crossHoldStartUs = nowUs;
@@ -4765,6 +4782,13 @@ static void drawPlaybackSettings(void)
    for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
       int rowY = y + 72 + i * PLAYBACK_SETTINGS_ROW_H;
       Label *name = &playbackSettingsLabels[i];
+      int nameRight = (i == 0) ? toggleX - 24 : x + panelW - 220;
+      int nameWidth = nameRight - (x + 40);
+      if (nameWidth < 8) nameWidth = 8;
+      if (name->width != nameWidth) {
+         name->width = nameWidth;
+         name->text[0] = '\0';
+      }
       refreshLabelScale(name);
       moveLabel(name, x + 40, getCenteredLabelY(name, rowY, PLAYBACK_SETTINGS_ROW_H));
       drawLabel(name);
@@ -4787,10 +4811,25 @@ static void drawPlaybackSettings(void)
          }
       } else {
          Label *value = &playbackSettingsValues[i];
+         if (i == 6) {
+            int labelRight = x + 40 + playbackSettingsLabels[i].tt.tex.w;
+            int valueRight = x + panelW - 52;
+            int available = valueRight - labelRight - 24;
+            if (available < 8) available = 8;
+            if (value->width != available) {
+               value->width = available;
+               value->text[0] = '\0';
+            }
+         }
          refreshLabelScale(value);
          int valueW = value->tt.tex.w + 24;
          if (valueW < 100) valueW = 100;
          int valueX = x + panelW - 40 - valueW;
+         if (i == 6) {
+            int labelRight = x + 40 + playbackSettingsLabels[i].tt.tex.w;
+            int minX = labelRight + 24;
+            if (valueX < minX) valueX = minX;
+         }
          int valueY = getCenteredLabelY(value, rowY, PLAYBACK_SETTINGS_ROW_H);
          if (i == playbackSettingsSelected)
             fillGfxRoundedRectangleFixed(valueX, valueY - 5, valueW, value->tt.tex.h + 10,
@@ -5064,14 +5103,24 @@ static void drawPlaybackOptions(void)
    int panelH = 70 + OPTIONS_COUNT * rowH;
    int x = (state.screenW - panelW) / 2;
    int y = (state.screenH - panelH) / 2;
-   int valueFontSize = (int)(optionsLabels[3].size * playbackFontScale + 0.5f);
+   int valueFontSize = (int)(playbackFontSize(27) * playbackFontScale + 0.5f);
    int twoSpaceGap = (int)(measureFontText(&uiFont, valueFontSize, "  ") + 0.5f);
-   int valueX = x + 38 + optionsLabels[3].tt.tex.w + twoSpaceGap;
    int arrowLeft = x + panelW - 44 - 7;
    int valueRight = arrowLeft - twoSpaceGap;
-   int valueWidth = valueRight - valueX;
+   int valueWidth = valueRight - (x + 38 + twoSpaceGap);
    if (valueWidth < 8) valueWidth = 8;
    updateOptionsCurrentValues(valueWidth);
+   // Each value gets the space left by its own row label, not by the widest
+   // label in the menu. This is especially important for Audio and subtitles.
+   for (int i = 0; i < OPTIONS_COUNT; i++) {
+      int rowValueIndex = i == 1 ? 1 : i == 3 ? 2 : -1;
+      if (rowValueIndex >= 0) {
+         int available = valueRight - (x + 38 + optionsLabels[i].tt.tex.w + twoSpaceGap);
+         if (available < 8) available = 8;
+         setOptionsCurrentValue(&optionsCurrentValueLabels[rowValueIndex],
+                                optionsCurrentValueLabels[rowValueIndex].text, available);
+      }
+   }
 
    // Audio and subtitle names must use the available value area before being
    // shortened. At 1.5x, Portuguese labels otherwise get ellipsized too early.
@@ -5138,8 +5187,10 @@ static void drawPlaybackOptions(void)
             if (qualityX < x + 38) qualityX = x + 38;
             drawLabelAt(value, qualityX, getCenteredLabelY(value, rowY, rowH));
          } else {
-            int valueXAligned = arrowLeft - value->tt.tex.w - 12;
-            if (valueXAligned < valueX) valueXAligned = valueX;
+            int labelRight = x + 38 + optionsLabels[i].tt.tex.w;
+            int availableLeft = labelRight + twoSpaceGap;
+            int valueXAligned = valueRight - value->tt.tex.w;
+            if (valueXAligned < availableLeft) valueXAligned = availableLeft;
             drawLabelAt(value, valueXAligned, getCenteredLabelY(value, rowY, rowH));
          }
       }
