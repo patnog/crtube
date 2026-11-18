@@ -1,5 +1,6 @@
 // Search page: persistent recent queries before the first search, then the existing VideoGrid results.
 #include "app-config.h"
+#include "dbg.h"
 #include "screens/search.h"
 #include "screens/home.h"
 #include "sidebar.h"
@@ -15,6 +16,7 @@
 #include "ui/loading-indicator.h"
 
 #include "gfx.h"
+#include "image-loader.h"
 #include "theme.h"
 #include "pad.h"
 #include "thread.h"
@@ -25,8 +27,11 @@
 #include "osk-input.h"
 #include "string-utilities.h"
 #include "path.h"                // MAX_PATH_LEN for local download paths
+#include "vfs.h"
+#include "dbg.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #define MARGIN_X          80
 #define HEADER_Y          34
@@ -43,6 +48,12 @@
 #define HINT_ROW_GAP      8
 #define GRID_BOTTOM_GAP  24
 #define MAX_HINT_ROWS     2
+#define CHANNEL_INFO_MARGIN 72
+#define CHANNEL_INFO_PANEL_PAD 28
+#define CHANNEL_AVATAR_CAP (256 * 1024)
+#define CHANNEL_AVATAR_CACHE_DIR "/dev_hdd0/tmp/crtube/channel-avatar-cache"
+#define CHANNEL_AVATAR_CACHE_LIMIT (5ULL * 1024ULL * 1024ULL)
+#define CHANNEL_INFO_TEXT_SIZE 24
 static const char *SortNames[SORT_COUNT] = { "Relevance", "Views", "Newest" };
 static const char *ChannelSortNames[CHANNEL_SORT_COUNT] = { "Latest", "Popular", "Oldest" };
 
@@ -123,6 +134,28 @@ static Label       historyLabels[MAX_SEARCH_HISTORY];
 static Icon        searchIcon;
 static GfxTexture  searchCrossGlyph;
 static ButtonHints hints;
+static TextTexture channelInfoTexture;
+static GfxTexture channelAvatarTexture;
+static Label channelAvatarNameLabel;
+static char channelAvatarPath[192];
+static int channelAvatarRequested;
+static int channelAvatarLoaded;
+static int channelAvatarDecodeAttempted;
+static Label channelInfoPageLabel;
+static int channelInfoVisible;
+static int channelInfoPage;
+static ChannelAboutInfo channelInfoData;
+static ChannelAboutInfo channelInfoWorkerData;
+static char channelInfoFallbackAvatarUrl[512];
+static HttpRequestGroup channelInfoRequestGroup;
+static sys_ppu_thread_t channelInfoWorkerTid;
+static volatile int channelInfoWorkerDone;
+static int channelInfoWorkerActive;
+static int channelInfoWorkerResult;
+static int channelInfoLoaded;
+static char channelInfoWorkerChannelId[32];
+static char channelInfoWorkerFallbackAvatarUrl[512];
+static char channelInfoAttemptedChannelId[32];
 static int crossHint = -1, squareHint = -1, triangleHint = -1;
 static int selectHint = -1, downloadHint = -1, settingsHint = -1;
 static int sortHint = -1, refreshHint = -1, clearHistoryHint = -1;
@@ -170,7 +203,10 @@ static void updateSearchHints(void)
    if (selectHint >= 0) setButtonHintShown(&hints, selectHint, !search.landing);
    if (downloadHint >= 0) setButtonHintShown(&hints, downloadHint, !search.landing && !search.fieldFocused);
    if (settingsHint >= 0) setButtonHintShown(&hints, settingsHint, !search.landing);
-   if (sortHint >= 0) setButtonHintShown(&hints, sortHint, !search.landing && !search.channelId[0]);
+   if (sortHint >= 0) {
+      setButtonHintShown(&hints, sortHint, !search.landing && (!search.channelId[0] || search.channelName[0]));
+      setButtonHintCaption(&hints, sortHint, search.channelId[0] ? "Description" : "Sort");
+   }
    if (channelPrevHint >= 0) setButtonHintShown(&hints, channelPrevHint, !search.landing && search.channelId[0]);
    if (channelNextHint >= 0) setButtonHintShown(&hints, channelNextHint, !search.landing && search.channelId[0]);
    if (refreshHint >= 0) setButtonHintShown(&hints, refreshHint, !search.landing);
@@ -262,6 +298,14 @@ static void cacheChannelFeed(const char *channelId, int category, int sort, cons
    cache->results.count = results->count;
    strCopy(cache->results.continuation, sizeof cache->results.continuation, results->continuation);
    strCopy(cache->results.channelName, sizeof cache->results.channelName, results->channelName);
+   strCopy(cache->results.channelDescription, sizeof cache->results.channelDescription, results->channelDescription);
+   strCopy(cache->results.channelSubscribers, sizeof cache->results.channelSubscribers, results->channelSubscribers);
+   strCopy(cache->results.channelVideoCount, sizeof cache->results.channelVideoCount, results->channelVideoCount);
+   strCopy(cache->results.channelViewCount, sizeof cache->results.channelViewCount, results->channelViewCount);
+   strCopy(cache->results.channelCountry, sizeof cache->results.channelCountry, results->channelCountry);
+   strCopy(cache->results.channelVanityUrl, sizeof cache->results.channelVanityUrl, results->channelVanityUrl);
+   strCopy(cache->results.channelJoinedDate, sizeof cache->results.channelJoinedDate, results->channelJoinedDate);
+   strCopy(cache->results.channelAvatarUrl, sizeof cache->results.channelAvatarUrl, results->channelAvatarUrl);
    memcpy(cache->results.sortTokens, results->sortTokens, sizeof cache->results.sortTokens);
    memcpy(cache->results.items, results->items, (size_t)results->count * sizeof results->items[0]);
    strCopy(cache->channelId, sizeof cache->channelId, channelId);
@@ -271,6 +315,216 @@ static void cacheChannelFeed(const char *channelId, int category, int sort, cons
    cache->savedAtUs = getTimeUs();
    __sync_synchronize();
    cache->valid = 1;
+}
+
+static int channelAvatarCachePath(const char *channelId, char *path, int capacity)
+{
+   if (!channelId || !channelId[0] || !path || capacity <= 0) return -1;
+   int n = snprintf(path, capacity, CHANNEL_AVATAR_CACHE_DIR "/channel-%s.jpg", channelId);
+   return n > 0 && n < capacity ? 0 : -1;
+}
+
+static int channelAvatarCacheValid(const char *path)
+{
+   VfsStat stat;
+   return path && path[0] && statPath(path, &stat) == 0 && !stat.isDir && stat.size > 0;
+}
+
+// Keep the dedicated avatar cache under 5 MiB. When space is needed, remove
+// the least-recently-written image first; the currently replaced channel is excluded.
+static int makeChannelAvatarCacheRoom(uint64_t incomingBytes, const char *keepPath)
+{
+   if (incomingBytes > CHANNEL_AVATAR_CACHE_LIMIT) return 0;
+   makeDir("/dev_hdd0/tmp");
+   makeDir("/dev_hdd0/tmp/crtube");
+   makeDir(CHANNEL_AVATAR_CACHE_DIR);
+   for (;;) {
+      VfsDir dir;
+      char name[256], path[256], oldestPath[256];
+      VfsEntryType type;
+      uint64_t total = 0, oldestTime = UINT64_MAX;
+      oldestPath[0] = 0;
+      if (openDir(CHANNEL_AVATAR_CACHE_DIR, &dir) != 0) return 0;
+      while (readDir(&dir, name, sizeof name, &type) > 0) {
+         size_t length = strlen(name);
+         if (type != VFS_ENTRY_FILE || length < 5 || strcmp(name + length - 4, ".jpg") != 0) continue;
+         snprintf(path, sizeof path, "%s/%s", CHANNEL_AVATAR_CACHE_DIR, name);
+         VfsStat stat;
+         if (statPath(path, &stat) != 0 || stat.isDir) continue;
+         if (keepPath && strcmp(path, keepPath) == 0) continue;
+         total += stat.size;
+         if (stat.mtime < oldestTime) {
+            oldestTime = stat.mtime;
+            strCopy(oldestPath, sizeof oldestPath, path);
+         }
+      }
+      closeDir(&dir);
+      if (total + incomingBytes <= CHANNEL_AVATAR_CACHE_LIMIT) return 1;
+      if (!oldestPath[0] || deleteFile(oldestPath) != 0) return 0;
+   }
+}
+
+
+static void migrateLegacyChannelAvatarCache(const char *channelId, const char *newPath)
+{
+   if (!channelId || !channelId[0] || !newPath || channelAvatarCacheValid(newPath)) return;
+   char oldPath[160];
+   int n = snprintf(oldPath, sizeof oldPath, "/dev_hdd0/tmp/crtube/channel-%s.jpg", channelId);
+   if (n <= 0 || n >= (int)sizeof oldPath || !channelAvatarCacheValid(oldPath)) return;
+   VfsStat stat;
+   if (statPath(oldPath, &stat) == 0 && makeChannelAvatarCacheRoom((uint64_t)stat.size, newPath)) {
+      if (renamePath(oldPath, newPath) != 0)
+         logWarn("[search] could not migrate legacy channel avatar cache\n");
+   }
+}
+
+static void fetchChannelAvatar(const char *url, const char *channelId)
+{
+   if (!url || !url[0] || !channelId || !channelId[0] || isHttpRequestGroupCancelled()) return;
+   char path[192];
+   if (channelAvatarCachePath(channelId, path, sizeof path) != 0 || channelAvatarCacheValid(path)) return;
+   uint8_t *jpeg = (uint8_t *)malloc(CHANNEL_AVATAR_CAP);
+   if (!jpeg) return;
+   HttpHeader headers[] = { { "User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36" },
+                            { "Accept-Encoding", "identity" } };
+   int length = 0, status = 0;
+   int rc = fetchHttp("GET", url, headers, 2, NULL, 0, (char *)jpeg, CHANNEL_AVATAR_CAP, &length, &status);
+   if (rc == 0 && status == 200 && length > 0 && length < CHANNEL_AVATAR_CAP - 1 &&
+       !isHttpRequestGroupCancelled() && makeChannelAvatarCacheRoom((uint64_t)length, path)) {
+      if (writeFile(path, (const char *)jpeg, (uint64_t)length) != 0)
+         logWarn("[search] could not cache channel avatar\n");
+   } else if (rc < 0 || status != 200) {
+      logWarn("[search] channel avatar fetch failed rc=%d status=%d\n", rc, status);
+   }
+   free(jpeg);
+}
+
+static void copyChannelAboutFields(ChannelAboutInfo *destination, const SearchResults *source)
+{
+   if (!destination || !source) return;
+   if (source->channelName[0]) strCopy(destination->channelName, sizeof destination->channelName, source->channelName);
+   if (source->channelDescription[0]) strCopy(destination->channelDescription, sizeof destination->channelDescription, source->channelDescription);
+   if (source->channelSubscribers[0]) strCopy(destination->channelSubscribers, sizeof destination->channelSubscribers, source->channelSubscribers);
+   if (source->channelVideoCount[0]) strCopy(destination->channelVideoCount, sizeof destination->channelVideoCount, source->channelVideoCount);
+   if (source->channelViewCount[0]) strCopy(destination->channelViewCount, sizeof destination->channelViewCount, source->channelViewCount);
+   if (source->channelCountry[0]) strCopy(destination->channelCountry, sizeof destination->channelCountry, source->channelCountry);
+   if (source->channelJoinedDate[0]) strCopy(destination->channelJoinedDate, sizeof destination->channelJoinedDate, source->channelJoinedDate);
+   if (source->channelAvatarUrl[0]) strCopy(destination->channelAvatarUrl, sizeof destination->channelAvatarUrl, source->channelAvatarUrl);
+}
+
+static void channelInfoFetchWorker(uint64_t arg)
+{
+   (void)arg;
+   setHttpRequestGroup(&channelInfoRequestGroup);
+   channelInfoWorkerResult = getChannelAboutInfo(channelInfoWorkerChannelId, &channelInfoWorkerData);
+   if (!channelInfoWorkerData.channelAvatarUrl[0])
+      strCopy(channelInfoWorkerData.channelAvatarUrl, sizeof channelInfoWorkerData.channelAvatarUrl,
+              channelInfoWorkerFallbackAvatarUrl);
+   if (channelInfoWorkerData.channelAvatarUrl[0])
+      fetchChannelAvatar(channelInfoWorkerData.channelAvatarUrl, channelInfoWorkerChannelId);
+   setHttpRequestGroup(NULL);
+   __sync_synchronize();
+   channelInfoWorkerDone = 1;
+   exitThread();
+}
+
+static void startChannelInfoWorker(void)
+{
+   if (channelInfoWorkerActive || !search.channelId[0] ||
+       strcmp(channelInfoAttemptedChannelId, search.channelId) == 0) return;
+   strCopy(channelInfoWorkerChannelId, sizeof channelInfoWorkerChannelId, search.channelId);
+   strCopy(channelInfoWorkerFallbackAvatarUrl, sizeof channelInfoWorkerFallbackAvatarUrl,
+           channelInfoFallbackAvatarUrl);
+   strCopy(channelInfoAttemptedChannelId, sizeof channelInfoAttemptedChannelId, search.channelId);
+   memset(&channelInfoWorkerData, 0, sizeof channelInfoWorkerData);
+   channelInfoRequestGroup.cancelled = 0;
+   channelInfoWorkerDone = 0;
+   channelInfoWorkerResult = -1;
+   channelInfoWorkerActive = spawnJoinableThread(&channelInfoWorkerTid, channelInfoFetchWorker, 0,
+                              THREAD_PRIORITY_LOW, THREAD_STACK_SIZE_64KB, "yt-channel-about") == 0;
+}
+
+/* Channel info is laid out against the visible screen bounds. Display-target
+ * drawing applies UI scaling around the screen center, so convert the desired
+ * visible panel rectangle back to logical coordinates before drawing it. */
+static void getChannelInfoPanelRect(int *x, int *y, int *w, int *h)
+{
+   float scale = search.uiScale > 1.0f ? search.uiScale : 1.0f;
+   int visibleW = search.screenW - 2 * CHANNEL_INFO_MARGIN;
+   int visibleH = search.screenH - 2 * CHANNEL_INFO_MARGIN;
+   int visibleX = CHANNEL_INFO_MARGIN;
+   int visibleY = CHANNEL_INFO_MARGIN;
+   float centerX = search.screenW * 0.5f;
+   float centerY = search.screenH * 0.5f;
+
+   *x = (int)(centerX + ((float)visibleX - centerX) / scale + 0.5f);
+   *y = (int)(centerY + ((float)visibleY - centerY) / scale + 0.5f);
+   *w = (int)(visibleW / scale + 0.5f);
+   *h = (int)(visibleH / scale + 0.5f);
+}
+
+static void getChannelInfoTextRect(int *x, int *y, int *w, int *h)
+{
+   int panelX, panelY, panelW, panelH;
+   getChannelInfoPanelRect(&panelX, &panelY, &panelW, &panelH);
+
+   *x = panelX + CHANNEL_INFO_PANEL_PAD;
+   *y = panelY + CHANNEL_INFO_PANEL_PAD + 76 + 16;
+   *w = panelW - 2 * CHANNEL_INFO_PANEL_PAD;
+   *h = panelH - (*y - panelY) - CHANNEL_INFO_PANEL_PAD;
+   if (*w < 1) *w = 1;
+   if (*h < 1) *h = 1;
+}
+
+static int channelInfoVisibleCoordX(int logicalX)
+{
+   float scale = search.uiScale > 1.0f ? search.uiScale : 1.0f;
+   return (int)(search.screenW * 0.5f +
+                (logicalX - search.screenW * 0.5f) * scale + 0.5f);
+}
+
+static int channelInfoVisibleCoordY(int logicalY)
+{
+   float scale = search.uiScale > 1.0f ? search.uiScale : 1.0f;
+   return (int)(search.screenH * 0.5f +
+                (logicalY - search.screenH * 0.5f) * scale + 0.5f);
+}
+
+static int appendChannelInfoRow(char *content, int capacity, int *used,
+                                 const char *label, const char *value)
+{
+   if (!value || !value[0] || *used >= capacity - 1) return 0;
+   int n = snprintf(content + *used, capacity - *used, "%s: %s\n\n", label, value);
+   if (n > 0) *used += n < capacity - *used ? n : capacity - *used - 1;
+   return n > 0;
+}
+
+static void renderChannelInfoText(void)
+{
+   char content[6144];
+   const char *description = channelInfoData.channelDescription;
+   if (!description[0])
+      description = channelInfoWorkerActive ? "Loading channel information..." : "No description available.";
+   int used = snprintf(content, sizeof content, "DESCRIPTION\n\n%s\n\n\nMORE INFORMATION\n\n",
+                       description);
+   if (used < 0) used = 0;
+   if (used >= (int)sizeof content) used = sizeof content - 1;
+   int infoRows = 0;
+   infoRows += appendChannelInfoRow(content, sizeof content, &used, "Subscribers", channelInfoData.channelSubscribers);
+   infoRows += appendChannelInfoRow(content, sizeof content, &used, "Videos", channelInfoData.channelVideoCount);
+   infoRows += appendChannelInfoRow(content, sizeof content, &used, "Views", channelInfoData.channelViewCount);
+   infoRows += appendChannelInfoRow(content, sizeof content, &used, "Country", channelInfoData.channelCountry);
+   infoRows += appendChannelInfoRow(content, sizeof content, &used, "Joined", channelInfoData.channelJoinedDate);
+   if (infoRows == 0 && used < (int)sizeof content - 1)
+      snprintf(content + used, sizeof content - used, "No additional information available.");
+   if (channelInfoTexture.valid) freeTextTexture(&channelInfoTexture);
+   // Use the inverse-scaled logical content width. The display transform then
+   // produces the intended visible width at both UI scales and aspect ratios.
+   int textX, textY, textW, textH;
+   getChannelInfoTextRect(&textX, &textY, &textW, &textH);
+   (void)textX; (void)textY; (void)textH;
+   renderFontRaw(&channelInfoTexture, &uiFont, CHANNEL_INFO_TEXT_SIZE, content,
+                 activeTheme->textPrimary, textW, TEXT_WRAP);
 }
 
 static int searchFetch(const char *token, SearchResults *out, void *user)
@@ -411,6 +665,25 @@ static void enterChannel(const SearchResult *item)
    strCopy(search.channelId, sizeof search.channelId, item->channelId);
    strCopy(search.channelName, sizeof search.channelName,
            item->author[0] ? item->author : "Channel");
+   cancelImagePriorityAsync();
+   if (channelAvatarTexture.offset) freeGfxTexture(&channelAvatarTexture);
+   channelAvatarTexture.offset = 0;
+   if (channelInfoTexture.valid) freeTextTexture(&channelInfoTexture);
+   memset(&channelInfoData, 0, sizeof channelInfoData);
+   if (!channelInfoWorkerActive) memset(&channelInfoWorkerData, 0, sizeof channelInfoWorkerData);
+   strCopy(channelInfoData.channelName, sizeof channelInfoData.channelName, search.channelName);
+   channelInfoFallbackAvatarUrl[0] = 0;
+   if (!channelInfoWorkerActive) {
+      channelInfoWorkerChannelId[0] = 0;
+      channelInfoWorkerFallbackAvatarUrl[0] = 0;
+   }
+   channelInfoAttemptedChannelId[0] = 0;
+   channelInfoLoaded = 0;
+   channelAvatarRequested = 0;
+   channelAvatarLoaded = 0;
+   channelAvatarDecodeAttempted = 0;
+   channelAvatarCachePath(search.channelId, channelAvatarPath, sizeof channelAvatarPath);
+   migrateLegacyChannelAvatarCache(search.channelId, channelAvatarPath);
    search.channelSort = CHANNEL_SORT_LATEST;
    search.channelCategory = 0;
    search.channelSortToken[0] = 0;
@@ -465,6 +738,23 @@ static void initSearch(void)
    pendingSortValid = 0;
    squarePressedAt = 0;
    historySquarePressedAt = 0;
+   channelInfoVisible = 0;
+   channelInfoPage = 0;
+   if (channelInfoTexture.valid) freeTextTexture(&channelInfoTexture);
+   if (channelAvatarTexture.offset) freeGfxTexture(&channelAvatarTexture);
+   channelAvatarRequested = 0;
+   channelAvatarLoaded = 0;
+   channelAvatarDecodeAttempted = 0;
+   channelAvatarPath[0] = 0;
+   memset(&channelInfoData, 0, sizeof channelInfoData);
+   memset(&channelInfoWorkerData, 0, sizeof channelInfoWorkerData);
+   channelInfoFallbackAvatarUrl[0] = 0;
+   channelInfoWorkerChannelId[0] = 0;
+   channelInfoWorkerFallbackAvatarUrl[0] = 0;
+   channelInfoAttemptedChannelId[0] = 0;
+   channelInfoWorkerDone = 0;
+   channelInfoWorkerActive = 0;
+   channelInfoLoaded = 0;
    historyClearConfirmOpen = 0;
    search.landing = pendingLanding && !pendingIsChannel;
    search.fieldFocused = 0;
@@ -476,6 +766,9 @@ static void initSearch(void)
       strCopy(search.channelId, sizeof search.channelId, pendingChannel.channelId);
       strCopy(search.channelName, sizeof search.channelName,
               pendingChannel.author[0] ? pendingChannel.author : "Channel");
+      channelAvatarCachePath(search.channelId, channelAvatarPath, sizeof channelAvatarPath);
+      migrateLegacyChannelAvatarCache(search.channelId, channelAvatarPath);
+      strCopy(channelInfoData.channelName, sizeof channelInfoData.channelName, search.channelName);
       search.channelSort = CHANNEL_SORT_LATEST;
       search.channelCategory = pendingChannelCategory;
       if (search.channelCategory < 0 || search.channelCategory >= 4) search.channelCategory = 0;
@@ -485,6 +778,17 @@ static void initSearch(void)
    }
 
    uiFont = openSystemFont(FONT_POP);
+   initLabel(&channelInfoPageLabel, &uiFont, 0, 0, 100, AUTO, 18, activeTheme->textSecondary, TEXT_NOWRAP, "1/1");
+   setLabelScaleWithUi(&channelInfoPageLabel, 1);
+   int panelX, panelY, panelW, panelH;
+   getChannelInfoPanelRect(&panelX, &panelY, &panelW, &panelH);
+   (void)panelX; (void)panelY; (void)panelH;
+   int channelNameWidth = panelW - 2 * CHANNEL_INFO_PANEL_PAD - 76 - 20;
+   if (channelNameWidth < 1) channelNameWidth = 1;
+   initLabel(&channelAvatarNameLabel, &uiFont, 0, 0, channelNameWidth, AUTO, 26,
+             activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS,
+             search.channelName[0] ? search.channelName : "Channel");
+   setLabelScaleWithUi(&channelAvatarNameLabel, 1);
    int sortPad = (int)(4 * search.uiScale + 0.5f);
    int sortGap = (int)(3 * search.uiScale + 0.5f);
    int sortGroupWidth = 0;
@@ -645,6 +949,56 @@ static void updateSearch(void)
 {
    updateDownloadOverlay();
    if (isDownloadSpacePromptOpen() || oskInputActive()) return;
+   if (channelInfoWorkerActive && channelInfoWorkerDone) {
+      joinThread(channelInfoWorkerTid);
+      channelInfoWorkerActive = 0;
+      if (channelInfoWorkerResult == 0 && strcmp(channelInfoWorkerChannelId, search.channelId) == 0) {
+         if (channelInfoWorkerData.channelName[0]) strCopy(channelInfoData.channelName, sizeof channelInfoData.channelName, channelInfoWorkerData.channelName);
+         if (channelInfoWorkerData.channelDescription[0]) strCopy(channelInfoData.channelDescription, sizeof channelInfoData.channelDescription, channelInfoWorkerData.channelDescription);
+         if (channelInfoWorkerData.channelSubscribers[0]) strCopy(channelInfoData.channelSubscribers, sizeof channelInfoData.channelSubscribers, channelInfoWorkerData.channelSubscribers);
+         if (channelInfoWorkerData.channelVideoCount[0]) strCopy(channelInfoData.channelVideoCount, sizeof channelInfoData.channelVideoCount, channelInfoWorkerData.channelVideoCount);
+         if (channelInfoWorkerData.channelViewCount[0]) strCopy(channelInfoData.channelViewCount, sizeof channelInfoData.channelViewCount, channelInfoWorkerData.channelViewCount);
+         if (channelInfoWorkerData.channelCountry[0]) strCopy(channelInfoData.channelCountry, sizeof channelInfoData.channelCountry, channelInfoWorkerData.channelCountry);
+         if (channelInfoWorkerData.channelJoinedDate[0]) strCopy(channelInfoData.channelJoinedDate, sizeof channelInfoData.channelJoinedDate, channelInfoWorkerData.channelJoinedDate);
+         if (channelInfoWorkerData.channelAvatarUrl[0]) strCopy(channelInfoData.channelAvatarUrl, sizeof channelInfoData.channelAvatarUrl, channelInfoWorkerData.channelAvatarUrl);
+         channelInfoLoaded = 1;
+         renderChannelInfoText();
+      } else if (strcmp(channelInfoWorkerChannelId, search.channelId) == 0) {
+         channelInfoLoaded = 1;
+      }
+   }
+   if (channelInfoVisible) {
+      if (!channelInfoLoaded && !channelInfoWorkerActive) startChannelInfoWorker();
+      if (!channelAvatarDecodeAttempted && !channelAvatarRequested && !channelAvatarLoaded &&
+          channelAvatarPath[0] && channelAvatarCacheValid(channelAvatarPath)) {
+         channelAvatarDecodeAttempted = 1;
+         if (requestImagePriorityAsync(channelAvatarPath) == 0) channelAvatarRequested = 1;
+      }
+      if (channelAvatarRequested && !channelAvatarLoaded) {
+         ImageBuffer decoded = { 0, 0, 0, 0 };
+         int imageResult = pollImagePriorityAsync(&decoded);
+         if (imageResult > 0) {
+            channelAvatarTexture = uploadImageBuffer(&decoded);
+            freeImageBuffer(&decoded);
+            channelAvatarLoaded = channelAvatarTexture.offset != 0;
+            channelAvatarRequested = 0;
+         } else if (imageResult < 0) channelAvatarRequested = 0;
+      }
+      if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_L2)) {
+         channelInfoVisible = 0;
+         return;
+      }
+      int textX, textY, textW, viewH;
+      getChannelInfoTextRect(&textX, &textY, &textW, &viewH);
+      (void)textX; (void)textY; (void)textW;
+      int pageCount = channelInfoTexture.tex.h > 0 ? (channelInfoTexture.tex.h + viewH - 1) / viewH : 1;
+      if (isPadButtonPressed(PAD_BTN_DOWN) || isPadButtonPressed(PAD_BTN_RIGHT)) {
+         if (channelInfoPage + 1 < pageCount) channelInfoPage++;
+      } else if (isPadButtonPressed(PAD_BTN_UP) || isPadButtonPressed(PAD_BTN_LEFT)) {
+         if (channelInfoPage > 0) channelInfoPage--;
+      }
+      return;
+   }
    if (historyClearConfirmOpen) {
       if (isPadButtonPressed(PAD_BTN_CIRCLE)) { historyClearConfirmOpen = 0; return; }
       if (isPadButtonPressed(PAD_BTN_CROSS)) { clearHistory(); historyClearConfirmOpen = 0; return; }
@@ -767,10 +1121,24 @@ static void updateSearch(void)
       reload(1);
       return;
    }
-   if (isPadButtonPressed(PAD_BTN_L2) && !search.channelId[0]) {
-      search.sort = (SortOrder)((search.sort + 1) % SORT_COUNT);
-      setSortPreference(SORT_PREF_SEARCH, (int)search.sort);
-      reload(0);
+   if (isPadButtonPressed(PAD_BTN_L2)) {
+      if (search.channelId[0]) {
+         const SearchResults *results = gridResults(&search.grid);
+         if (results) {
+            memset(&channelInfoData, 0, sizeof channelInfoData);
+            strCopy(channelInfoData.channelName, sizeof channelInfoData.channelName, search.channelName);
+            copyChannelAboutFields(&channelInfoData, results);
+            strCopy(channelInfoFallbackAvatarUrl, sizeof channelInfoFallbackAvatarUrl, results->channelAvatarUrl);
+            channelInfoVisible = 1;
+            channelInfoPage = 0;
+            startChannelInfoWorker();
+            renderChannelInfoText();
+         }
+      } else {
+         search.sort = (SortOrder)((search.sort + 1) % SORT_COUNT);
+         setSortPreference(SORT_PREF_SEARCH, (int)search.sort);
+         reload(0);
+      }
       return;
    }
 
@@ -1137,6 +1505,59 @@ static void drawSearch(void)
       drawLabel(&historyConfirmTitle);
       drawLabel(&historyConfirmFooter);
    }
+   if (channelInfoVisible) {
+      fillGfxRectangle(0, 0, search.screenW, search.screenH, activeTheme->scrim);
+      int panelX, panelY, panelW, panelH;
+      getChannelInfoPanelRect(&panelX, &panelY, &panelW, &panelH);
+      fillGfxRoundedRectangle(panelX, panelY, panelW, panelH, 14, activeTheme->appBg);
+      fillGfxRectangle(panelX, panelY, panelW, 4, activeTheme->accent);
+
+      const int avatarSize = 76;
+      int avatarX = panelX + CHANNEL_INFO_PANEL_PAD;
+      int avatarY = panelY + CHANNEL_INFO_PANEL_PAD;
+      if (channelAvatarLoaded) {
+         drawGfxTexture(avatarX, avatarY, avatarSize, avatarSize, channelAvatarTexture,
+                        0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFF, GFX_FILTER_LINEAR);
+      } else {
+         fillGfxRoundedRectangle(avatarX, avatarY, avatarSize, avatarSize, 8, activeTheme->surface);
+      }
+
+      setLabelText(&channelAvatarNameLabel, search.channelName[0] ? search.channelName : "Channel");
+      setLabelColor(&channelAvatarNameLabel, activeTheme->textPrimary);
+      moveLabel(&channelAvatarNameLabel,
+                channelInfoVisibleCoordX(avatarX + avatarSize + 20),
+                channelInfoVisibleCoordY(avatarY +
+                   (avatarSize - channelAvatarNameLabel.tt.tex.h / (search.uiScale > 1.0f ? search.uiScale : 1.0f)) / 2));
+      drawLabel(&channelAvatarNameLabel);
+
+      int textX, textY, textW, viewH;
+      getChannelInfoTextRect(&textX, &textY, &textW, &viewH);
+      int pageCount = channelInfoTexture.tex.h > 0 ?
+                      (channelInfoTexture.tex.h + viewH - 1) / viewH : 1;
+      if (channelInfoPage >= pageCount) channelInfoPage = pageCount - 1;
+      int pageTop = channelInfoPage * viewH;
+      int visibleH = channelInfoTexture.tex.h - pageTop;
+      if (visibleH > viewH) visibleH = viewH;
+      if (visibleH > 0) {
+         float top = (float)pageTop / channelInfoTexture.tex.h;
+         float bottom = (float)(pageTop + visibleH) / channelInfoTexture.tex.h;
+         int drawW = channelInfoTexture.tex.w;
+         if (drawW > textW) drawW = textW;
+         drawGfxTexture(textX, textY, drawW, visibleH,
+                        channelInfoTexture.tex, 0.0f, top, 1.0f, bottom, 0xFFFFFFFF, GFX_FILTER_NEAREST);
+      }
+
+      char pageText[24];
+      snprintf(pageText, sizeof pageText, "%d/%d", channelInfoPage + 1, pageCount);
+      setLabelText(&channelInfoPageLabel, pageText);
+      refreshLabelScale(&channelInfoPageLabel);
+      setLabelColor(&channelInfoPageLabel, activeTheme->textSecondary);
+      moveLabel(&channelInfoPageLabel,
+                channelInfoVisibleCoordX(panelX + panelW - CHANNEL_INFO_PANEL_PAD) -
+                   channelInfoPageLabel.tt.tex.w,
+                channelInfoVisibleCoordY(panelY + 12));
+      drawLabel(&channelInfoPageLabel);
+   }
    drawSidebar();
 }
 
@@ -1209,6 +1630,21 @@ static void resumeSearch(void)
 static void termSearch(void)
 {
    termVideoGrid(&search.grid);
+   if (channelInfoWorkerActive) {
+      cancelHttpRequestGroup(&channelInfoRequestGroup);
+      joinThread(channelInfoWorkerTid);
+      channelInfoWorkerActive = 0;
+   }
+   cancelImagePriorityAsync();
+   if (channelInfoTexture.valid) freeTextTexture(&channelInfoTexture);
+   if (channelAvatarTexture.offset) freeGfxTexture(&channelAvatarTexture);
+   channelAvatarTexture.offset = 0;
+   freeLabel(&channelAvatarNameLabel);
+   channelAvatarRequested = 0;
+   channelAvatarLoaded = 0;
+   channelAvatarDecodeAttempted = 0;
+   channelInfoVisible = 0;
+   freeLabel(&channelInfoPageLabel);
    termButtonHints(&hints);
    freeLabel(&queryLabel);
    freeLabel(&queryPromptPrefix);

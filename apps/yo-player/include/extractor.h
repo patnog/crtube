@@ -46,7 +46,7 @@ typedef struct {
 
 typedef struct {
    char title[256];
-   char description[2048];   // video description, truncated; newlines are real '\n'
+   char *description;        // dynamically allocated UTF-8 video description; owned by StreamInfo
    int  captionCount;
    int  captionCapacity;
    CaptionTrack *captions;
@@ -64,6 +64,9 @@ typedef struct {
    char viewCount[32];     // raw YouTube videoDetails.viewCount
    char publishedDate[24];// microformat publishDate (ISO date)
 } StreamInfo;
+
+// Releases dynamically owned fields in a resolved StreamInfo and the struct itself.
+void freeStreamInfo(StreamInfo *info);
 
 // accumulated across pages (infinite scroll); one page is ~20. only the ~30 on-screen tiles hold a
 // thumbnail texture + rasterised labels at once (windowed), so this bounds metadata + kept jpegs, not VRAM.
@@ -103,11 +106,30 @@ typedef struct {
    int          count;
    char         continuation[MAX_CONTINUATION];   // token for the next page (empty = no more)
    char         channelName[48];                  // viewed channel's title (channel feeds only; else empty)
+   char         channelDescription[4096];
+   char         channelSubscribers[48];
+   char         channelVideoCount[48];
+   char         channelViewCount[48];
+   char         channelCountry[64];
+   char         channelVanityUrl[128];
+   char         channelJoinedDate[96];
+   char         channelAvatarUrl[512];
    // channel Videos feeds carry three sort chips (Latest/Popular/Oldest); each is a continuation token the
    // screen re-browses with. empty outside channel mode. index matches ChannelSort.
    char         sortTokens[3][MAX_SORT_TOKEN];
    SearchResult items[MAX_SEARCH_RESULTS];
 } SearchResults;
+
+typedef struct {
+   char channelName[48];
+   char channelDescription[4096];
+   char channelSubscribers[48];
+   char channelVideoCount[48];
+   char channelViewCount[48];
+   char channelCountry[64];
+   char channelJoinedDate[96];
+   char channelAvatarUrl[512];
+} ChannelAboutInfo;
 
 // trending categories (YouTube retired the single aggregated feed; these are the surviving per-category
 // channel-tab feeds). the UI cycles them; keep TrendingNames (home.c) and TRENDING_FEEDS (youtube.c) in sync.
@@ -165,7 +187,7 @@ typedef enum {
 typedef struct Extractor {
    const char *name;                                    // "youtube"
    int (*matches)(const char *input);                   // claim this url/id?
-   int (*extract)(const char *input, StreamInfo *out);  // 0 ok, negative on error
+   int (*extract)(const char *input, StreamInfo *out, const char *subtitleLanguage);  // 0 ok, negative on error
    // continuation is NULL for the first page, or a prior result's token to fetch the next page.
    int (*search)(const char *query, SortOrder sort, const char *continuation, SearchResults *out);
    int (*getTrending)(TrendingCategory category, const char *continuation, SearchResults *out);
@@ -198,6 +220,8 @@ typedef struct Extractor {
    int (*refreshLiveAndroid)(const char *input, int videoItag, int audioItag, StreamInfo *out);
    // Re-resolve an Android-fallback LIVE before seek/reconnect: ANDROID first, then other clients.
    int (*refreshLiveForSeek)(const char *input, int videoItag, int audioItag, StreamInfo *out);
+   // Fetch channel About metadata on demand. Blocking; call from a worker thread.
+   int (*getChannelAbout)(const char *channelId, ChannelAboutInfo *out);
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.
@@ -218,6 +242,8 @@ int getChannelVideos(const char *channelId, const char *token, SearchResults *ou
 // Fetch currently-live broadcasts from a channel's Streams tab. Blocking; call on a worker thread.
 int getChannelLiveVideos(const char *channelId, SearchResults *out);
 int getChannelCategoryFeed(const char *channelId, int category, const char *continuation, SearchResults *out);
+// Fetch the channel About page only when the user opens channel information.
+int getChannelAboutInfo(const char *channelId, ChannelAboutInfo *out);
 
 // a signed-in account feed (see AccountFeed). continuation as above. 0 ok; negative on error or when
 // signed out. blocking: call from a worker thread.

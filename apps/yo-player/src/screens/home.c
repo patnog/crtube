@@ -4405,10 +4405,11 @@ static void updateHome(void)
       return;
    }
 
-   // Handle Triangle before category-specific early returns so downloaded
-   // videos behave exactly like online video tiles.
+   // Triangle opens the owning channel for regular videos and LIVE streams.
+   // Live tiles are valid video targets too; excluding them silently disabled
+   // the advertised Channel action on the Live navigation page.
    if (isPadButtonPressed(PAD_BTN_TRIANGLE) &&
-       selected->videoId[0] && !selected->isPlaylist && !selected->isLive &&
+       selected->videoId[0] && !selected->isPlaylist &&
        !home.channelLookupPending && !home.channelLookupActive) {
       SearchResult channelItem = *selected;
       if (channelItem.channelId[0]) {

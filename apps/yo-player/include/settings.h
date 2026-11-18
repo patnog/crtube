@@ -58,6 +58,11 @@ int setEnable1080p60(int enabled);
 const char *getSubtitleLanguage(void);
 int setSubtitleLanguage(const char *languageCode);
 
+// Preferred language used only by Playback > Options > Subs language.
+// Kept separate from subtitle-language, which remains the download preference.
+const char *getPlaybackSubtitleLanguage(void);
+int setPlaybackSubtitleLanguage(const char *languageCode);
+
 // Uniform display overscan in percent (-15..+15). Changes are saved immediately to settings.txt.
 int getOverscanPercent(void);
 int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails

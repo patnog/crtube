@@ -1,6 +1,7 @@
 // extractor - registry of site extractors (see extractor.h).
 #include "extractor.h"
 #include <string.h>
+#include <stdlib.h>
 
 extern const Extractor youtubeExtractor;
 
@@ -8,6 +9,14 @@ extern const Extractor youtubeExtractor;
 static const Extractor *const registry[] = {
    &youtubeExtractor,
 };
+
+void freeStreamInfo(StreamInfo *info)
+{
+   if (!info) return;
+   free(info->description);
+   free(info->captions);
+   free(info);
+}
 
 const Extractor *findExtractor(const char *input)
 {
@@ -63,6 +72,15 @@ int getChannelCategoryFeed(const char *channelId, int category, const char *cont
    for (unsigned i = 0; i < sizeof registry / sizeof registry[0]; i++)
       if (registry[i]->getChannelCategory)
          return registry[i]->getChannelCategory(channelId, category, continuation, out);
+   if (out) memset(out, 0, sizeof *out);
+   return -1;
+}
+
+int getChannelAboutInfo(const char *channelId, ChannelAboutInfo *out)
+{
+   for (unsigned i = 0; i < sizeof registry / sizeof registry[0]; i++)
+      if (registry[i]->getChannelAbout)
+         return registry[i]->getChannelAbout(channelId, out);
    if (out) memset(out, 0, sizeof *out);
    return -1;
 }

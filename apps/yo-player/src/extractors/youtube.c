@@ -173,6 +173,83 @@ static int jsonString(const char *from, const char *end, const char *key, char *
    return 1;
 }
 
+// Allocate and decode a complete JSON string. Unlike jsonString(), this is used for
+// user-authored descriptions: it preserves UTF-8 and does not impose a fixed output cap.
+static char *jsonStringAlloc(const char *from, const char *end, const char *key)
+{
+   char pat[48];
+   int patLen = snprintf(pat, sizeof pat, "\"%s\":\"", key);
+   const char *p = from ? findInRange(from, end, pat) : NULL;
+   if (!p) return NULL;
+   p += patLen;
+
+   const char *scan = p;
+   int escaped = 0;
+   while (scan < end) {
+      if (!escaped && *scan == '"') break;
+      if (!escaped && *scan == '\\') escaped = 1;
+      else escaped = 0;
+      scan++;
+   }
+   if (scan >= end) return NULL;
+
+   size_t capacity = (size_t)(scan - p) + 1;
+   char *out = (char *)malloc(capacity);
+   if (!out) return NULL;
+   size_t used = 0;
+   while (p < scan) {
+      unsigned char c = (unsigned char)*p++;
+      if (c != '\\') {
+         out[used++] = (char)c;
+         continue;
+      }
+      if (p >= scan) break;
+      c = (unsigned char)*p++;
+      switch (c) {
+         case 'n': out[used++] = '\n'; break;
+         case 'r': out[used++] = '\r'; break;
+         case 't': out[used++] = '\t'; break;
+         case 'b': out[used++] = '\b'; break;
+         case 'f': out[used++] = '\f'; break;
+         case '"': out[used++] = '"'; break;
+         case '\\': out[used++] = '\\'; break;
+         case '/': out[used++] = '/'; break;
+         case 'u': {
+            if (scan - p < 4) { free(out); return NULL; }
+            int cp = hex4(p);
+            p += 4;
+            if (cp < 0) cp = 0xFFFD;
+            if (cp >= 0xD800 && cp <= 0xDBFF && scan - p >= 6 && p[0] == '\\' && p[1] == 'u') {
+               int low = hex4(p + 2);
+               if (low >= 0xDC00 && low <= 0xDFFF) {
+                  cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                  p += 6;
+               }
+            }
+            if (cp == 0) cp = 0xFFFD;
+            if (cp <= 0x7F) out[used++] = (char)cp;
+            else if (cp <= 0x7FF) {
+               out[used++] = (char)(0xC0 | (cp >> 6));
+               out[used++] = (char)(0x80 | (cp & 0x3F));
+            } else if (cp <= 0xFFFF) {
+               out[used++] = (char)(0xE0 | (cp >> 12));
+               out[used++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+               out[used++] = (char)(0x80 | (cp & 0x3F));
+            } else {
+               out[used++] = (char)(0xF0 | (cp >> 18));
+               out[used++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+               out[used++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+               out[used++] = (char)(0x80 | (cp & 0x3F));
+            }
+            break;
+         }
+         default: out[used++] = (char)c; break;
+      }
+   }
+   out[used] = 0;
+   return out;
+}
+
 // read the (possibly quoted) integer value of "key" within [from,end). 1 if found.
 static int jsonInt(const char *from, const char *end, const char *key, int *out)
 {
@@ -282,6 +359,72 @@ static const char *jsonObjectForKey(const char *from, const char *end, const cha
    if (!close) return NULL;
    if (objectEnd) *objectEnd = close;
    return p;
+}
+
+// Read a YouTube text value whether it is a plain string, simpleText/content object,
+// or the first text run. The caller supplies the enclosing object's end to avoid
+// accidentally matching an identically named field elsewhere in the response.
+static int jsonTextValue(const char *from, const char *end, const char *key, char *out, int cap)
+{
+   const char *objectEnd = NULL;
+   const char *object = jsonObjectForKey(from, end, key, &objectEnd);
+   if (!object) return jsonString(from, end, key, out, cap);
+   if (jsonString(object, objectEnd, "simpleText", out, cap) ||
+       jsonString(object, objectEnd, "content", out, cap)) return out[0] != 0;
+   const char *runs = findInRange(object, objectEnd, "\"runs\":[");
+   if (runs && jsonString(runs, objectEnd, "text", out, cap)) return out[0] != 0;
+   if (cap) out[0] = 0;
+   return 0;
+}
+
+// The current YouTube page header exposes subscriber/video totals as text in
+// pageHeaderViewModel.metadata.contentMetadataViewModel.metadataRows.
+static void parseChannelPageHeaderMetadata(const char *resp, const char *end, SearchResults *out)
+{
+   const char *headerEnd = NULL;
+   const char *header = jsonObjectForKey(resp, end, "pageHeaderRenderer", &headerEnd);
+   const char *viewEnd = NULL;
+   const char *view = header ? jsonObjectForKey(header, headerEnd, "pageHeaderViewModel", &viewEnd) : NULL;
+   const char *metadataEnd = NULL;
+   const char *metadata = view ? jsonObjectForKey(view, viewEnd, "metadata", &metadataEnd) : NULL;
+   const char *contentEnd = NULL;
+   const char *content = metadata ? jsonObjectForKey(metadata, metadataEnd, "contentMetadataViewModel", &contentEnd) : NULL;
+   if (!content) return;
+
+   const char *rows = findInRange(content, contentEnd, "\"metadataRows\":[");
+   if (!rows) return;
+   rows += sizeof("\"metadataRows\":[") - 1;
+   const char *rowsEnd = jsonArrayEnd(rows - 1, contentEnd);
+   if (!rowsEnd) return;
+
+   for (const char *row = rows; row < rowsEnd && (!out->channelSubscribers[0] || !out->channelVideoCount[0]);) {
+      while (row < rowsEnd && (*row == ' ' || *row == '\n' || *row == '\r' || *row == '\t' || *row == ',')) row++;
+      if (row >= rowsEnd || *row != '{') break;
+      const char *rowEnd = jsonObjectEnd(row, rowsEnd);
+      if (!rowEnd) break;
+      const char *parts = findInRange(row, rowEnd, "\"metadataParts\":[");
+      if (parts) {
+         parts += sizeof("\"metadataParts\":[") - 1;
+         const char *partsEnd = jsonArrayEnd(parts - 1, rowEnd);
+         for (const char *part = parts; partsEnd && part < partsEnd &&
+              (!out->channelSubscribers[0] || !out->channelVideoCount[0]);) {
+            while (part < partsEnd && (*part == ' ' || *part == '\n' || *part == '\r' || *part == '\t' || *part == ',')) part++;
+            if (part >= partsEnd || *part != '{') break;
+            const char *partEnd = jsonObjectEnd(part, partsEnd);
+            if (!partEnd) break;
+            const char *textEnd = NULL;
+            const char *text = jsonObjectForKey(part, partEnd, "text", &textEnd);
+            char value[128] = { 0 };
+            if (text) jsonString(text, textEnd, "content", value, sizeof value);
+            if (!out->channelSubscribers[0] && strstr(value, "subscriber"))
+               strCopy(out->channelSubscribers, sizeof out->channelSubscribers, value);
+            else if (!out->channelVideoCount[0] && strstr(value, "video"))
+               strCopy(out->channelVideoCount, sizeof out->channelVideoCount, value);
+            part = partEnd;
+         }
+      }
+      row = rowEnd;
+   }
 }
 
 // Metadata shared by the VISIONOS player response and alternative-client retries.
@@ -510,7 +653,7 @@ static int captionLanguageMatches(const char *a, const char *b)
    return i > 0 && (a[i] == 0 || a[i] == '-') && (b[i] == 0 || b[i] == '-');
 }
 
-static void parseCaptionTracks(const char *resp, const char *end, StreamInfo *out)
+static void parseCaptionTracks(const char *resp, const char *end, StreamInfo *out, const char *targetLanguage)
 {
    const char *captions = strstr(resp, "\"captionTracks\"");
    if (!captions) return;
@@ -535,11 +678,9 @@ static void parseCaptionTracks(const char *resp, const char *end, StreamInfo *ou
       scan = entryEnd;
    }
 
-   // The Region setting is authoritative for the regional caption option.
-   // Playback track choices must not replace this target: otherwise selecting
-   // an English source track can hide the Region language on the next video.
-   // Do not synthesize a translation if a source caption already exists in it.
-   const char *targetLanguage = getContentRegionLanguageCode();
+   // The caller supplies the target language: playback uses its own persisted
+   // preference, while download extraction passes the content region to preserve
+   // the existing download behavior. Do not synthesize a duplicate language.
    if (!targetLanguage || !targetLanguage[0] || strcmp(targetLanguage, "off") == 0)
       return;
    for (int i = 0; i < out->captionCount; i++) {
@@ -801,7 +942,8 @@ static int fetchPlayerClient(const char *clientFields, const char *userAgent,
 
 static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
                                            int *respLen, StreamInfo *out, int liveMode,
-                                           int requiredVideoItag, int requiredAudioItag)
+                                           int requiredVideoItag, int requiredAudioItag,
+                                           const char *subtitleLanguage)
 {
    const struct {
       const char *name;
@@ -921,7 +1063,7 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
          if (details) {
             if (!out->title[0]) jsonString(details, end, "title", out->title, sizeof out->title);
             if (!out->author[0]) jsonString(details, end, "author", out->author, sizeof out->author);
-            if (!out->description[0]) jsonString(details, end, "shortDescription", out->description, sizeof out->description);
+            if (!out->description) out->description = jsonStringAlloc(details, end, "shortDescription");
             if (out->durationSeconds <= 0) {
                char lengthText[16];
                if (jsonString(details, end, "lengthSeconds", lengthText, sizeof lengthText))
@@ -929,7 +1071,7 @@ static int retryUnplayableWithOtherClients(const char *videoId, char *resp,
             }
          }
          parseVideoMetadata(resp, end, out);
-         if (out->captionCount == 0) parseCaptionTracks(resp, end, out);
+         if (out->captionCount == 0) parseCaptionTracks(resp, end, out, subtitleLanguage);
          logInfo("[yt] retry succeeded client=%s mode=%s formats=%d\n",
                  clients[i].name, liveMode ? "LIVE" : "VOD", out->formatCount);
          return 1;
@@ -1297,9 +1439,10 @@ static int refreshLiveAndroid(const char *input, int videoItag, int audioItag, S
    return haveVideo && haveAudio ? 0 : -1;
 }
 
-static int extract(const char *input, StreamInfo *out)
+static int extract(const char *input, StreamInfo *out, const char *subtitleLanguage)
 {
    memset(out, 0, sizeof *out);
+   if (!subtitleLanguage || !subtitleLanguage[0]) subtitleLanguage = getContentRegionLanguageCode();
 
    char videoId[16];
    if (!extractVideoId(input, videoId, sizeof videoId)) return -1;
@@ -1325,13 +1468,15 @@ static int extract(const char *input, StreamInfo *out)
    // metadata, copied into out so it survives a live re-fetch overwriting resp below
    const char *details = findInRange(resp, end, "\"videoDetails\"");
    int descriptionFieldPresent = details && findInRange(details, end, "\"shortDescription\":\"") != NULL;
-   int descriptionParsed = jsonString(details ? details : resp, end, "shortDescription",
-                                      out->description, sizeof out->description);
+   out->description = jsonStringAlloc(details ? details : resp, end, "shortDescription");
+   int descriptionParsed = out->description != NULL;
+   logInfo("[yt-description] extracted video=%s bytes=%u\n", videoId,
+           (unsigned)(out->description ? strlen(out->description) : 0));
 #if BUILD_DIAG_YOUTUBE_DESCRIPTION
    logInfo("[yt-description] primary video=%s client=VISIONOS respLen=%d videoDetails=%s shortDescriptionField=%s parsed=%d bytes=%d\n",
            videoId, respLen, details ? "present" : "missing",
            descriptionFieldPresent ? "present" : "missing", descriptionParsed,
-           (int)strlen(out->description));
+           (int)(out->description ? strlen(out->description) : 0));
 #endif
    jsonString(details ? details : resp, end, "title", out->title, sizeof out->title);
    jsonString(details ? details : resp, end, "author", out->author, sizeof out->author);
@@ -1339,7 +1484,7 @@ static int extract(const char *input, StreamInfo *out)
    if (jsonString(details ? details : resp, end, "lengthSeconds", lenText, sizeof lenText))
       out->durationSeconds = atoi(lenText);
    parseVideoMetadata(resp, end, out);
-   parseCaptionTracks(resp, end, out);
+   parseCaptionTracks(resp, end, out, subtitleLanguage);
    // Resolve the default audio ID from captions.playerCaptionsTracklistRenderer.audioTracks.
    {
       const char *audioTracks = strstr(resp, "\"audioTracks\":[");
@@ -1447,7 +1592,7 @@ static int extract(const char *input, StreamInfo *out)
       if (strcmp(statusText, "UNPLAYABLE") == 0 || liveRequest) {
          logInfo("[yt] player has no usable stream; trying alternate %s clients\n",
                  liveRequest ? "LIVE" : "VOD");
-         if (retryUnplayableWithOtherClients(videoId, resp, &respLen, out, liveRequest, 0, 0) > 0) {
+         if (retryUnplayableWithOtherClients(videoId, resp, &respLen, out, liveRequest, 0, 0, subtitleLanguage) > 0) {
             logInfo("[yt] resolved videoId=%s with alternate client formats=%d live=%d\n",
                     videoId, out->formatCount, liveRequest);
             if (liveRequest) out->isLive = 1;
@@ -1464,7 +1609,7 @@ static int extract(const char *input, StreamInfo *out)
 
    /* Some player clients omit videoDetails.shortDescription even when the
       video has a public description. Retry only this missing field with WEB. */
-   if (!out->description[0]) {
+   if (!out->description) {
       int metadataLen = 0;
       int metadataRc = fetchPlayerClient(
          "\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"",
@@ -1478,28 +1623,34 @@ static int extract(const char *input, StreamInfo *out)
          metadataDetailsPresent = metadataDetails != NULL;
          metadataDescriptionFieldPresent = metadataDetails &&
             findInRange(metadataDetails, metadataEnd, "\"shortDescription\":\"") != NULL;
-         if (metadataDetails)
-            metadataDescriptionParsed = jsonString(metadataDetails, metadataEnd, "shortDescription",
-                                                   out->description, sizeof out->description);
+         if (metadataDetails) {
+            char *metadataDescription = jsonStringAlloc(metadataDetails, metadataEnd, "shortDescription");
+            if (metadataDescription) {
+               free(out->description);
+               out->description = metadataDescription;
+               metadataDescriptionParsed = 1;
+            }
+         }
       }
 #if BUILD_DIAG_YOUTUBE_DESCRIPTION
       logInfo("[yt-description] WEB fallback video=%s rc=%d respLen=%d videoDetails=%s shortDescriptionField=%s parsed=%d bytes=%d\n",
               videoId, metadataRc, metadataLen,
               metadataDetailsPresent ? "present" : "missing",
               metadataDescriptionFieldPresent ? "present" : "missing",
-              metadataDescriptionParsed, (int)strlen(out->description));
+              metadataDescriptionParsed,
+              (int)(out->description ? strlen(out->description) : 0));
 #endif
-      if (out->description[0])
-         logInfo("[yt] description recovered from WEB metadata video=%s bytes=%d\n",
-                 videoId, (int)strlen(out->description));
+      if (out->description && out->description[0])
+         logInfo("[yt-description] recovered from WEB video=%s bytes=%u\n",
+                 videoId, (unsigned)strlen(out->description));
       else
          logWarn("[yt] description unavailable from player clients video=%s\n", videoId);
    }
 
 #if BUILD_DIAG_YOUTUBE_DESCRIPTION
-   logInfo("[yt-description] final video=%s available=%s bytes=%d capacity=%d\n",
-           videoId, out->description[0] ? "yes" : "no",
-           (int)strlen(out->description), (int)sizeof out->description);
+   logInfo("[yt-description] final video=%s available=%s bytes=%u\n",
+           videoId, out->description && out->description[0] ? "yes" : "no",
+           (unsigned)(out->description ? strlen(out->description) : 0));
 #endif
 
    free(resp);
@@ -1843,8 +1994,78 @@ static void parseVideoResults(const char *resp, int respLen, SearchResults *out,
    // omit their author (the channel is implied). absent in search/trending responses (left empty). anchor on
    // the OBJECT ("...":{) - the bare name appears first in youtube's schema list, and the title after it is a
    // tab ("Home"), not the channel name.
-   const char *channelMeta = findInRange(resp, end, "\"channelMetadataRenderer\":{");
-   if (channelMeta) jsonString(channelMeta, end, "title", out->channelName, sizeof out->channelName);
+   const char *channelMetaEnd = NULL;
+   const char *channelMeta = jsonObjectForKey(resp, end, "channelMetadataRenderer", &channelMetaEnd);
+   const char *headerEnd = NULL;
+   const char *channelHeader = jsonObjectForKey(resp, end, "c4TabbedHeaderRenderer", &headerEnd);
+   if (channelMeta) {
+      jsonString(channelMeta, channelMetaEnd, "title", out->channelName, sizeof out->channelName);
+      jsonTextValue(channelMeta, channelMetaEnd, "description", out->channelDescription, sizeof out->channelDescription);
+      jsonTextValue(channelMeta, channelMetaEnd, "subscriberCountText", out->channelSubscribers, sizeof out->channelSubscribers);
+      jsonTextValue(channelMeta, channelMetaEnd, "videosCountText", out->channelVideoCount, sizeof out->channelVideoCount);
+      jsonTextValue(channelMeta, channelMetaEnd, "viewCountText", out->channelViewCount, sizeof out->channelViewCount);
+      jsonTextValue(channelMeta, channelMetaEnd, "country", out->channelCountry, sizeof out->channelCountry);
+      const char *avatarEnd = NULL;
+      const char *avatar = jsonObjectForKey(channelMeta, channelMetaEnd, "avatar", &avatarEnd);
+      if (avatar) jsonString(avatar, avatarEnd, "url", out->channelAvatarUrl, sizeof out->channelAvatarUrl);
+   }
+   if (channelHeader) {
+      if (!out->channelName[0]) jsonTextValue(channelHeader, headerEnd, "title", out->channelName, sizeof out->channelName);
+      if (!out->channelSubscribers[0])
+         jsonTextValue(channelHeader, headerEnd, "subscriberCountText", out->channelSubscribers, sizeof out->channelSubscribers);
+      if (!out->channelVideoCount[0]) {
+         jsonTextValue(channelHeader, headerEnd, "videosCountText", out->channelVideoCount, sizeof out->channelVideoCount);
+         if (!out->channelVideoCount[0])
+            jsonTextValue(channelHeader, headerEnd, "videoCountText", out->channelVideoCount, sizeof out->channelVideoCount);
+      }
+      if (!out->channelAvatarUrl[0]) {
+         const char *avatarEnd = NULL;
+         const char *avatar = jsonObjectForKey(channelHeader, headerEnd, "avatar", &avatarEnd);
+         if (avatar) jsonString(avatar, avatarEnd, "url", out->channelAvatarUrl, sizeof out->channelAvatarUrl);
+      }
+   }
+
+   parseChannelPageHeaderMetadata(resp, end, out);
+
+   const char *aboutEnd = NULL;
+   const char *aboutMeta = jsonObjectForKey(resp, end, "channelAboutFullMetadataRenderer", &aboutEnd);
+   if (aboutMeta) {
+      if (!out->channelDescription[0])
+         jsonTextValue(aboutMeta, aboutEnd, "description", out->channelDescription, sizeof out->channelDescription);
+      if (!out->channelSubscribers[0])
+         jsonTextValue(aboutMeta, aboutEnd, "subscriberCountText", out->channelSubscribers, sizeof out->channelSubscribers);
+      if (!out->channelVideoCount[0]) {
+         jsonTextValue(aboutMeta, aboutEnd, "videosCountText", out->channelVideoCount, sizeof out->channelVideoCount);
+         if (!out->channelVideoCount[0])
+            jsonTextValue(aboutMeta, aboutEnd, "videoCountText", out->channelVideoCount, sizeof out->channelVideoCount);
+      }
+      if (!out->channelViewCount[0])
+         jsonTextValue(aboutMeta, aboutEnd, "viewCountText", out->channelViewCount, sizeof out->channelViewCount);
+      jsonTextValue(aboutMeta, aboutEnd, "country", out->channelCountry, sizeof out->channelCountry);
+      jsonTextValue(aboutMeta, aboutEnd, "joinedDateText", out->channelJoinedDate, sizeof out->channelJoinedDate);
+   }
+   // YouTube's newer channel About response moved these fields from
+   // channelAboutFullMetadataRenderer into aboutChannelViewModel.
+   const char *aboutViewEnd = NULL;
+   const char *aboutView = jsonObjectForKey(resp, end, "aboutChannelViewModel", &aboutViewEnd);
+   if (aboutView) {
+      if (!out->channelDescription[0])
+         jsonTextValue(aboutView, aboutViewEnd, "description", out->channelDescription, sizeof out->channelDescription);
+      if (!out->channelVideoCount[0])
+         jsonTextValue(aboutView, aboutViewEnd, "videoCountText", out->channelVideoCount, sizeof out->channelVideoCount);
+      if (!out->channelViewCount[0])
+         jsonTextValue(aboutView, aboutViewEnd, "viewCountText", out->channelViewCount, sizeof out->channelViewCount);
+      if (!out->channelCountry[0])
+         jsonTextValue(aboutView, aboutViewEnd, "country", out->channelCountry, sizeof out->channelCountry);
+      if (!out->channelJoinedDate[0])
+         jsonTextValue(aboutView, aboutViewEnd, "joinedDateText", out->channelJoinedDate, sizeof out->channelJoinedDate);
+   }
+   // The new page-header layout can place subscriber/video counts outside the legacy
+   // c4TabbedHeaderRenderer. Keep these as last-resort fallbacks after scoped extraction.
+   if (!out->channelSubscribers[0])
+      jsonTextValue(resp, end, "subscriberCountText", out->channelSubscribers, sizeof out->channelSubscribers);
+   if (!out->channelVideoCount[0])
+      jsonTextValue(resp, end, "videosCountText", out->channelVideoCount, sizeof out->channelVideoCount);
 
    // channel Videos feeds carry Latest/Popular/Oldest sort chips; each chipViewModel holds a continuation
    // token the screen re-browses with to re-sort. absent in search/trending responses (left empty).
@@ -1942,6 +2163,36 @@ static int getChannel(const char *channelId, const char *token, SearchResults *o
    if (token) bodyLen = snprintf(body, sizeof body, CONTINUATION_BODY_FMT, gl, token);
    else       bodyLen = snprintf(body, sizeof body, TRENDING_BODY_FMT, gl, channelId, CHANNEL_VIDEOS_PARAMS);
    return postAndParse(BROWSE_URL, body, bodyLen, out);
+}
+
+static int getChannelAbout(const char *channelId, ChannelAboutInfo *out)
+{
+   if (!channelId || !channelId[0] || !out) return -1;
+   memset(out, 0, sizeof *out);
+   char body[512];
+   int bodyLen = snprintf(body, sizeof body, TRENDING_BODY_FMT,
+                          getContentRegionCode(), channelId, "EgVhYm91dA==");
+   if (bodyLen <= 0 || bodyLen >= (int)sizeof body) return -1;
+   SearchResults *parsed = (SearchResults *)malloc(sizeof(*parsed));
+   if (!parsed) return -1;
+   int rc = postAndParse(BROWSE_URL, body, bodyLen, parsed);
+   if (rc == 0) {
+      strCopy(out->channelName, sizeof out->channelName, parsed->channelName);
+      strCopy(out->channelDescription, sizeof out->channelDescription, parsed->channelDescription);
+      strCopy(out->channelSubscribers, sizeof out->channelSubscribers, parsed->channelSubscribers);
+      strCopy(out->channelVideoCount, sizeof out->channelVideoCount, parsed->channelVideoCount);
+      strCopy(out->channelViewCount, sizeof out->channelViewCount, parsed->channelViewCount);
+      strCopy(out->channelCountry, sizeof out->channelCountry, parsed->channelCountry);
+      strCopy(out->channelJoinedDate, sizeof out->channelJoinedDate, parsed->channelJoinedDate);
+      strCopy(out->channelAvatarUrl, sizeof out->channelAvatarUrl, parsed->channelAvatarUrl);
+   }
+   logInfo("[yt] channel about channel=%s rc=%d description=%d subscribers=%d videos=%d views=%d country=%d joined=%d avatar=%d\n",
+           channelId, rc, out->channelDescription[0] != 0, out->channelSubscribers[0] != 0,
+           out->channelVideoCount[0] != 0, out->channelViewCount[0] != 0,
+           out->channelCountry[0] != 0, out->channelJoinedDate[0] != 0,
+           out->channelAvatarUrl[0] != 0);
+   free(parsed);
+   return rc;
 }
 
 // The channel Streams tab includes live, upcoming and archived broadcasts. Keep only the
@@ -2691,7 +2942,7 @@ static int refreshLiveForSeek(const char *input, int videoItag, int audioItag, S
    // LIVE fallback order try the remaining clients. That list may repeat ANDROID before
    // moving on to its other identities; the explicit first attempt remains Android-first.
    if ((!haveVideo || !haveAudio) && !isHttpRequestGroupCancelled()) {
-      int retried = retryUnplayableWithOtherClients(videoId, resp, &respLen, out, 1, videoItag, audioItag);
+      int retried = retryUnplayableWithOtherClients(videoId, resp, &respLen, out, 1, videoItag, audioItag, getContentRegionLanguageCode());
       haveVideo = 0;
       haveAudio = audioItag <= 0;
       for (int i = 0; i < out->formatCount; i++) {
@@ -2724,5 +2975,6 @@ const Extractor youtubeExtractor = {
    "youtube", matches, extract, search, fetchTrending, getChannel, fetchAccountFeed,
    youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly, fetchLive,
    getChannelLive, fetchAccountPlaylists, fetchAccountPlaylistVideos,
-   youtubeGetVideoStatus, getChannelCategory, refreshLiveAndroid, refreshLiveForSeek
+   youtubeGetVideoStatus, getChannelCategory, refreshLiveAndroid, refreshLiveForSeek,
+   getChannelAbout
 };

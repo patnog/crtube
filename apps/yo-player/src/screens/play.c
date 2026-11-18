@@ -131,7 +131,7 @@ static void flushSubtitleRenderDiag(uint64_t nowUs)
 #define DESCRIPTION_MARGIN_X    120
 #define DESCRIPTION_MARGIN_Y    80
 #define DESCRIPTION_TEXT_SIZE   24
-#define DESCRIPTION_SCROLL_STEP 40
+#define DESCRIPTION_PAGE_GAP 24
 
 // chapter picker: START toggles a centred list of the video's chapters; up/down select
 // (the window follows the selection), cross jumps there, circle/START close without jumping.
@@ -371,7 +371,7 @@ static struct {
    int              showStats;        // debug overlay visibility; no controller binding
    char             title[256];        // resolved video title (worker sets, UI reads after adoption)
    char             author[128];       // resolved channel name
-   char             description[2048]; // resolved video description (worker sets, UI reads after adoption)
+   char            *description;       // dynamically sized resolved description
    char             viewCount[32];
    char             publishedDate[24];
    char             likeCount[32];
@@ -383,7 +383,7 @@ static struct {
    // up/down scroll. playback carries on untouched underneath.
    int              descriptionVisible;
    int              descriptionRendered;
-   int              descriptionScroll;   // pixels scrolled down into the text
+   int              descriptionPage;    // current fixed-height description page
 
    // chapter picker: chapters come out of the description at resolve time; when that finds none, a
    // side worker asks the /next endpoint (YouTube's own chapter list). the row labels are rasterised
@@ -552,7 +552,20 @@ static Label subtitleLabel;                   // active subtitle cue, above the 
 static Label playbackInfoLabel;               // resolution, current audio and active subtitles, top-right
 static Label chapterLabels[MAX_CHAPTERS];     // chapter titles (picker overlay rows)
 static Label chapterTimeLabels[MAX_CHAPTERS]; // chapter start times, right-aligned in their own column
-static TextTexture descriptionTexture;        // whole description as one tall texture (scrolled by draw)
+static TextTexture descriptionTexture;        // only the currently visible description page
+static Label descriptionPageLabel;
+static const char *descriptionBody;
+static size_t descriptionBodyLength;
+static char descriptionMetadata[256];
+static size_t descriptionMetadataLength;
+static size_t descriptionContentLength;
+static int descriptionPageCount;
+static size_t descriptionPageMaxBytes = 64;
+static int descriptionPageMaxNewlines = 3;
+static void clearDescriptionPages(void);
+static void renderDescriptionPage(int page);
+static void recountDescriptionPages(void);
+static void collapseDescriptionBlankLines(char *text);
 static int statsTextPadding;
 
 // the shared pill meter; its level is kept in `volumeLevel` outside `state` so it survives across videos.
@@ -735,8 +748,7 @@ static void liveBaseRefreshWorker(uint64_t arg)
       state.liveBaseRefreshInfo = info;
       info = NULL;
    }
-   if (info) free(info->captions);
-   free(info);
+   freeStreamInfo(info);
    __sync_synchronize();
    state.liveBaseRefreshDone = 1;
    setHttpRequestGroup(NULL);
@@ -821,8 +833,7 @@ static void reapLiveBaseRefresh(void)
       logWarn("[yt-live-renew] Android BaseURL refresh not applied; retry in %llums\n",
               (unsigned long long)(liveBaseRefreshRetryDelayUs()/1000ull));
    }
-   if (info) free(info->captions);
-   free(info);
+   freeStreamInfo(info);
    state.liveBaseRefreshInfo = NULL;
 }
 
@@ -1354,12 +1365,18 @@ static void worker(uint64_t arg)
       }
       strCopy(state.title, sizeof state.title, fallback);
       strCopy(state.author, sizeof state.author, "Downloaded");
+      char localDescription[16384] = "";
       loadDownloadedMetadata(requestedLocalPath, state.title, sizeof state.title,
                              state.author, sizeof state.author,
-                             state.description, sizeof state.description,
+                             localDescription, sizeof localDescription,
                              state.publishedDate, sizeof state.publishedDate,
                              state.viewCount, sizeof state.viewCount,
                              state.likeCount, sizeof state.likeCount);
+      if (localDescription[0]) {
+         state.description = (char *)malloc(strlen(localDescription) + 1);
+         if (state.description) strcpy(state.description, localDescription);
+         if (state.description) collapseDescriptionBlankLines(state.description);
+      }
       CaptionTrack localTracks[3];
       int localTrackCount = getDownloadedSubtitleTracks(requestedLocalPath, localTracks, 3);
       if (localTrackCount > 0) {
@@ -1371,7 +1388,7 @@ static void worker(uint64_t arg)
             lastSubtitlePick = 0;
          }
       }
-      parseChapters(state.description, &state.chapters);
+      parseChapters(state.description ? state.description : "", &state.chapters);
       { ChapterList downloadedChapters; if (loadDownloadedChapters(requestedLocalPath, &downloadedChapters) > 0) state.chapters = downloadedChapters; }
       if (!state.likeCount[0]) strCopy(state.likeCount, sizeof state.likeCount, "Offline");
       if (!state.viewCount[0]) strCopy(state.viewCount, sizeof state.viewCount, "Offline");
@@ -1406,7 +1423,7 @@ static void worker(uint64_t arg)
 #if BUILD_DIAG_LIVE_RECOVERY
    if (liveRecoveryWorker) recoveryResolveStartUs = sys_time_get_system_time();
 #endif
-   int extractResult = extractor->extract(requestedInput, info);
+   int extractResult = extractor->extract(requestedInput, info, getPlaybackSubtitleLanguage());
 #if BUILD_DIAG_LIVE_RECOVERY
    if (liveRecoveryWorker)
       logInfo("[yt-live-renew-diag] resolve rc=%d elapsedMs=%llu formats=%d live=%d postLive=%d segmentSec=%d windowSec=%d\n",
@@ -1422,10 +1439,17 @@ static void worker(uint64_t arg)
    }
    strCopy(state.title, sizeof state.title, info->title);
    strCopy(state.author, sizeof state.author, info->author);
-   strCopy(state.description, sizeof state.description, info->description);
+   if (info->description) {
+      size_t descriptionLen = strlen(info->description);
+      state.description = (char *)malloc(descriptionLen + 1);
+      if (state.description) memcpy(state.description, info->description, descriptionLen + 1);
+      if (state.description) collapseDescriptionBlankLines(state.description);
+      else logError("[yt-description] unable to allocate %u bytes for playback description\n",
+                    (unsigned)(descriptionLen + 1));
+   }
    strCopy(state.viewCount, sizeof state.viewCount, info->viewCount);
    strCopy(state.publishedDate, sizeof state.publishedDate, info->publishedDate);
-   parseChapters(state.description, &state.chapters);
+   parseChapters(state.description ? state.description : "", &state.chapters);
    if (info->captionCount > 0) {
       state.captionTracks = malloc((size_t)info->captionCount * sizeof *state.captionTracks);
       if (state.captionTracks) {
@@ -1666,7 +1690,7 @@ static void worker(uint64_t arg)
    state.liveBaseRefreshNextTryUs = state.liveAndroidClient
       ? sys_time_get_system_time() + liveBaseRefreshIntervalUs() : 0;
    state.subtitlePick = (subtitlesEnabled && !state.isLive) ?
-                        findPreferredSubtitleTrack(getContentRegionLanguageCode()) : -1;
+                        findPreferredSubtitleTrack(getPlaybackSubtitleLanguage()) : -1;
    lastSubtitlePick = state.subtitlePick;
 
    // Resume by the canonical video ID, including when playback was started from a pasted YouTube URL.
@@ -1689,8 +1713,7 @@ done:
               (unsigned long long)((sys_time_get_system_time()-recoveryWorkerStartUs)/1000ull),
               state.pendingPlayer != NULL, playbackCancelRequested());
 #endif
-   if (info) free(info->captions);
-   free(info);
+   freeStreamInfo(info);
    __sync_synchronize();
    state.workerDone = 1;
    setHttpRequestGroup(NULL);
@@ -1823,6 +1846,10 @@ static void scheduleVodHttpRefresh(void)
    state.player = NULL;
    finishGfx();
 
+   free(state.description);
+   state.description = NULL;
+   state.descriptionRendered = 0;
+   clearDescriptionPages();
    free(state.subtitleTrack);
    state.subtitleTrack = NULL;
    free(state.captionTracks);
@@ -1917,6 +1944,10 @@ static void scheduleLiveRefresh(void)
 
    // The old player is retired before resolving. Remove session-owned subtitle data so the
    // replacement worker can build a clean set from the new extractor response.
+   free(state.description);
+   state.description = NULL;
+   state.descriptionRendered = 0;
+   clearDescriptionPages();
    free(state.subtitleTrack);
    state.subtitleTrack = NULL;
    free(state.captionTracks);
@@ -2245,6 +2276,7 @@ static void applyPlaybackUiLabelScale(float scale)
    playbackFontScale = scale;
 
 #define SCALE_PLAYBACK_LABEL(label) setLabelFixedRenderScale(&(label), scale, 0)
+   SCALE_PLAYBACK_LABEL(descriptionPageLabel);
    SCALE_PLAYBACK_LABEL(statusLabel);
    for (int i = 0; i < STAT_LINES; i++) {
       statLabels[i].size = playbackSubtitleFontSize(22);
@@ -2316,6 +2348,7 @@ static void initPlay(void)
    if (playbackFontScale < 1.0f) playbackFontScale = 1.0f;
 
    uiFont = openSystemFont(FONT_POP);
+   initLabel(&descriptionPageLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(DESCRIPTION_TEXT_SIZE), activeTheme->textSecondary, TEXT_NOWRAP, "1/1");
    initLabel(&statusLabel, &uiFont, 0, 0, state.screenW - 80, AUTO, playbackFontSize(28), activeTheme->textPrimary, TEXT_WRAP, "");
    statsTextPadding = (int)(measureFontText(&uiFont, playbackSubtitleFontSize(22), "   ") + 0.5f);
    if (statsTextPadding < 3) statsTextPadding = 3;
@@ -2571,7 +2604,7 @@ static void applyPreferredSubtitleTrack(void)
       if (lastSubtitlePick >= 0 && lastSubtitlePick < state.captionCount)
          track = lastSubtitlePick;
       else
-         track = findPreferredSubtitleTrack(getContentRegionLanguageCode());
+         track = findPreferredSubtitleTrack(getPlaybackSubtitleLanguage());
       if (track < 0) {
          for (int i = 0; i < state.captionCount; i++)
             if (!subtitleIsAutoTranslated(&state.captionTracks[i])) { track = i; break; }
@@ -3134,7 +3167,7 @@ static void liveReopenWorker(uint64_t arg)
                     state.liveAndroidClient ? "ANDROID" : "VISIONOS", state.liveEdgeSq);
          }
       }
-      if (info) { free(info->captions); free(info); }
+      freeStreamInfo(info);
    }
 
    // Keep the previous signed descriptor as a final recovery attempt if re-resolution
@@ -3640,9 +3673,231 @@ static void autoSkipSponsor(void)
 
 // Compose both sections into one texture so metadata and description share the same font scale,
 // width and scrolling behaviour while remaining visually distinct through section headings.
+
+// Collapse runs of whitespace-only description lines to at most two empty lines.
+// This keeps YouTube descriptions with pathological vertical whitespace renderable.
+static void collapseDescriptionBlankLines(char *text)
+{
+   if (!text || !*text) return;
+
+   char *read = text;
+   char *write = text;
+   int blankLines = 0;
+
+   while (*read) {
+      char *line = read;
+      while (*read && *read != '\r' && *read != '\n') read++;
+
+      char *end = read;
+      int hasNewline = (*read != 0);
+      int blank = 1;
+      for (char *p = line; p < end; p++) {
+         if (*p != ' ' && *p != '\t') {
+            blank = 0;
+            break;
+         }
+      }
+
+      if (blank) {
+         if (blankLines < 2 && hasNewline) {
+            *write++ = '\n';
+            blankLines++;
+         }
+      } else {
+         size_t length = (size_t)(end - line);
+         memmove(write, line, length);
+         write += length;
+         blankLines = 0;
+         if (hasNewline) *write++ = '\n';
+      }
+
+      if (*read == '\r') read++;
+      if (*read == '\n') read++;
+   }
+
+   *write = 0;
+}
+
+// The full description remains in its existing owner (state.description). Only
+// a small metadata header and one bounded page buffer are added here.
+static char descriptionContentCharAt(size_t offset)
+{
+   if (offset < descriptionMetadataLength) return descriptionMetadata[offset];
+   offset -= descriptionMetadataLength;
+   return offset < descriptionBodyLength ? descriptionBody[offset] : 0;
+}
+
+static void copyDescriptionContent(size_t offset, char *destination, size_t length)
+{
+   size_t copied = 0;
+   if (offset < descriptionMetadataLength) {
+      size_t part = descriptionMetadataLength - offset;
+      if (part > length) part = length;
+      memcpy(destination, descriptionMetadata + offset, part);
+      copied += part;
+      offset = 0;
+   } else {
+      offset -= descriptionMetadataLength;
+   }
+
+   if (copied < length && offset < descriptionBodyLength) {
+      size_t part = descriptionBodyLength - offset;
+      if (part > length - copied) part = length - copied;
+      memcpy(destination + copied, descriptionBody + offset, part);
+   }
+}
+
+// Return the next bounded page length. A page is limited by both byte count and
+// explicit line breaks, so long unbroken lines and many short lines stay bounded.
+static size_t descriptionNextPageLength(size_t offset, size_t remaining)
+{
+   if (remaining == 0) return 0;
+
+   size_t limit = remaining < descriptionPageMaxBytes
+                ? remaining : descriptionPageMaxBytes;
+   size_t end = 0;
+   int newlines = 0;
+
+   while (end < limit) {
+      char c = descriptionContentCharAt(offset + end++);
+      if (c == '\n' && ++newlines >= descriptionPageMaxNewlines)
+         break;
+   }
+
+   if (end < remaining && end == limit) {
+      // Prefer a word boundary near the end. Keep the whitespace in this page.
+      size_t minimum = limit / 2;
+      for (size_t i = end; i > minimum; i--) {
+         char c = descriptionContentCharAt(offset + i - 1);
+         if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            end = i;
+            break;
+         }
+      }
+   }
+
+   // Never split a UTF-8 code point across pages.
+   if (end < remaining) {
+      while (end > 0 &&
+             (((unsigned char)descriptionContentCharAt(offset + end)) & 0xC0) == 0x80)
+         end--;
+   }
+   if (end == 0) end = limit < remaining ? limit : remaining;
+   return end;
+}
+
+static void clearDescriptionPages(void)
+{
+   descriptionBody = NULL;
+   descriptionBodyLength = 0;
+   descriptionMetadata[0] = 0;
+   descriptionMetadataLength = 0;
+   descriptionContentLength = 0;
+   descriptionPageCount = 0;
+   freeTextTexture(&descriptionTexture);
+}
+
+static void renderDescriptionPage(int page)
+{
+   if (descriptionContentLength == 0 || descriptionPageCount <= 0) return;
+   if (page < 0) page = 0;
+   if (page >= descriptionPageCount) page = descriptionPageCount - 1;
+
+   size_t offset = 0;
+   for (int i = 0; i < page && offset < descriptionContentLength; i++)
+      offset += descriptionNextPageLength(offset, descriptionContentLength - offset);
+
+   if (offset >= descriptionContentLength) return;
+   size_t pageLength = descriptionNextPageLength(offset, descriptionContentLength - offset);
+   char *pageText = (char *)malloc(pageLength + 1);
+   if (!pageText) {
+      logError("[yt-description] unable to allocate page buffer bytes=%u\n",
+               (unsigned)(pageLength + 1));
+      freeTextTexture(&descriptionTexture);
+      renderFontRaw(&descriptionTexture, &uiFont,
+                    (int)(playbackFontSize(DESCRIPTION_TEXT_SIZE) * playbackFontScale + 0.5f),
+                    "Description page unavailable (not enough memory).",
+                    activeTheme->textPrimary,
+                    state.screenW - 2 * DESCRIPTION_MARGIN_X, TEXT_WRAP);
+      return;
+   }
+   copyDescriptionContent(offset, pageText, pageLength);
+   pageText[pageLength] = 0;
+
+   // Only one description page owns a GPU texture at a time.
+   freeTextTexture(&descriptionTexture);
+   renderFontRaw(&descriptionTexture, &uiFont,
+                 (int)(playbackFontSize(DESCRIPTION_TEXT_SIZE) * playbackFontScale + 0.5f),
+                 pageText, activeTheme->textPrimary,
+                 state.screenW - 2 * DESCRIPTION_MARGIN_X, TEXT_WRAP);
+   free(pageText);
+
+   int viewHeight = state.screenH - 2 * DESCRIPTION_MARGIN_Y;
+   if (descriptionTexture.tex.h > viewHeight && descriptionPageMaxBytes > 16) {
+      // If the actual font metrics exceed the estimate, tighten the page budget
+      // and rebuild the index. Keep the current text position visible.
+      size_t targetOffset = offset;
+      // Tighten only by the measured overflow ratio. Halving the budget on
+      // even a small overflow left most pages using only half the screen.
+      float fitRatio = (float)viewHeight / (float)descriptionTexture.tex.h;
+      fitRatio *= 0.92f; // leave a small margin for rasterizer rounding
+      if (fitRatio < 0.25f) fitRatio = 0.25f;
+      if (fitRatio > 0.90f) fitRatio = 0.90f;
+      size_t adjustedBytes = (size_t)(descriptionPageMaxBytes * fitRatio);
+      if (adjustedBytes < 16) adjustedBytes = 16;
+      descriptionPageMaxBytes = adjustedBytes;
+      int adjustedNewlines = (int)(descriptionPageMaxNewlines * fitRatio);
+      if (adjustedNewlines < 1) adjustedNewlines = 1;
+      if (adjustedNewlines >= descriptionPageMaxNewlines &&
+          descriptionPageMaxNewlines > 1)
+         adjustedNewlines = descriptionPageMaxNewlines - 1;
+      descriptionPageMaxNewlines = adjustedNewlines;
+      recountDescriptionPages();
+
+      size_t scanOffset = 0;
+      int targetPage = 0;
+      while (scanOffset < targetOffset && targetPage + 1 < descriptionPageCount) {
+         size_t length = descriptionNextPageLength(scanOffset,
+                                                    descriptionContentLength - scanOffset);
+         if (!length) break;
+         scanOffset += length;
+         targetPage++;
+      }
+      state.descriptionPage = targetPage;
+      renderDescriptionPage(targetPage);
+      return;
+   }
+
+   if (!descriptionTexture.tex.w || !descriptionTexture.tex.h) {
+      logError("[yt-description] page rasterization failed page=%d/%d bytes=%u\n",
+               page + 1, descriptionPageCount, (unsigned)pageLength);
+      renderFontRaw(&descriptionTexture, &uiFont,
+                    (int)(playbackFontSize(DESCRIPTION_TEXT_SIZE) * playbackFontScale + 0.5f),
+                    "This description page could not be rendered.",
+                    activeTheme->textPrimary,
+                    state.screenW - 2 * DESCRIPTION_MARGIN_X, TEXT_WRAP);
+   }
+
+   logInfo("[yt-description] page=%d/%d bytes=%u texture=%dx%d\n",
+           page + 1, descriptionPageCount, (unsigned)pageLength,
+           descriptionTexture.tex.w, descriptionTexture.tex.h);
+}
+
+static void recountDescriptionPages(void)
+{
+   descriptionPageCount = 0;
+   size_t offset = 0;
+   while (offset < descriptionContentLength) {
+      size_t pageLength = descriptionNextPageLength(offset, descriptionContentLength - offset);
+      if (!pageLength) break;
+      offset += pageLength;
+      descriptionPageCount++;
+   }
+   if (descriptionPageCount <= 0) descriptionPageCount = 1;
+}
+
 static void renderDescription(void)
 {
-   char content[3072];
    char views[48];
    const char *rawViews = state.viewCount[0] ? state.viewCount : "Unavailable";
    // Add thousands separators to the numeric view count without changing the source value.
@@ -3658,16 +3913,48 @@ static void renderDescription(void)
    }
    views[out] = 0;
 
-   snprintf(content, sizeof content,
-            "METADATA\nViews: %s\nPublished: %s\nLikes: %s\n"
-            "----------------------------------------\n"
-            "DESCRIPTION\n\n%s",
-            views, state.publishedDate[0] ? state.publishedDate : "Unavailable",
-            state.likeCount[0] ? state.likeCount : "Loading...",
-            state.description[0] ? state.description : "No description.");
-   if (descriptionTexture.tex.w) freeTextTexture(&descriptionTexture);
-   renderFontRaw(&descriptionTexture, &uiFont, (int)(playbackFontSize(DESCRIPTION_TEXT_SIZE) * playbackFontScale + 0.5f), content,
-                 activeTheme->textPrimary, state.screenW - 2 * DESCRIPTION_MARGIN_X, TEXT_WRAP);
+   const char *description = state.description && state.description[0]
+                           ? state.description : "No description.";
+   clearDescriptionPages();
+   int headerLength = snprintf(descriptionMetadata, sizeof descriptionMetadata,
+                               "METADATA\nViews: %s\nPublished: %s\nLikes: %s\n"
+                               "----------------------------------------\n"
+                               "DESCRIPTION\n\n",
+                               views, state.publishedDate[0] ? state.publishedDate : "Unavailable",
+                               state.likeCount[0] ? state.likeCount : "Loading...");
+   if (headerLength < 0) headerLength = 0;
+   if (headerLength >= (int)sizeof descriptionMetadata)
+      headerLength = (int)sizeof descriptionMetadata - 1;
+
+   descriptionMetadataLength = (size_t)headerLength;
+   descriptionBody = description;
+   descriptionBodyLength = strlen(descriptionBody);
+   descriptionContentLength = descriptionMetadataLength + descriptionBodyLength;
+
+   int fontSize = (int)(playbackFontSize(DESCRIPTION_TEXT_SIZE) * playbackFontScale + 0.5f);
+   int viewHeight = state.screenH - 2 * DESCRIPTION_MARGIN_Y;
+   int maxWidth = state.screenW - 2 * DESCRIPTION_MARGIN_X;
+   int safeLines = fontSize > 0 ? (int)(viewHeight / (fontSize * 1.35f)) - 1 : 4;
+   if (safeLines < 3) safeLines = 3;
+
+   // Use almost the full available vertical space. The previous half-line
+   // budget and 256-byte ceiling forced ordinary descriptions into tiny pages.
+   descriptionPageMaxNewlines = safeLines - 1;
+   if (descriptionPageMaxNewlines < 2) descriptionPageMaxNewlines = 2;
+
+   // Average glyph width is smaller than the font height. This is an initial
+   // estimate; the rasterized texture height is checked and corrected below.
+   int charsPerLine = fontSize > 0 ? (maxWidth * 2) / fontSize : 32;
+   if (charsPerLine < 8) charsPerLine = 8;
+   int pageBytes = charsPerLine * (safeLines - 1);
+   if (pageBytes < 512) pageBytes = 512;
+   if (pageBytes > 4096) pageBytes = 4096;
+   descriptionPageMaxBytes = (size_t)pageBytes;
+
+   recountDescriptionPages();
+
+   if (state.descriptionPage >= descriptionPageCount) state.descriptionPage = descriptionPageCount - 1;
+   renderDescriptionPage(state.descriptionPage);
    state.descriptionRendered = 1;
 }
 
@@ -3688,8 +3975,14 @@ static void openDescription(void)
          strCopy(state.likeCount, sizeof state.likeCount, "Unavailable");
       }
    }
-   if (!state.descriptionRendered) renderDescription();
-   state.descriptionScroll = 0;
+   if (!state.descriptionRendered) {
+      state.descriptionPage = 0;
+      renderDescription();
+   } else if (state.descriptionPage != 0) {
+      state.descriptionPage = 0;
+      renderDescriptionPage(0);
+   }
+   state.descriptionPage = 0;
    state.descriptionVisible = 1;
 }
 
@@ -3702,14 +3995,16 @@ static void handleDescriptionInput(void)
       return;
    }
 
-   static ButtonRepeat scrollRepeat;
-   if (isRepeatDue(&scrollRepeat, getPadButtonState(PAD_BTN_DOWN)))    state.descriptionScroll += DESCRIPTION_SCROLL_STEP;
-   else if (isRepeatDue(&scrollRepeat, getPadButtonState(PAD_BTN_UP))) state.descriptionScroll -= DESCRIPTION_SCROLL_STEP;
-
-   int viewHeight = state.screenH - 2 * DESCRIPTION_MARGIN_Y;
-   int maxScroll = descriptionTexture.tex.h > viewHeight ? descriptionTexture.tex.h - viewHeight : 0;
-   if (state.descriptionScroll > maxScroll) state.descriptionScroll = maxScroll;
-   if (state.descriptionScroll < 0) state.descriptionScroll = 0;
+   int nextPage = state.descriptionPage;
+   if (isPadButtonPressed(PAD_BTN_DOWN) || isPadButtonPressed(PAD_BTN_RIGHT)) {
+      if (nextPage + 1 < descriptionPageCount) nextPage++;
+   } else if (isPadButtonPressed(PAD_BTN_UP) || isPadButtonPressed(PAD_BTN_LEFT)) {
+      if (nextPage > 0) nextPage--;
+   }
+   if (nextPage != state.descriptionPage) {
+      state.descriptionPage = nextPage;
+      renderDescriptionPage(state.descriptionPage);
+   }
 }
 
 // START opens the chapter picker: the rows are rasterised once (off the draw path), the widest time
@@ -4002,7 +4297,7 @@ static void handlePlaybackOptionsInput(void)
             int trackIndex = subtitleTrackAtMenuIndex(optionsDropdownSelected);
             if (!state.isLive && trackIndex >= 0 && trackIndex < state.captionCount) {
                CaptionTrack *track = &state.captionTracks[trackIndex];
-               if (setSubtitleLanguage(track->languageCode) == 0) {
+               if (setPlaybackSubtitleLanguage(track->languageCode) == 0) {
                   lastSubtitlePick = trackIndex;
                   if (subtitlesEnabled) setSubtitleTrack(trackIndex);
                   char notice[112];
@@ -4114,7 +4409,7 @@ static void handlePlaybackOptionsInput(void)
       } else {
          prepareSubtitleOptions();
          int selectedTrack = (lastSubtitlePick >= 0 && lastSubtitlePick < state.captionCount) ?
-                             lastSubtitlePick : findPreferredSubtitleTrack(getContentRegionLanguageCode());
+                             lastSubtitlePick : findPreferredSubtitleTrack(getPlaybackSubtitleLanguage());
          optionsDropdownSelected = subtitleMainMenuIndexForTrack(selectedTrack);
       }
       optionsDropdownRepeat.timer = optionsDropdownRepeat.repeats = 0;
@@ -4389,7 +4684,7 @@ static void updateOptionsCurrentValues(int valueWidth)
    int subtitleIndex = state.subtitlePick;
    if (subtitleIndex < 0 || subtitleIndex >= state.captionCount) subtitleIndex = lastSubtitlePick;
    if (subtitleIndex < 0 || subtitleIndex >= state.captionCount)
-      subtitleIndex = findPreferredSubtitleTrack(getContentRegionLanguageCode());
+      subtitleIndex = findPreferredSubtitleTrack(getPlaybackSubtitleLanguage());
    const char *subtitleValue = (subtitleIndex >= 0 && subtitleIndex < state.captionCount) ?
                                state.captionTracks[subtitleIndex].name : "Unavailable";
    setOptionsCurrentValue(&optionsCurrentValueLabels[2], subtitleValue, valueWidth);
@@ -5479,22 +5774,28 @@ static void drawSubtitle(void)
 #endif
 }
 
-// the description over the whole video: a semi-transparent black layer, then the slice of the text
-// texture the scroll position selects (the texture is drawn through a window, so no clipping is needed).
+// the current bounded description page over a semi-transparent black layer.
 static void drawDescription(void)
 {
    fillGfxRectangle(0, 0, state.screenW, state.screenH, activeTheme->scrim);
    if (descriptionTexture.tex.w == 0) return;
 
    int viewHeight = state.screenH - 2 * DESCRIPTION_MARGIN_Y;
-   int visibleHeight = descriptionTexture.tex.h - state.descriptionScroll;
+   int visibleHeight = descriptionTexture.tex.h;
    if (visibleHeight > viewHeight) visibleHeight = viewHeight;
    if (visibleHeight <= 0) return;
 
-   float sliceTop    = (float)state.descriptionScroll / descriptionTexture.tex.h;
-   float sliceBottom = (float)(state.descriptionScroll + visibleHeight) / descriptionTexture.tex.h;
+   float sliceBottom = (float)visibleHeight / descriptionTexture.tex.h;
    drawGfxTexture(DESCRIPTION_MARGIN_X, DESCRIPTION_MARGIN_Y, descriptionTexture.tex.w, visibleHeight,
-                  descriptionTexture.tex, 0.0f, sliceTop, 1.0f, sliceBottom, 0xFFFFFFFF, GFX_FILTER_NEAREST);
+                  descriptionTexture.tex, 0.0f, 0.0f, 1.0f, sliceBottom, 0xFFFFFFFF, GFX_FILTER_NEAREST);
+   char pageText[24];
+   snprintf(pageText, sizeof pageText, "%d/%d", state.descriptionPage + 1, descriptionPageCount);
+   setLabelText(&descriptionPageLabel, pageText);
+   refreshLabelScale(&descriptionPageLabel);
+   setLabelColor(&descriptionPageLabel, activeTheme->textSecondary);
+   moveLabel(&descriptionPageLabel, state.screenW - DESCRIPTION_MARGIN_X - descriptionPageLabel.tt.tex.w,
+             DESCRIPTION_MARGIN_Y - 34);
+   drawLabel(&descriptionPageLabel);
 }
 
 // the chapter picker: a dim layer, then a centred column of rows windowed around the selection;
@@ -5995,8 +6296,10 @@ static void termPlay(void)
    if (state.chThreadActive) { joinPlaybackWorker("chapters", state.chWorkerTid); state.chThreadActive = 0; }
    if (state.metadataThreadActive) { joinPlaybackWorker("metadata", state.metadataWorkerTid); state.metadataThreadActive = 0; }
    if (state.liveBaseRefreshActive) { joinPlaybackWorker("live-base-refresh", state.liveBaseRefreshTid); state.liveBaseRefreshActive = 0; }
-   if (state.liveBaseRefreshInfo) { free(state.liveBaseRefreshInfo->captions); free(state.liveBaseRefreshInfo); state.liveBaseRefreshInfo = NULL; }
+   if (state.liveBaseRefreshInfo) { freeStreamInfo(state.liveBaseRefreshInfo); state.liveBaseRefreshInfo = NULL; }
    if (state.nextThreadActive) { joinPlaybackWorker("autoplay", state.nextWorkerTid); state.nextThreadActive = 0; }
+   free(state.description);
+   state.description = NULL;
    free(state.subtitleTrack);
    state.subtitleTrack = NULL;
    free(state.captionTracks);
@@ -6030,6 +6333,7 @@ static void termPlay(void)
    if (state.retiringResolutionPlayer) { destroyVideoPlayer(state.retiringResolutionPlayer); state.retiringResolutionPlayer = NULL; }
    if (state.liveRetiringPlayer) { destroyVideoPlayer(state.liveRetiringPlayer); state.liveRetiringPlayer = NULL; }
    if (state.vodRetiringPlayer) { destroyVideoPlayer(state.vodRetiringPlayer); state.vodRetiringPlayer = NULL; }
+   freeLabel(&descriptionPageLabel);
    freeLabel(&statusLabel);
    for (int i = 0; i < STAT_LINES; i++) freeLabel(&statLabels[i]);
    freeLabel(&timeLeftLabel);
@@ -6067,7 +6371,7 @@ static void termPlay(void)
    for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++) freeLabel(&playbackSponsorCategoryLabels[i]);
    for (int i = 0; i < 3; i++) freeLabel(&playbackSponsorActionLabels[i]);
    freeVolumeMeter(&volumeMeter);
-   freeTextTexture(&descriptionTexture);
+   clearDescriptionPages();
    if (state.nextThumbJpeg) { free(state.nextThumbJpeg); state.nextThumbJpeg = NULL; }
    if (state.nextImageRequested) cancelImageAsync();
    if (state.nextThumbTexture.offset) { finishGfx(); freeGfxTexture(&state.nextThumbTexture); }
