@@ -133,6 +133,7 @@ geometry and HUD placement in their designed coordinates, while playback labels 
 text are rasterised using `playbackFontScale`. On entry, that value is initialised from the
 selected application UI scale. **Playback Options → Playback Settings → UI Scaling** can
 then switch the playback text scale between 1.0x and 1.5x for the current playback screen.
+The UI Scaling row accepts **Left**, **Right**, or **Cross** to toggle between those two values.
 
 This is intentionally separate from the graphics-layer transform used by the home and
 navigation screens. Do not multiply video coordinates, seek-bar geometry or overlay
@@ -149,6 +150,7 @@ Existing opt-in points provide examples of the intended pattern:
 - `screens/home.c`: Home sort pills measure their scale-aware labels and reserve the right side of the header; Trending and Live tabs compact around the active category when the 4:3 layout has less horizontal space. The PS3 Playlists page uses the same measured header geometry for its Watch Later / PS3 tabs and Newest / A-Z pills.
 - `video-grid.c`: playlist count badges scale their three-line glyph and padding with the UI factor without changing thumbnail dimensions. Local PS3 playlists supply the newest video's ID as the thumbnail source, so the existing grid thumbnail path is reused.
 - `screens/playlist-picker.c`: the add-to-playlist chooser keeps its panel and row geometry within the screen while its labels opt into the selected UI scale.
+- `screens/home.c`: Download Settings uses a larger row font and roomier row geometry at 1.5x, and recalculates the label/value column widths and notice wrapping width for its larger panel. Since label raster dimensions grow but logical widths do not, call `refreshLabelLayout()` after changing a scaled label's width. Center the selected-value highlight using the refreshed texture height and the same row geometry used for the label.
 - `downloads.c`: the download overlay label opts into scale-aware rendering.
 
 These are examples, not a guarantee that every element in every screen scales automatically.

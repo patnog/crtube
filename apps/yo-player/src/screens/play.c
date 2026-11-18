@@ -4468,9 +4468,8 @@ static void updatePlaybackSettings(void)
    int cross = isPadButtonPressed(PAD_BTN_CROSS);
 
    // Cross is not an adjustment control for these numeric/display settings.
-   if (playbackSettingsSelected == 1 || playbackSettingsSelected == 2 ||
-       playbackSettingsSelected == 3 || playbackSettingsSelected == 5 ||
-       playbackSettingsSelected == 8)
+   if (playbackSettingsSelected == 2 || playbackSettingsSelected == 3 ||
+       playbackSettingsSelected == 5 || playbackSettingsSelected == 8)
       cross = 0;
 
    if (playbackSettingsSelected == 5) {

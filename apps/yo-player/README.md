@@ -34,7 +34,8 @@ It reuses what this repo already has:
 - **Chapters** — jump around by chapter. Chapters come from the description's timestamps, falling back to
   YouTube's own chapter list when the description has none. Chapter boundaries are notched onto the seek bar.
 - **Subtitles** — cycle through the video's available subtitle languages (off by default); the chosen language
-  shows in the player, and lines are drawn above the seek bar. Downloaded subtitle tracks are stored with their video and remain available for local playback.
+  shows in the player, and lines are drawn above the seek bar. Automatic translation can progressively translate the selected source track into a chosen language or the Content Region language. Downloaded subtitle tracks are stored with their video and remain available for local playback.
+- **Localized interface** — choose English, Brazilian Portuguese, Spanish, French or German for CRTube menus and controls. The selection is saved and restored on launch; missing catalog entries fall back to English.
 - **SponsorBlock** — community-marked segments are shown on the seek bar. Each category can be configured as Skip, Ask (Square skips the active segment) or Keep.
 - **No PSN, no ads** — talks to YouTube directly; appears under the XMB **Video** column like the old app.
 
@@ -294,7 +295,10 @@ overscan are saved immediately. A bad value quietly falls back to its default.
 
 - **`autoplay`** — `on` (default) plays the next recommendation when a video ends; `off` returns to the library.
 - **`enable-1080p60`** — `off` (default) or `on`; enables experimental TEE Decoder selection for supported H.264 50/60-fps streams.
-- **`subtitle-language`** — preferred language code (default `en`); creator-provided tracks are tried before English auto-generated captions.
+- **`subtitle-language`** — preferred language for downloaded subtitles (`auto` by default, following Content Region, or a supported language code as a manual override).
+- **`playback-subtitle-language`** — preferred subtitle language for streaming playback (`auto` by default, following Content Region, or a supported language code as a manual override). This is independent of download subtitle selection.
+- **`auto-translate-language`** — `auto` (default, follows Content Region), `off`, or a supported Google Translate target code for automatic playback subtitle translation.
+- **`app-language`** — `en` (default), `pt-BR`, `es`, `fr` or `de`; selects the CRTube interface language.
 - **`download-resolution`** — `0` (Auto, default), `1` (480p), `2` (720p) or `3` (1080p).
 - **`download-audio-language`** — `original` (default) or a supported language code for downloaded audio.
 - **`download-audio-auto-dub`** — `on` (default) allows YouTube auto-dubbed tracks when a translated audio language is selected; `off` prefers uploaded tracks only. This option is not applicable to Original upload.
@@ -352,6 +356,51 @@ They are stored as `subtitle-text-color`, `subtitle-background-color`,
 Their accepted ranges are respectively 0–5, 0–4, 0–4, 0–2 and 0–5.
 **Subtitle Offset** is separate (`subtitle-offset`, -150 to +150 virtual screen
 pixels); positive values move subtitles upward.
+
+## Application interface language
+
+Choose **Home → Settings → App Language** to change the language used by CRTube's own menus,
+settings, prompts and playback interface. The available choices are English, Português (Brasil),
+Español, Français and Deutsch. The selected language is saved as `app-language` in `settings.txt`
+and restored at startup. English is the canonical fallback for any string not translated in the
+selected catalog.
+
+This setting does not translate YouTube-provided content such as video titles, channel names,
+descriptions or comments. It is also independent of Content Region and subtitle-language
+preferences.
+
+## Automatic subtitle translation
+
+Open **Playback Options → Playback Settings → Auto-translate subtitles** to configure the
+translation target:
+
+- **Off** — do not create an automatically translated subtitle track.
+- **Auto (Content Region)** — use the language associated with the current Content Region.
+- **A named language** — translate into the selected target language, independently of the
+  application interface language and Content Region.
+
+The player fetches the original subtitle track and translates it through Google's
+`translate.googleapis.com` endpoint. It groups subtitle cues into sentences, then requests and
+publishes translated chunks progressively as playback approaches them; it does not need to wait
+for the entire track before showing the first translated captions. The generated track is exposed
+alongside the video's available subtitle tracks and is marked with an `(auto-translated)` suffix.
+
+Changing the target refreshes the generated track. Translation work is cancelled when another
+track is selected or playback closes. If the service returns an error or rate-limits requests,
+translation stops; cues already translated remain translated and the remaining cues stay in the
+source language. If no translated chunk can be obtained, the generated track is not made
+available. This feature requires an active network connection and relies on an unofficial
+Google Translate endpoint, which may change or become unavailable.
+
+The playback target is stored in `auto-translate-language`:
+- `auto` (default) follows the current Content Region language.
+- `off` disables automatic translation.
+- Any supported target code selects that language (for example, `pt-BR`, `en`, `es`, `fr` or
+  `de`).
+
+The source subtitle preference used by playback is stored separately in
+`playback-subtitle-language`. Download subtitle preferences use `subtitle-language` and the
+download settings described in [Downloads](#downloads).
 
 ## Content region
 

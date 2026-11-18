@@ -2352,16 +2352,42 @@ static void updateSettingsPanel(void)
 
 static void drawDownloadSettingsPanel(void)
 {
+   int largeScale = isLargeUiScale();
+   int panelW = largeScale ? 820 : DOWNLOAD_SETTINGS_PANEL_W;
+   int panelH = largeScale ? 560 : DOWNLOAD_SETTINGS_PANEL_H;
+   int rowTop = largeScale ? 76 : DOWNLOAD_SETTINGS_ROW_TOP;
+   int rowStep = largeScale ? 56 : DOWNLOAD_SETTINGS_ROW_STEP;
+   int rowHeight = largeScale ? 48 : 40;
+   if (panelW > home.screenW - 32) panelW = home.screenW - 32;
+   if (panelH > home.screenH - 32) panelH = home.screenH - 32;
+
+   // Label raster sizes grow with UI Scaling, but logical wrapping widths do
+   // not. Rebalance the two columns against the larger panel and refresh each
+   // texture before measuring it for placement and the selected-value highlight.
+   int nameWidth = panelW / 2 - 20;
+   int valueWidth = panelW / 2 - 48;
+   int noticeWidth = panelW - 68;
+   for (int i = 0; i < DOWNLOAD_SETTINGS_ROW_COUNT; i++) {
+      if (downloadSettingsLabels[i].width != nameWidth) {
+         downloadSettingsLabels[i].width = nameWidth;
+         refreshLabelLayout(&downloadSettingsLabels[i]);
+      }
+      if (downloadSettingsValues[i].width != valueWidth) {
+         downloadSettingsValues[i].width = valueWidth;
+         refreshLabelLayout(&downloadSettingsValues[i]);
+      }
+   }
+   if (downloadSettingsNotice.width != noticeWidth) {
+      downloadSettingsNotice.width = noticeWidth;
+      refreshLabelLayout(&downloadSettingsNotice);
+   }
+
    setLabelIfChanged(&downloadSettingsValues[0], downloadResolutionName(getDownloadResolution()));
    setLabelIfChanged(&downloadSettingsValues[1], downloadLanguageName(getDownloadAudioLanguage(), 1));
    setLabelIfChanged(&downloadSettingsValues[2], strcmp(getDownloadAudioLanguage(), "original") == 0 ?
                      LOC(STR_NOT_APPLICABLE) : (getDownloadAutoDubEnabled() ? LOC(STR_ALLOW_AUTO_GENERATED) : LOC(STR_UPLOADED_ONLY)));
    setLabelIfChanged(&downloadSettingsValues[3], getDownloadPrimarySubtitlesEnabled() ? LOC(STR_AUTO_MATCH_AUDIO) : LOC(STR_OFF));
    setLabelIfChanged(&downloadSettingsValues[4], downloadLanguageName(getDownloadSecondarySubtitleLanguage(), 0));
-   int panelW = isLargeUiScale() ? 820 : DOWNLOAD_SETTINGS_PANEL_W;
-   int panelH = isLargeUiScale() ? 560 : DOWNLOAD_SETTINGS_PANEL_H;
-   if (panelW > home.screenW - 32) panelW = home.screenW - 32;
-   if (panelH > home.screenH - 32) panelH = home.screenH - 32;
    int x = (home.screenW - panelW) / 2;
    int y = (home.screenH - panelH) / 2;
    fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
@@ -2373,17 +2399,17 @@ static void drawDownloadSettingsPanel(void)
    for (int i = 0; i < DOWNLOAD_SETTINGS_ROW_COUNT; i++) {
       Label *name = &downloadSettingsLabels[i];
       Label *settingValue = &downloadSettingsValues[i];
-      int rowY = y + DOWNLOAD_SETTINGS_ROW_TOP + i * DOWNLOAD_SETTINGS_ROW_STEP;
+      int rowY = y + rowTop + i * rowStep;
       refreshLabelScale(name);
       setLabelColor(name, activeTheme->textPrimary);
-      moveLabel(name, x + 34, getCenteredLabelY(name, rowY, 40));
+      moveLabel(name, x + 34, getCenteredLabelY(name, rowY, rowHeight));
       drawLabel(name);
       refreshLabelScale(settingValue);
       int valueW = settingValue->tt.tex.w + 24;
       if (valueW < 140) valueW = 140;
       if (valueW > panelW / 2) valueW = panelW / 2;
       int valueX = x + panelW - 34 - valueW;
-      int valueY = getCenteredLabelY(settingValue, rowY, 40);
+      int valueY = getCenteredLabelY(settingValue, rowY, rowHeight);
       if (i == home.downloadSettingsSelected)
          fillGfxRoundedRectangle(valueX, valueY - 5, valueW, settingValue->tt.tex.h + 10, 7,
                                  activeTheme->rowHighlight);
@@ -3795,9 +3821,9 @@ static void initHome(void)
       LOC(STR_VIDEO_RESOLUTION), LOC(STR_AUDIO_LANGUAGE), LOC(STR_AUDIO_SOURCE), LOC(STR_PRIMARY_SUBTITLES), LOC(STR_SECONDARY_SUBTITLES_OPTIONAL)
    };
    for (int i = 0; i < DOWNLOAD_SETTINGS_ROW_COUNT; i++) {
-      initLabel(&downloadSettingsLabels[i], &uiFont, 0, 0, DOWNLOAD_SETTINGS_PANEL_W / 2 - 50, AUTO, 19,
+      initLabel(&downloadSettingsLabels[i], &uiFont, 0, 0, DOWNLOAD_SETTINGS_PANEL_W / 2 - 50, AUTO, 20,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, downloadSettingNames[i]);
-      initLabel(&downloadSettingsValues[i], &uiFont, 0, 0, DOWNLOAD_SETTINGS_PANEL_W / 2 - 40, AUTO, 19,
+      initLabel(&downloadSettingsValues[i], &uiFont, 0, 0, DOWNLOAD_SETTINGS_PANEL_W / 2 - 40, AUTO, 20,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
    }
    initLabel(&downloadSettingsNotice, &uiFont, 0, 0, DOWNLOAD_SETTINGS_PANEL_W - 68, AUTO, 14,
