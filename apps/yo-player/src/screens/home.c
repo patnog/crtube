@@ -2390,9 +2390,9 @@ static void drawDownloadSettingsPanel(void)
    setLabelIfChanged(&downloadSettingsValues[4], downloadLanguageName(getDownloadSecondarySubtitleLanguage(), 0));
    int x = (home.screenW - panelW) / 2;
    int y = (home.screenH - panelH) / 2;
-   fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
-   fillGfxRoundedRectangle(x, y, panelW, panelH, 10, activeTheme->appBg);
-   fillGfxRoundedRectangle(x, y, panelW, 4, 2, activeTheme->accent);
+   fillGfxRectangleFixed(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 10, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
    refreshLabelScale(&downloadSettingsTitle);
    drawLabelCentered(&downloadSettingsTitle, home.screenW / 2, y + 30);
 
@@ -2411,7 +2411,7 @@ static void drawDownloadSettingsPanel(void)
       int valueX = x + panelW - 34 - valueW;
       int valueY = getCenteredLabelY(settingValue, rowY, rowHeight);
       if (i == home.downloadSettingsSelected)
-         fillGfxRoundedRectangle(valueX, valueY - 5, valueW, settingValue->tt.tex.h + 10, 7,
+         fillGfxRoundedRectangleFixed(valueX, valueY - 5, valueW, settingValue->tt.tex.h + 10, 7,
                                  activeTheme->rowHighlight);
       int disabled = i == 2 && strcmp(getDownloadAudioLanguage(), "original") == 0;
       setLabelColor(settingValue, disabled ? activeTheme->textSecondary :
