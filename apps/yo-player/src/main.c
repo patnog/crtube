@@ -18,6 +18,7 @@
 #include "vfs.h"
 #include "http.h"
 #include "gfx.h"
+#include "image-loader.h"
 #include "theme.h"
 #include "pad.h"
 #include "audio.h"
@@ -353,9 +354,14 @@ int main(int argc, char **argv)
 
    }
 
+   logInfo("[shutdown] begin source=%s\n", appExitRequested ? "system-or-app" : "unknown");
+   // Stop new network work first. Screen/service teardown below cancels and joins
+   // its workers while the HTTP transport and VFS are still alive.
+   setHttpRequestsCancelled(1);
    stopScreenSaver();
    termScreenSaver();
    changeScreen(NULL);
+   shutdownImageLoader();
    applyPendingTeeDisableRequest();
    shutdownAccount();     // stop a sign-in poll before the http layer goes away
    shutdownDownloads();   // cancel + join any in-flight download before the http/vfs layers go away
@@ -368,5 +374,6 @@ int main(int argc, char **argv)
    termGfx();
    shutdownHttp();
    shutdownVfs();
+   logInfo("[shutdown] complete\n");
    return 0;
 }

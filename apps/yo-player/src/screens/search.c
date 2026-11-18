@@ -54,6 +54,7 @@
 #define CHANNEL_AVATAR_CACHE_DIR "/dev_hdd0/tmp/crtube/channel-avatar-cache"
 #define CHANNEL_AVATAR_CACHE_LIMIT (5ULL * 1024ULL * 1024ULL)
 #define CHANNEL_INFO_TEXT_SIZE 24
+#define CHANNEL_AVATAR_SIZE 152
 static const char *SortNames[SORT_COUNT] = { "Relevance", "Views", "Newest" };
 static const char *ChannelSortNames[CHANNEL_SORT_COUNT] = { "Latest", "Popular", "Oldest" };
 
@@ -469,7 +470,7 @@ static void getChannelInfoTextRect(int *x, int *y, int *w, int *h)
    getChannelInfoPanelRect(&panelX, &panelY, &panelW, &panelH);
 
    *x = panelX + CHANNEL_INFO_PANEL_PAD;
-   *y = panelY + CHANNEL_INFO_PANEL_PAD + 76 + 16;
+   *y = panelY + CHANNEL_INFO_PANEL_PAD + CHANNEL_AVATAR_SIZE + 16;
    *w = panelW - 2 * CHANNEL_INFO_PANEL_PAD;
    *h = panelH - (*y - panelY) - CHANNEL_INFO_PANEL_PAD;
    if (*w < 1) *w = 1;
@@ -783,7 +784,7 @@ static void initSearch(void)
    int panelX, panelY, panelW, panelH;
    getChannelInfoPanelRect(&panelX, &panelY, &panelW, &panelH);
    (void)panelX; (void)panelY; (void)panelH;
-   int channelNameWidth = panelW - 2 * CHANNEL_INFO_PANEL_PAD - 76 - 20;
+   int channelNameWidth = panelW - 2 * CHANNEL_INFO_PANEL_PAD - CHANNEL_AVATAR_SIZE - 20;
    if (channelNameWidth < 1) channelNameWidth = 1;
    initLabel(&channelAvatarNameLabel, &uiFont, 0, 0, channelNameWidth, AUTO, 26,
              activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS,
@@ -1512,7 +1513,7 @@ static void drawSearch(void)
       fillGfxRoundedRectangle(panelX, panelY, panelW, panelH, 14, activeTheme->appBg);
       fillGfxRectangle(panelX, panelY, panelW, 4, activeTheme->accent);
 
-      const int avatarSize = 76;
+      const int avatarSize = CHANNEL_AVATAR_SIZE;
       int avatarX = panelX + CHANNEL_INFO_PANEL_PAD;
       int avatarY = panelY + CHANNEL_INFO_PANEL_PAD;
       if (channelAvatarLoaded) {

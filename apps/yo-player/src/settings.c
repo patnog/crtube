@@ -25,6 +25,7 @@ static const char *DEFAULT_SETTINGS =
    "# on = allow experimental TEE 1080p50/60 playback; off = Sony VDEC only, up to 1080p30\n"
    "subtitle-language=auto\n"
    "playback-subtitle-language=auto\n"
+   "auto-translate-language=auto\n"
    "subtitle-text-color=0\n"
    "subtitle-background-color=0\n"
    "subtitle-background-opacity=3\n"
@@ -33,6 +34,7 @@ static const char *DEFAULT_SETTINGS =
    "# Subtitle style: text color 0-5, background 0-4, opacity 0-4, highlight 0-2\n"
    "# subtitle language: auto follows the content region; otherwise a language code is a manual override\n"
    "# playback-subtitle-language affects Playback > Options > Subs language only; download settings use subtitle-language\n"
+   "# auto-translate-language: auto follows Content Region; off disables automatic translation; otherwise use a language code\n"
    "region=US\n"
    "# country used for YouTube content lists (two-letter gl code); default US\n"
    "\n"
@@ -95,6 +97,7 @@ static int autoplayEnabled = 1;
 static int enable1080p60 = 0;
 static char subtitleLanguage[12] = "auto";
 static char playbackSubtitleLanguage[12] = "auto";
+static char autoTranslateLanguage[12] = "auto";
 static int overscanPercent = 0;
 static int cropToFillOverscanPercent = 0;
 static int screensaverTimeout = 30;
@@ -138,6 +141,50 @@ static const DownloadLanguage DOWNLOAD_LANGUAGES[] = {
    { "uk", "Ukrainian" }
 };
 #define DOWNLOAD_LANGUAGE_COUNT ((int)(sizeof DOWNLOAD_LANGUAGES / sizeof DOWNLOAD_LANGUAGES[0]))
+
+// Google Translate language targets exposed by Playback > Playback Settings.
+// Keep this list independent from download-language preferences.
+static const AutoTranslateLanguage AUTO_TRANSLATE_LANGUAGES[] = {
+   { "af", "Afrikaans" }, { "sq", "Albanian" }, { "am", "Amharic" },
+   { "ar", "Arabic" }, { "hy", "Armenian" }, { "az", "Azerbaijani" },
+   { "eu", "Basque" }, { "be", "Belarusian" }, { "bn", "Bengali" },
+   { "bs", "Bosnian" }, { "bg", "Bulgarian" }, { "ca", "Catalan" },
+   { "ceb", "Cebuano" }, { "zh-CN", "Chinese (Simplified)" },
+   { "zh-TW", "Chinese (Traditional)" }, { "co", "Corsican" },
+   { "hr", "Croatian" }, { "cs", "Czech" }, { "da", "Danish" },
+   { "nl", "Dutch" }, { "en", "English" }, { "eo", "Esperanto" },
+   { "et", "Estonian" }, { "tl", "Filipino" }, { "fi", "Finnish" },
+   { "fr", "French" }, { "fy", "Frisian" }, { "gl", "Galician" },
+   { "ka", "Georgian" }, { "de", "German" }, { "el", "Greek" },
+   { "gu", "Gujarati" }, { "ht", "Haitian Creole" }, { "ha", "Hausa" },
+   { "haw", "Hawaiian" }, { "iw", "Hebrew" }, { "hi", "Hindi" },
+   { "hmn", "Hmong" }, { "hu", "Hungarian" }, { "is", "Icelandic" },
+   { "ig", "Igbo" }, { "id", "Indonesian" }, { "ga", "Irish" },
+   { "it", "Italian" }, { "ja", "Japanese" }, { "jw", "Javanese" },
+   { "kn", "Kannada" }, { "kk", "Kazakh" }, { "km", "Khmer" },
+   { "ko", "Korean" }, { "ku", "Kurdish" }, { "ky", "Kyrgyz" },
+   { "lo", "Lao" }, { "la", "Latin" }, { "lv", "Latvian" },
+   { "lt", "Lithuanian" }, { "lb", "Luxembourgish" },
+   { "mk", "Macedonian" }, { "mg", "Malagasy" }, { "ms", "Malay" },
+   { "ml", "Malayalam" }, { "mt", "Maltese" }, { "mi", "Maori" },
+   { "mr", "Marathi" }, { "mn", "Mongolian" }, { "my", "Myanmar" },
+   { "ne", "Nepali" }, { "no", "Norwegian" }, { "ny", "Nyanja" },
+   { "or", "Odia" }, { "ps", "Pashto" }, { "fa", "Persian" },
+   { "pl", "Polish" }, { "pt", "Portuguese" },
+   { "pt-BR", "Portuguese (Brazil)" }, { "pa", "Punjabi" },
+   { "ro", "Romanian" }, { "ru", "Russian" }, { "sm", "Samoan" },
+   { "gd", "Scots Gaelic" }, { "sr", "Serbian" }, { "st", "Sesotho" },
+   { "sn", "Shona" }, { "sd", "Sindhi" }, { "si", "Sinhala" },
+   { "sk", "Slovak" }, { "sl", "Slovenian" }, { "so", "Somali" },
+   { "es", "Spanish" }, { "su", "Sundanese" }, { "sw", "Swahili" },
+   { "sv", "Swedish" }, { "tg", "Tajik" }, { "ta", "Tamil" },
+   { "tt", "Tatar" }, { "te", "Telugu" }, { "th", "Thai" },
+   { "tr", "Turkish" }, { "tk", "Turkmen" }, { "uk", "Ukrainian" },
+   { "ur", "Urdu" }, { "ug", "Uyghur" }, { "uz", "Uzbek" },
+   { "vi", "Vietnamese" }, { "cy", "Welsh" }, { "xh", "Xhosa" },
+   { "yi", "Yiddish" }, { "yo", "Yoruba" }, { "zu", "Zulu" }
+};
+#define AUTO_TRANSLATE_LANGUAGE_COUNT ((int)(sizeof AUTO_TRANSLATE_LANGUAGES / sizeof AUTO_TRANSLATE_LANGUAGES[0]))
 
 static const ContentRegion REGIONS[] = {
    { "DE", "Germany", "de" }, { "AT", "Austria", "de" }, { "CH", "Switzerland", "de" },
@@ -318,6 +365,40 @@ void loadSettings(void)
       } else {
          memcpy(playbackSubtitleLanguage, playbackSubtitleLang, (size_t)length);
          playbackSubtitleLanguage[length] = 0;
+      }
+   }
+
+   const char *autoTranslate = findSettingValue(text, "auto-translate-language");
+   if (!autoTranslate) {
+      snprintf(autoTranslateLanguage, sizeof autoTranslateLanguage, "auto");
+      if (rewriteSettingKey(SETTINGS_PATH, "auto-translate-language", "auto") != 0)
+         logWarn("[settings] could not add auto-translate-language default\n");
+   } else {
+      int length = 0, valid = 1;
+      while (autoTranslate[length] && autoTranslate[length] != '\r' &&
+             autoTranslate[length] != '\n' && autoTranslate[length] != ' ' &&
+             autoTranslate[length] != '\t') {
+         char c = autoTranslate[length];
+         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '-')) valid = 0;
+         length++;
+         if (length >= (int)sizeof autoTranslateLanguage) { valid = 0; break; }
+      }
+      autoTranslateLanguage[0] = 0;
+      if (length >= 2 && valid) {
+         char candidate[sizeof autoTranslateLanguage];
+         memcpy(candidate, autoTranslate, (size_t)length);
+         candidate[length] = 0;
+         int found = strcmp(candidate, "auto") == 0 || strcmp(candidate, "off") == 0;
+         for (int i = 0; !found && i < AUTO_TRANSLATE_LANGUAGE_COUNT; i++)
+            if (strcmp(candidate, AUTO_TRANSLATE_LANGUAGES[i].code) == 0) found = 1;
+         if (found) snprintf(autoTranslateLanguage, sizeof autoTranslateLanguage, "%s", candidate);
+      }
+      if (!autoTranslateLanguage[0]) {
+         snprintf(autoTranslateLanguage, sizeof autoTranslateLanguage, "auto");
+         logWarn("[settings] invalid auto-translate-language, using auto\n");
+         if (rewriteSettingKey(SETTINGS_PATH, "auto-translate-language", "auto") != 0)
+            logWarn("[settings] could not reset auto-translate-language\n");
       }
    }
 
@@ -653,6 +734,45 @@ int setPlaybackSubtitleLanguage(const char *languageCode)
    }
    snprintf(playbackSubtitleLanguage, sizeof playbackSubtitleLanguage, "%s", languageCode);
    logInfo("[settings] playback-subtitle-language=%s\n", playbackSubtitleLanguage);
+   return 0;
+}
+
+const char *getAutoTranslateLanguage(void)
+{
+   if (strcmp(autoTranslateLanguage, "off") == 0) return "off";
+   return strcmp(autoTranslateLanguage, "auto") == 0 ? getContentRegionLanguageCode() : autoTranslateLanguage;
+}
+
+const char *getAutoTranslateLanguagePreference(void) { return autoTranslateLanguage; }
+int getAutoTranslateLanguageCount(void) { return AUTO_TRANSLATE_LANGUAGE_COUNT; }
+const AutoTranslateLanguage *getAutoTranslateLanguageAt(int index)
+{
+   return index >= 0 && index < AUTO_TRANSLATE_LANGUAGE_COUNT ? &AUTO_TRANSLATE_LANGUAGES[index] : NULL;
+}
+const char *getAutoTranslateLanguageName(const char *languageCode)
+{
+   if (!languageCode) return NULL;
+   for (int i = 0; i < AUTO_TRANSLATE_LANGUAGE_COUNT; i++)
+      if (strcmp(languageCode, AUTO_TRANSLATE_LANGUAGES[i].code) == 0)
+         return AUTO_TRANSLATE_LANGUAGES[i].name;
+   return NULL;
+}
+
+int setAutoTranslateLanguage(const char *languageCode)
+{
+   if (!languageCode || !languageCode[0]) return -1;
+   int valid = strcmp(languageCode, "auto") == 0 || strcmp(languageCode, "off") == 0;
+   for (int i = 0; !valid && i < AUTO_TRANSLATE_LANGUAGE_COUNT; i++)
+      if (strcmp(languageCode, AUTO_TRANSLATE_LANGUAGES[i].code) == 0) valid = 1;
+   if (!valid) return -1;
+   if (strcmp(autoTranslateLanguage, languageCode) == 0) return 0;
+   if (rewriteSettingKey(SETTINGS_PATH, "auto-translate-language", languageCode) != 0) {
+      logWarn("[settings] couldn't persist auto-translate-language=%s\n", languageCode);
+      return -1;
+   }
+   snprintf(autoTranslateLanguage, sizeof autoTranslateLanguage, "%s", languageCode);
+   logInfo("[settings] auto-translate-language=%s (resolved=%s)\n",
+           autoTranslateLanguage, getAutoTranslateLanguage());
    return 0;
 }
 

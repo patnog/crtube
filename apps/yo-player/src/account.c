@@ -33,6 +33,8 @@ static sys_ppu_thread_t signInTid;
 static int              signInActive;      // a sign-in thread exists and has not been joined
 static volatile int     signInFinished;    // that thread has returned
 static volatile int     signInCancel;      // asks it to stop
+static sys_ppu_thread_t revokeTid;
+static int              revokeThreadActive;
 
 static const HttpHeader FORM_HEADERS[] = { { "Content-Type", "application/x-www-form-urlencoded" } };
 static const HttpHeader JSON_HEADERS[] = { { "Content-Type", "application/json" } };
@@ -122,6 +124,7 @@ void signOut(void)
 {
    if (!lockReady) return;
    cancelSignIn();
+   if (revokeThreadActive) { joinThread(revokeTid); revokeThreadActive = 0; }
    static char revoking[OAUTH_REFRESH_TOKEN_MAX];   // static: the revoke thread reads it after we return
    lock(&accountLock);
    strCopy(revoking, sizeof revoking, refreshToken);
@@ -129,8 +132,9 @@ void signOut(void)
    status.stage = SIGNIN_IDLE;
    unlock(&accountLock);
 
-   sys_ppu_thread_t tid;
-   if (revoking[0]) spawnThread(&tid, revokeWorker, (uint64_t)(uintptr_t)revoking, THREAD_PRIORITY_LOW, THREAD_STACK_SIZE_64KB, "yt-revoke");
+   if (revoking[0])
+      revokeThreadActive = spawnJoinableThread(&revokeTid, revokeWorker, (uint64_t)(uintptr_t)revoking,
+                                               THREAD_PRIORITY_LOW, THREAD_STACK_SIZE_64KB, "yt-revoke") == 0;
    logInfo("[account] signed out\n");
 }
 
@@ -266,4 +270,5 @@ void updateSignIn(void)
 void shutdownAccount(void)
 {
    cancelSignIn();
+   if (revokeThreadActive) { joinThread(revokeTid); revokeThreadActive = 0; }
 }

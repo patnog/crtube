@@ -52,6 +52,9 @@ int requestImageMemAsync(const void *data, uint32_t size);
 // its result is discarded.
 void cancelImageAsync(void);
 
+// Stop accepting requests and join the decoder worker before graphics/codec teardown.
+void shutdownImageLoader(void);
+
 // Polls the most recent request. Returns 1 and fills out (caller then owns
 // out->pixels) when it finished decoding; 0 while still decoding; -1 once if it
 // failed. Results from superseded requests are never reported.

@@ -63,6 +63,15 @@ int setSubtitleLanguage(const char *languageCode);
 const char *getPlaybackSubtitleLanguage(void);
 int setPlaybackSubtitleLanguage(const char *languageCode);
 
+// Automatic subtitle translation target: "auto" follows Content Region, "off" disables it.
+const char *getAutoTranslateLanguage(void); // resolved target, or "off"
+const char *getAutoTranslateLanguagePreference(void); // stored value: auto, off, or language code
+typedef struct { const char *code; const char *name; } AutoTranslateLanguage;
+int getAutoTranslateLanguageCount(void);
+const AutoTranslateLanguage *getAutoTranslateLanguageAt(int index);
+const char *getAutoTranslateLanguageName(const char *languageCode);
+int setAutoTranslateLanguage(const char *languageCode);
+
 // Uniform display overscan in percent (-15..+15). Changes are saved immediately to settings.txt.
 int getOverscanPercent(void);
 int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails

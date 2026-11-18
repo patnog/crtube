@@ -487,6 +487,8 @@ GfxTexture loadGfxTextureMem(const void *data, uint32_t size)
 static sys_lwmutex_t imgLock;
 static int           imgInit;          // lock created + worker started
 static volatile int  workerStarted;
+static volatile int  workerStopping;
+static sys_ppu_thread_t workerTid;
 
 static char     reqPath[MAX_PATH_LEN];
 static uint8_t *reqData;               // owned copy for an in-memory decode request not yet taken by worker
@@ -518,6 +520,10 @@ static void imgWorker(uint64_t arg)
       int      fromMemory = 0, have = 0, priority = 0;
 
       lock(&imgLock);
+      if (workerStopping) {
+         unlock(&imgLock);
+         break;
+      }
       if (priorityReqPending) {
          strCopy(path, sizeof path, priorityReqPath);
          gen = priorityReqGen;
@@ -573,6 +579,7 @@ static void imgWorker(uint64_t arg)
       }
       unlock(&imgLock);
    }
+   exitThread();
 }
 
 static void ensureWorker(void)
@@ -581,9 +588,8 @@ static void ensureWorker(void)
       createLock(&imgLock);
       imgInit = 1;
    }
-   if (!workerStarted) {
-      sys_ppu_thread_t tid;
-      if (spawnThread(&tid, imgWorker, 0, THREAD_PRIORITY_LOW, 128 * 1024, "img-decode") == 0)
+   if (!workerStarted && !workerStopping) {
+      if (spawnJoinableThread(&workerTid, imgWorker, 0, THREAD_PRIORITY_LOW, 128 * 1024, "img-decode") == 0)
          workerStarted = 1;
    }
 }
@@ -677,6 +683,32 @@ int requestImageMemAsync(const void *data, uint32_t size)
    reqPending = 1;
    unlock(&imgLock);
    return 0;
+}
+
+void shutdownImageLoader(void)
+{
+   if (!imgInit) return;
+
+   lock(&imgLock);
+   workerStopping = 1;
+   reqGen++;
+   priorityReqGen++;
+   reqPending = 0;
+   priorityReqPending = 0;
+   if (reqData) { free(reqData); reqData = NULL; }
+   reqDataSize = 0;
+   if (resState == 1) freeImageBuffer(&resBuf);
+   if (priorityResState == 1) freeImageBuffer(&priorityResBuf);
+   resState = 0;
+   priorityResState = 0;
+   unlock(&imgLock);
+
+   // The decoder may be inside a non-interruptible codec call. Keep all codec
+   // and heap state alive until it returns; never terminate the PPU thread.
+   if (workerStarted) joinThread(workerTid);
+   workerStarted = 0;
+   destroyLock(&imgLock);
+   imgInit = 0;
 }
 
 void cancelImageAsync(void)
