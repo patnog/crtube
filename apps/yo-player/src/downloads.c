@@ -1,6 +1,7 @@
 // downloads - background queue that remuxes a video's streams into one .mp4 on disk (see downloads.h).
 
 #include "app-config.h"
+#include "localization.h"
 #include "downloads.h"
 #include "sidebar.h"
 #include "stream-select.h"      // pickBestVideo / pickBestAudio
@@ -448,7 +449,7 @@ static void saveDownloadMetadata(const char *videoPath, const StreamInfo *info, 
    const char *title = info->title[0] ? info->title : fallbackTitle;
    const char *description = info->description ? info->description : "";
    size_t capacity = strlen(title) + strlen(info->author) + strlen(publishedDate ? publishedDate : "") +
-                     strlen(viewCount ? viewCount : "") + strlen(likeCount ? likeCount : "Offline") +
+                     strlen(viewCount ? viewCount : "") + strlen(likeCount ? likeCount : LOC(STR_OFFLINE)) +
                      strlen(channelId ? channelId : "") + strlen(description) + 96;
    char *data = (char *)malloc(capacity);
    if (!data) {
@@ -457,7 +458,7 @@ static void saveDownloadMetadata(const char *videoPath, const StreamInfo *info, 
    }
    int length = snprintf(data, capacity, "%s\n%s\n#CRTMETA3\n%s\n%s\n%s\n%d\n%s\n%s",
                          title, info->author, publishedDate ? publishedDate : "",
-                         viewCount ? viewCount : "", likeCount ? likeCount : "Offline",
+                         viewCount ? viewCount : "", likeCount ? likeCount : LOC(STR_OFFLINE),
                          info->durationSeconds > 0 ? info->durationSeconds : 0,
                          channelId ? channelId : "", description);
    if (length > 0 && (size_t)length < capacity) {
@@ -760,7 +761,7 @@ int saveDownloadedChannelId(const char *videoPath, const char *channelId)
 {
    if (!videoPath || !channelId || !channelId[0]) return -1;
    char title[256] = "", author[128] = "", description[16384] = "";
-   char published[24] = "", views[32] = "", likes[32] = "Offline";
+   char published[24] = "", views[32] = "", likes[32] = "";
    if (loadDownloadedMetadata(videoPath, title, sizeof title, author, sizeof author,
                               description, sizeof description, published, sizeof published,
                               views, sizeof views, likes, sizeof likes) != 0) {
@@ -771,9 +772,9 @@ int saveDownloadedChannelId(const char *videoPath, const char *channelId)
       strCopy(title, sizeof title, base);
       char *extension = strrchr(title, '.');
       if (extension) *extension = 0;
-      strCopy(author, sizeof author, "Downloaded");
+      strCopy(author, sizeof author, LOC(STR_DOWNLOADED_AUTHOR));
       description[0] = published[0] = views[0] = 0;
-      strCopy(likes, sizeof likes, "Offline");
+      strCopy(likes, sizeof likes, LOC(STR_OFFLINE));
    }
    int duration = loadDownloadedDuration(videoPath);
    char path[MAX_PATH_LEN];
@@ -816,7 +817,7 @@ int getDownloadedVideos(SearchResults *out, int sortAZ)
       memset(item, 0, sizeof *item);
       strCopy(item->videoId, sizeof item->videoId, name);
       strCopy(item->title, sizeof item->title, name);
-      strCopy(item->author, sizeof item->author, "Downloaded");
+      strCopy(item->author, sizeof item->author, LOC(STR_DOWNLOADED_AUTHOR));
       int duration = loadDownloadedDuration(path);
       if (duration > 0) {
          int hours = duration / 3600;
@@ -1331,7 +1332,7 @@ static void runOneDownload(const QueueItem *item)
    char metadataViews[32], metadataPublished[24], metadataLikes[32];
    strCopy(metadataViews, sizeof metadataViews, info->viewCount);
    strCopy(metadataPublished, sizeof metadataPublished, info->publishedDate);
-   strCopy(metadataLikes, sizeof metadataLikes, "Offline");
+   strCopy(metadataLikes, sizeof metadataLikes, LOC(STR_OFFLINE));
    if (extractor->getVideoMetadata) {
       char fetchedViews[32] = "", fetchedPublished[24] = "", fetchedLikes[32] = "";
       if (extractor->getVideoMetadata(item->videoId, fetchedViews, sizeof fetchedViews,
@@ -1695,7 +1696,7 @@ static void enqueueDownloadItem(const SearchResult *item, const char *audioTrack
    else if (full) logWarn("[dl] queue full, %s skipped\n", item->videoId);
    else if (!dl.cancelAll) {
       downloadToastShownAt = getTimeUs();
-      setLabelText(&downloadToastLabel, "Download started");
+      setLabelText(&downloadToastLabel, LOC(STR_DOWNLOAD_STARTED));
    }
 
    if (spawn && spawnJoinableThread(&dl.worker, downloadWorker, 0, THREAD_PRIORITY_LOW, THREAD_STACK_SIZE_64KB, "yt-dl") != 0) {
@@ -1806,9 +1807,9 @@ void updateDownloadOverlay(void)
       formatEstimatedSpace(dl.spaceEstimate, estimateText, sizeof estimateText);
       formatEstimatedSpace(dl.spaceAvailable, freeText, sizeof freeText);
       if (dl.spacePrompt == 2)
-         snprintf(message, sizeof message, "Not enough free space\nRequired: %s  Available: %s\nCROSS / CIRCLE: close", estimateText, freeText);
+         snprintf(message, sizeof message, LOC(STR_NOT_ENOUGH_FREE_SPACE), estimateText, freeText);
       else
-         snprintf(message, sizeof message, "Download may leave less than 1 GB free\nEstimated: %s  Available: %s\nCROSS: continue   CIRCLE: cancel", estimateText, freeText);
+         snprintf(message, sizeof message, LOC(STR_DOWNLOAD_LOW_SPACE_WARNING), estimateText, freeText);
       setLabelText(&downloadToastLabel, message);
       return;
    }
@@ -1869,9 +1870,9 @@ void drawDownloadOverlay(int screenWidth)
                int chars = (low + high) / 2;
                int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, chars);
                if (queued > 0)
-                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
+                  snprintf(text, sizeof text, LOC(STR_DOWNLOADING_PROGRESS_QUEUED), clipped, truncated ? "..." : "", dl.percent, queued);
                else
-                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
+                  snprintf(text, sizeof text, LOC(STR_DOWNLOADING_PROGRESS), clipped, truncated ? "..." : "", dl.percent);
                setLabelText(&overlayLabel, text);
                if (overlayLabel.tt.tex.w + 12 <= available) { charsBest = chars; low = chars + 1; }
                else high = chars - 1;
@@ -1879,15 +1880,15 @@ void drawDownloadOverlay(int screenWidth)
             if (charsBest > 0) { fitted = 1; bestChars = charsBest; }
             if (!fitted) {
                char compact[32];
-               snprintf(compact, sizeof compact, "DL %d%%", dl.percent);
+               snprintf(compact, sizeof compact, LOC(STR_DOWNLOAD_PROGRESS_COMPACT), dl.percent);
                setLabelText(&overlayLabel, compact);
-               if (overlayLabel.tt.tex.w + 12 > available) setLabelText(&overlayLabel, "DL");
+               if (overlayLabel.tt.tex.w + 12 > available) setLabelText(&overlayLabel, LOC(STR_DL_ABBREVIATION));
             } else {
                int truncated = clipDisplayTitleLimit(clipped, sizeof clipped, dl.activeTitle, bestChars);
                if (queued > 0)
-                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%% (+%d)", clipped, truncated ? "..." : "", dl.percent, queued);
+                  snprintf(text, sizeof text, LOC(STR_DOWNLOADING_PROGRESS_QUEUED), clipped, truncated ? "..." : "", dl.percent, queued);
                else
-                  snprintf(text, sizeof text, "Downloading \"%s%s\" %d%%", clipped, truncated ? "..." : "", dl.percent);
+                  snprintf(text, sizeof text, LOC(STR_DOWNLOADING_PROGRESS), clipped, truncated ? "..." : "", dl.percent);
                setLabelText(&overlayLabel, text);
             }
             strCopy(cachedTitle, sizeof cachedTitle, dl.activeTitle);

@@ -37,6 +37,9 @@ typedef enum {
 int getSortPreference(SortPreference setting);
 int setSortPreference(SortPreference setting, int value);
 
+int getApplicationLanguage(void);
+int setApplicationLanguage(int language);
+
 SponsorblockMode getSponsorblockMode(void); // legacy global mode, retained for settings-file migration
 
 // Per-category SponsorBlock action: SPONSOR_ACTION_SKIP / ASK / KEEP.

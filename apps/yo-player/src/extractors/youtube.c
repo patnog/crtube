@@ -1285,6 +1285,35 @@ static int youtubeIsVideoMembersOnly(const char *videoId)
    return youtubeGetVideoStatus(videoId, NULL);
 }
 
+// Confirm the post-live recording state; isLiveContent alone is not sufficient because
+// YouTube also sets it on active broadcasts.
+static int youtubeGetLiveEndedStatus(const char *videoId)
+{
+   if (!videoId || strlen(videoId) != 11) return -1;
+   if (ensureVisitorData() != 0) return -1;
+
+   char *resp = malloc(RESP_CAP);
+   if (!resp) return -1;
+
+   int respLen = 0;
+   int rc = fetchPlayerClient(
+      "\"clientName\":\"WEB\",\"clientVersion\":\"" WEB_VERSION "\",\"hl\":\"en\",\"gl\":\"US\"",
+      WEB_UA, "1", WEB_VERSION, videoId, resp, &respLen);
+   if (rc != 0) {
+      free(resp);
+      return -1;
+   }
+
+   int liveNow = strstr(resp, "\"isLive\":true") != NULL ||
+                 strstr(resp, "\"isLiveNow\":true") != NULL;
+   int postLive = strstr(resp, "\"isPostLiveDvr\":true") != NULL;
+   free(resp);
+
+   if (liveNow) return 0;
+   if (postLive) return 1;
+   return -1;
+}
+
 int getNextVideoId(const char *videoId, char *nextVideoId, int nextVideoIdCap, char *nextTitle, int nextTitleCap, const char watchedIds[][12], int watchedCount)
 {
    if (!videoId || !videoId[0] || !nextVideoId || nextVideoIdCap < 12) return -1;
@@ -2976,5 +3005,5 @@ const Extractor youtubeExtractor = {
    youtubeGetVideoChannelId, youtubeGetVideoMetadata, youtubeIsVideoMembersOnly, fetchLive,
    getChannelLive, fetchAccountPlaylists, fetchAccountPlaylistVideos,
    youtubeGetVideoStatus, getChannelCategory, refreshLiveAndroid, refreshLiveForSeek,
-   getChannelAbout
+   getChannelAbout, youtubeGetLiveEndedStatus
 };

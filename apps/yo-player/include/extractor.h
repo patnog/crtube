@@ -222,6 +222,8 @@ typedef struct Extractor {
    int (*refreshLiveForSeek)(const char *input, int videoItag, int audioItag, StreamInfo *out);
    // Fetch channel About metadata on demand. Blocking; call from a worker thread.
    int (*getChannelAbout)(const char *channelId, ChannelAboutInfo *out);
+   // Returns 1 when a previously-live broadcast is confirmed ended, 0 when still live, negative if inconclusive.
+   int (*getLiveEndedStatus)(const char *videoId);
 } Extractor;
 
 // picks the first registered extractor that claims input, or NULL.

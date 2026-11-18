@@ -1,6 +1,7 @@
 // home - the landing screen: trending categories in a VideoGrid (see home.h).
 
 #include "app-config.h"
+#include "localization.h"
 #include "app.h"
 #include "screens/home.h"
 
@@ -58,9 +59,9 @@ extern void sysProcessExit(int status);
 #define HINT_GLYPH_H  28
 #define HINT_TEXT     22
 
-static const char *TrendingNames[TREND_COUNT] = { "Gaming", "Sports", "Podcasts" };
-static const char *LiveNames[LIVE_COUNT] = { "Popular", "Music", "Gaming", "Sports", "Podcasts", "News" };
-static const char *AccountNames[ACCOUNT_FEED_COUNT] = { "Recommended", "Subscriptions", "History", "Watch Later" };
+static const AppStringId TrendingNameIds[TREND_COUNT] = { STR_GAMING, STR_SPORTS, STR_PODCASTS };
+static const AppStringId LiveNameIds[LIVE_COUNT] = { STR_POPULAR, STR_MUSIC, STR_GAMING, STR_SPORTS, STR_PODCASTS, STR_NEWS };
+static const AppStringId AccountNameIds[ACCOUNT_FEED_COUNT] = { STR_RECOMMENDED, STR_SUBSCRIPTIONS, STR_HISTORY, STR_WATCH_LATER };
 
 // Home categories = Trending, the PS3 queues, and - when signed in - the account's own feeds. Live is a
 // separate, uncached page entered from the sidebar; L1/R1 only cycle its six subcategories once inside it.
@@ -167,6 +168,10 @@ static struct {
    char      playlistNameTargetId[LOCAL_PLAYLIST_ID_LEN];
    char      createPlaylistName[LOCAL_PLAYLIST_NAME_LEN];
    int       regionOpen;
+   int       regionPickerLanguage;
+   int       languageConfirmOpen;
+   int       languageConfirmSelected;
+   int       languagePending;
    int       regionSelected;
    int       sponsorblockOpen;
    int       sponsorblockSelected;
@@ -290,11 +295,12 @@ static int         panelConfirmHint, panelBackHint;
 // Compact settings shell. The selected value is highlighted independently of
 // its row label; font scaling never changes the panel's physical geometry.
 #define SETTINGS_PANEL_W 680
-#define SETTINGS_PANEL_H 600
-#define SETTINGS_ROW_HEIGHT 38
-#define SETTINGS_ROW_TOP 56
-#define SETTINGS_ROW_STEP 43
-#define SETTINGS_ROW_COUNT 11
+#define SETTINGS_PANEL_W_LARGE 820
+#define SETTINGS_PANEL_H 672
+#define SETTINGS_ROW_HEIGHT 44
+#define SETTINGS_ROW_TOP 62
+#define SETTINGS_ROW_STEP 50
+#define SETTINGS_ROW_COUNT 12
 static Label settingsTitle, settingsLabels[SETTINGS_ROW_COUNT], settingsValues[SETTINGS_ROW_COUNT];
 static ButtonHints settingsHints;
 #define UPDATE_PANEL_W 680
@@ -368,12 +374,13 @@ static ButtonHints exitConfirmHints;
 #define REGION_PANEL_W 620
 #define REGION_PANEL_H 440
 #define REGION_ROW_H 34
-#define REGION_LIST_TOP 78
+#define REGION_LIST_TOP 96
 #define REGION_FOOTER_H 52
 static Label regionTitle, regionDescription, regionPosition;
 static Label regionNames[REGION_MAX_ROWS], regionCodes[REGION_MAX_ROWS];
 static ButtonHints regionHints;
 static ButtonRepeat regionNavigateRepeat, regionPageRepeat;
+static Scrollbar regionScrollbar;
 static unsigned regionRevisionSeen;
 
 // Trending's feeds remain separate pages, presented as one page with three
@@ -405,16 +412,20 @@ static uint64_t squarePressedAt;
 #define SQUARE_HOLD_US 550000ULL
 static const IconId TrendingIcons[TREND_COUNT] = { ICON_MICROCHIP, ICON_STAR, ICON_VOLUME_UP };
 
+static int isLargeUiScale(void);
+
 static int getSettingsPanelWidth(void)
 {
+   int preferred = isLargeUiScale() ? SETTINGS_PANEL_W_LARGE : SETTINGS_PANEL_W;
    int width = home.screenW - 48;
-   return width < SETTINGS_PANEL_W ? width : SETTINGS_PANEL_W;
+   return width < preferred ? width : preferred;
 }
 
 static int getSettingsPanelHeight(void)
 {
-   int height = home.screenH - 48;
-   return height < SETTINGS_PANEL_H ? height : SETTINGS_PANEL_H;
+   int preferred = isLargeUiScale() ? 700 : SETTINGS_PANEL_H;
+   int height = home.screenH - 40;
+   return height < preferred ? height : preferred;
 }
 
 static int homeThemeIsDark(void)
@@ -726,20 +737,20 @@ static int homeFetch(const char *token, SearchResults *out, void *user)
 static void setHeading(void)
 {
    // signed in, the account has its own Subscriptions and Watch Later, so name the PS3's copies apart
-   const char *local = isSignedIn() ? " \xe2\x80\xa2 this PS3" : "";
+   const char *local = isSignedIn() ? LOC(STR_THIS_PS3_SUFFIX) : "";
    char heading[128];
-   if      (home.category == HOME_LOCAL_HISTORY) snprintf(heading, sizeof heading, "History%s", local);
+   if      (home.category == HOME_LOCAL_HISTORY) snprintf(heading, sizeof heading, LOC(STR_HISTORY_THIS_PS3_FORMAT), local);
    else if (home.category >= HOME_ACCOUNT && home.category < HOME_LOCAL_HISTORY)
-      snprintf(heading, sizeof heading, "%s", AccountNames[home.category - HOME_ACCOUNT]);
-   else if (home.category == HOME_SUBS)       snprintf(heading, sizeof heading, "Subscriptions%s", local);
-   else if (home.category == HOME_WATCHLATER) snprintf(heading, sizeof heading, "Watch Later%s", local);
-   else if (home.category == HOME_LIVE)       snprintf(heading, sizeof heading, "Live");
+      snprintf(heading, sizeof heading, "%s", LOC(AccountNameIds[home.category - HOME_ACCOUNT]));
+   else if (home.category == HOME_SUBS)       snprintf(heading, sizeof heading, LOC(STR_SUBSCRIPTIONS_THIS_PS3_FORMAT), local);
+   else if (home.category == HOME_WATCHLATER) snprintf(heading, sizeof heading, LOC(STR_WATCH_LATER_THIS_PS3_FORMAT), local);
+   else if (home.category == HOME_LIVE)       snprintf(heading, sizeof heading, "%s", LOC(STR_LIVE));
    else if (home.category == HOME_PLAYLISTS || home.category == HOME_LOCAL_PLAYLISTS)
-      snprintf(heading, sizeof heading, "Playlists");
+      snprintf(heading, sizeof heading, "%s", LOC(STR_PLAYLISTS));
    else if (home.category == HOME_PLAYLIST_CONTENTS || home.category == HOME_LOCAL_PLAYLIST_CONTENTS)
-      snprintf(heading, sizeof heading, "%s", home.playlistTitle[0] ? home.playlistTitle : "Playlist");
-   else if (home.category == HOME_DOWNLOADS) snprintf(heading, sizeof heading, "Downloads");
-   else                                       snprintf(heading, sizeof heading, "Trending");
+      snprintf(heading, sizeof heading, "%s", home.playlistTitle[0] ? home.playlistTitle : LOC(STR_PLAYLIST_FALLBACK));
+   else if (home.category == HOME_DOWNLOADS) snprintf(heading, sizeof heading, "%s", LOC(STR_DOWNLOADS));
+   else                                       snprintf(heading, sizeof heading, "%s", LOC(STR_TRENDING));
    setLabelText(&titleLabel, heading);
 }
 
@@ -783,10 +794,10 @@ static void updateHomeSortHint(void)
 {
    if (homeSortHint < 0) return;
    if (homeIsPlaylistContents()) {
-      setButtonHintCaption(&hints, homeSortHint, "Shuffle");
+      setButtonHintCaption(&hints, homeSortHint, LOC(STR_SHUFFLE));
       setButtonHintShown(&hints, homeSortHint, 1);
    } else {
-      setButtonHintCaption(&hints, homeSortHint, "Sort");
+      setButtonHintCaption(&hints, homeSortHint, LOC(STR_SORT));
       setButtonHintShown(&hints, homeSortHint, homeSupportsSort() || homeSupportsPlaylistSort());
    }
 }
@@ -970,7 +981,7 @@ void openHomePlaylist(const char *playlistId, const char *title)
    home.playlistReturnQuery[0] = 0;
    home.playlistError = 0;
    strCopy(home.playlistId, sizeof home.playlistId, playlistId);
-   strCopy(home.playlistTitle, sizeof home.playlistTitle, title && title[0] ? title : "Playlist");
+   strCopy(home.playlistTitle, sizeof home.playlistTitle, title && title[0] ? title : LOC(STR_PLAYLIST_FALLBACK));
    home.pendingPlaylistOpen = 0;
    if (home.category == HOME_PLAYLIST_CONTENTS) {
       loadCategory();
@@ -994,7 +1005,7 @@ void openHomePlaylistFromSearch(const char *playlistId, const char *title, const
    home.playlistReturnChannelCategory = channelCategory;
    home.playlistError = 0;
    strCopy(home.playlistId, sizeof home.playlistId, playlistId);
-   strCopy(home.playlistTitle, sizeof home.playlistTitle, title && title[0] ? title : "Playlist");
+   strCopy(home.playlistTitle, sizeof home.playlistTitle, title && title[0] ? title : LOC(STR_PLAYLIST_FALLBACK));
    home.pendingPlaylistOpen = 0;
    if (home.category == HOME_PLAYLIST_CONTENTS) {
       loadCategory();
@@ -1128,25 +1139,25 @@ static void drawAccountPanel(void)
    SignInStatus status;
    getSignInStatus(&status);
 
-   const char *title = "Sign in to YouTube", *line1 = "", *line2 = "", *code = "", *confirm = NULL;
+   const char *title = LOC(STR_SIGN_IN_TO_YOUTUBE), *line1 = "", *line2 = "", *code = "", *confirm = NULL;
    char url[96] = "", footer[64] = "";
    if (isSignedIn()) {
-      title   = "Signed in to YouTube";
-      line1   = "Recommended, Subscriptions, History and Watch Later";
-      line2   = "come from your account. Videos still play signed out.";
-      confirm = "Sign out";
+      title   = LOC(STR_SIGNED_IN_TO_YOUTUBE);
+      line1   = LOC(STR_SIGNIN_ACCOUNT_FEEDS);
+      line2   = LOC(STR_SIGNIN_ACCOUNT_FEEDS_LINE2);
+      confirm = LOC(STR_SIGN_OUT);
    } else if (status.stage == SIGNIN_WAITING) {
       // "https://www.google.com/device" reads better without the scheme
       const char *shown = strstr(status.verificationUrl, "://");
       strCopy(url, sizeof url, shown ? shown + 3 : status.verificationUrl);
-      line1 = "On your phone or computer, go to";
+      line1 = LOC(STR_OPEN_ON_DEVICE);
       line2 = url;
       code  = status.userCode;
-      snprintf(footer, sizeof footer, "and enter this code. It expires in %d:%02d.", status.secondsLeft / 60, status.secondsLeft % 60);
-   } else if (status.stage == SIGNIN_DENIED)  { line1 = "Sign-in was declined on the consent screen."; confirm = "Try again"; }
-   else if (status.stage == SIGNIN_EXPIRED)   { line1 = "The code expired before it was entered.";    confirm = "Try again"; }
-   else if (status.stage == SIGNIN_FAILED)    { line1 = "Couldn't reach Google. Check the connection."; confirm = "Try again"; }
-   else                                       { line1 = "Getting a sign-in code..."; }
+      snprintf(footer, sizeof footer, LOC(STR_ENTER_CODE_EXPIRES), status.secondsLeft / 60, status.secondsLeft % 60);
+   } else if (status.stage == SIGNIN_DENIED)  { line1 = LOC(STR_SIGNIN_DECLINED); confirm = LOC(STR_TRY_AGAIN); }
+   else if (status.stage == SIGNIN_EXPIRED)   { line1 = LOC(STR_SIGNIN_CODE_EXPIRED);    confirm = LOC(STR_TRY_AGAIN); }
+   else if (status.stage == SIGNIN_FAILED)    { line1 = LOC(STR_GOOGLE_CONNECTION_FAILED); confirm = LOC(STR_TRY_AGAIN); }
+   else                                       { line1 = LOC(STR_GETTING_SIGNIN_CODE); }
 
    setLabelIfChanged(&panelTitle, title);
    setLabelIfChanged(&panelLine1, line1);
@@ -1156,7 +1167,7 @@ static void drawAccountPanel(void)
    setButtonHintShown(&panelHints, panelConfirmHint, confirm != NULL);
    if (confirm && strcmp(panelHints.hints[panelConfirmHint].caption.text, confirm) != 0)
       setButtonHintCaption(&panelHints, panelConfirmHint, confirm);
-   const char *back = (status.stage == SIGNIN_STARTING || status.stage == SIGNIN_WAITING) ? "Cancel" : "Close";
+   const char *back = (status.stage == SIGNIN_STARTING || status.stage == SIGNIN_WAITING) ? LOC(STR_CANCEL) : LOC(STR_CLOSE);
    if (strcmp(panelHints.hints[panelBackHint].caption.text, back) != 0) setButtonHintCaption(&panelHints, panelBackHint, back);
 
    int panelW = getAccountPanelWidth(), panelH = getAccountPanelHeight();
@@ -1192,39 +1203,66 @@ static int isLargeUiScale(void)
 
 static int getRegionRowHeight(void)
 {
-   return isLargeUiScale() ? 42 : REGION_ROW_H;
+   return isLargeUiScale() ? 48 : REGION_ROW_H;
 }
 
 static int getSponsorRowHeight(void)
 {
-   return isLargeUiScale() ? 40 : SPONSOR_ROW_H;
+   return isLargeUiScale() ? 48 : SPONSOR_ROW_H;
 }
 
 static int getSponsorOptionWidth(void)
 {
-   return isLargeUiScale() ? 84 : SPONSOR_OPTION_W;
+   return isLargeUiScale() ? 108 : SPONSOR_OPTION_W;
 }
 
 static int getSponsorOptionHeight(void)
 {
-   return isLargeUiScale() ? 34 : SPONSOR_OPTION_H;
+   return isLargeUiScale() ? 42 : SPONSOR_OPTION_H;
 }
 
 static int getRegionPanelWidth(void)
 {
+   int preferred = isLargeUiScale() ? 760 : REGION_PANEL_W;
    int width = home.screenW - 48;
-   return width < REGION_PANEL_W ? width : REGION_PANEL_W;
+   return width < preferred ? width : preferred;
 }
 
 static int getRegionPanelHeight(void)
 {
+   int preferred = isLargeUiScale() ? 520 : REGION_PANEL_H;
    int height = home.screenH - 48;
-   return height < REGION_PANEL_H ? height : REGION_PANEL_H;
+   return height < preferred ? height : preferred;
+}
+
+static int getActivePickerCount(void)
+{
+   return home.regionPickerLanguage ? APP_LANGUAGE_COUNT : getContentRegionCount();
+}
+
+static int getActivePickerSelection(void)
+{
+   return home.regionPickerLanguage ? getApplicationLanguage() : getContentRegionIndex();
+}
+
+static const char *getActivePickerName(int index)
+{
+   if (home.regionPickerLanguage) return getAppLanguageName(index);
+   const ContentRegion *region = getContentRegionAt(index);
+   return region ? region->name : "";
+}
+
+static const char *getActivePickerCode(int index)
+{
+   if (home.regionPickerLanguage)
+      return index == APP_LANGUAGE_PT_BR ? "pt-BR" : "en";
+   const ContentRegion *region = getContentRegionAt(index);
+   return region ? region->code : "";
 }
 
 static void clampRegionTop(void)
 {
-   int maxTop = getContentRegionCount() - home.regionVisible;
+   int maxTop = getActivePickerCount() - home.regionVisible;
    if (maxTop < 0) maxTop = 0;
    if (home.regionTop > maxTop) home.regionTop = maxTop;
    if (home.regionTop < 0) home.regionTop = 0;
@@ -1240,12 +1278,14 @@ static void followRegionSelection(void)
 
 static void openRegionPicker(void)
 {
-   int count = getContentRegionCount();
+   home.regionPickerLanguage = 0;
+   int count = getActivePickerCount();
    if (count <= 0) return;
    home.regionOpen = 1;
-   home.regionSelected = getContentRegionIndex();
+   home.regionSelected = getActivePickerSelection();
    int panelH = getRegionPanelHeight();
-   int available = panelH - REGION_LIST_TOP - REGION_FOOTER_H;
+   int listTop = isLargeUiScale() ? 112 : REGION_LIST_TOP;
+   int available = panelH - listTop - REGION_FOOTER_H;
    home.regionVisible = available / getRegionRowHeight();
    if (home.regionVisible < 1) home.regionVisible = 1;
    if (home.regionVisible > count) home.regionVisible = count;
@@ -1256,9 +1296,89 @@ static void openRegionPicker(void)
    regionPageRepeat.timer = now; regionPageRepeat.repeats = 0;
 }
 
+static void openAppLanguagePicker(void)
+{
+   home.regionPickerLanguage = 1;
+   int count = getActivePickerCount();
+   if (count <= 0) return;
+   home.regionOpen = 1;
+   home.regionSelected = getActivePickerSelection();
+   int panelH = getRegionPanelHeight();
+   int listTop = isLargeUiScale() ? 112 : REGION_LIST_TOP;
+   int available = panelH - listTop - REGION_FOOTER_H;
+   home.regionVisible = available / getRegionRowHeight();
+   if (home.regionVisible < 1) home.regionVisible = 1;
+   if (home.regionVisible > count) home.regionVisible = count;
+   home.regionTop = home.regionSelected - home.regionVisible / 2;
+   clampRegionTop();
+   uint64_t now = sys_time_get_system_time();
+   regionNavigateRepeat.timer = now; regionNavigateRepeat.repeats = 0;
+   regionPageRepeat.timer = now; regionPageRepeat.repeats = 0;
+}
+
+static void updateLanguageConfirm(void)
+{
+   if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
+      home.languageConfirmOpen = 0;
+      return;
+   }
+   if (isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_LEFT)) ||
+       isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_RIGHT)) ||
+       isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_UP)) ||
+       isRepeatDue(&exitConfirmNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
+      home.languageConfirmSelected = 1 - home.languageConfirmSelected;
+
+   if (isPadButtonPressed(PAD_BTN_CROSS)) {
+      if (home.languageConfirmSelected == 0)
+         setApplicationLanguage(home.languagePending);
+      home.languageConfirmOpen = 0;
+   }
+}
+
+static void drawLanguageConfirm(void)
+{
+   int panelW = isLargeUiScale() ? 700 : 620;
+   int panelH = isLargeUiScale() ? 300 : 258;
+   if (panelW > home.screenW - 48) panelW = home.screenW - 48;
+   if (panelH > home.screenH - 48) panelH = home.screenH - 48;
+   int x = (home.screenW - panelW) / 2;
+   int y = (home.screenH - panelH) / 2;
+   fillGfxRectangleFixed(0, 0, home.screenW, home.screenH, 0x88000000);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+
+   setLabelIfChanged(&themeConfirmTitle, LOC(STR_APP_LANGUAGE));
+   setLabelIfChanged(&themeConfirmMessage, LOC(STR_APPLY_APP_LANGUAGE_QUESTION));
+   refreshLabelScale(&themeConfirmTitle);
+   refreshLabelScale(&themeConfirmMessage);
+   moveLabel(&themeConfirmTitle, x + (panelW - themeConfirmTitle.tt.tex.w) / 2, y + 30);
+   drawLabel(&themeConfirmTitle);
+   moveLabel(&themeConfirmMessage, x + (panelW - themeConfirmMessage.tt.tex.w) / 2, y + 96);
+   drawLabel(&themeConfirmMessage);
+
+   int buttonW = 136, buttonGap = 32;
+   int buttonGroupW = buttonW * 2 + buttonGap;
+   int buttonStartX = x + (panelW - buttonGroupW) / 2;
+   int buttonY = y + (panelH - 48) / 2 + 30;
+   for (int i = 0; i < 2; i++) {
+      int bx = buttonStartX + i * (buttonW + buttonGap);
+      int by = buttonY;
+      int selected = i == home.languageConfirmSelected;
+      fillGfxRoundedRectangleFixed(bx, by, buttonW, 48, 9,
+                                   selected ? activeTheme->accent : activeTheme->surface);
+      Label *choice = &themeConfirmChoices[i];
+      setLabelIfChanged(choice, i == 0 ? LOC(STR_YES) : LOC(STR_NO));
+      refreshLabelScale(choice);
+      setLabelColor(choice, selected ? activeTheme->appBg : activeTheme->textPrimary);
+      moveLabel(choice, bx + (buttonW - choice->tt.tex.w) / 2,
+                getCenteredLabelY(choice, by, 48));
+      drawLabel(choice);
+   }
+}
+
 static void updateRegionPicker(void)
 {
-   int count = getContentRegionCount();
+   int count = getActivePickerCount();
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { home.regionOpen = 0; return; }
    if (count <= 0) return;
 
@@ -1281,8 +1401,18 @@ static void updateRegionPicker(void)
    }
 
    if (isPadButtonPressed(PAD_BTN_CROSS)) {
-      setContentRegionIndex(home.regionSelected);
-      home.regionOpen = 0;
+      if (home.regionPickerLanguage) {
+         home.regionOpen = 0;
+         if (home.regionSelected != getApplicationLanguage()) {
+            home.languagePending = home.regionSelected;
+            home.languageConfirmSelected = 1;
+            home.languageConfirmOpen = 1;
+            exitConfirmNavigateRepeat.timer = sys_time_get_system_time();
+            exitConfirmNavigateRepeat.repeats = 0;
+         }
+      } else if (setContentRegionIndex(home.regionSelected) == 0) {
+         home.regionOpen = 0;
+      }
    }
 }
 
@@ -1290,8 +1420,8 @@ static void drawRegionPicker(void)
 {
    int panelW = getRegionPanelWidth(), panelH = getRegionPanelHeight();
    int x = (home.screenW - panelW) / 2, y = (home.screenH - panelH) / 2;
-   int count = getContentRegionCount();
-   int current = getContentRegionIndex();
+   int count = getActivePickerCount();
+   int current = getActivePickerSelection();
    int rowHeight = getRegionRowHeight();
    char position[24];
 
@@ -1299,30 +1429,35 @@ static void drawRegionPicker(void)
    fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
 
+   setLabelIfChanged(&regionTitle, home.regionPickerLanguage ? LOC(STR_APP_LANGUAGE) : LOC(STR_CONTENT_REGION));
+   setLabelIfChanged(&regionDescription, home.regionPickerLanguage ? LOC(STR_APP_LANGUAGE_DESCRIPTION) : LOC(STR_CONTENT_REGION_DESCRIPTION));
    refreshLabelScale(&regionTitle);
    refreshLabelScale(&regionDescription);
    refreshLabelScale(&regionPosition);
-   drawLabelCentered(&regionTitle, home.screenW / 2, y + 27);
-   moveLabel(&regionDescription, x + 28, y + 52);
+   drawLabelCentered(&regionTitle, x + panelW / 2, y + (isLargeUiScale() ? 22 : 27));
+   moveLabel(&regionDescription, x + 28, y + (isLargeUiScale() ? 66 : 52));
    setLabelColor(&regionDescription, activeTheme->textSecondary);
    drawLabel(&regionDescription);
    snprintf(position, sizeof position, "%d / %d", home.regionSelected + 1, count);
    setLabelIfChanged(&regionPosition, position);
-   moveLabel(&regionPosition, x + panelW - 28 - regionPosition.tt.tex.w, y + 52);
+   moveLabel(&regionPosition, x + panelW - 32 - regionPosition.tt.tex.w, y + 74);
    setLabelColor(&regionPosition, activeTheme->textSecondary);
    drawLabel(&regionPosition);
 
+   int listTop = isLargeUiScale() ? 112 : REGION_LIST_TOP;
    int end = home.regionTop + home.regionVisible;
    if (end > count) end = count;
    for (int row = home.regionTop; row < end; row++) {
-      int rowY = y + REGION_LIST_TOP + (row - home.regionTop) * rowHeight;
+      int rowY = y + listTop + (row - home.regionTop) * rowHeight;
       int selected = row == home.regionSelected;
       int inUse = row == current;
+      setLabelIfChanged(&regionNames[row], getActivePickerName(row));
+      setLabelIfChanged(&regionCodes[row], getActivePickerCode(row));
       refreshLabelScale(&regionNames[row]);
       refreshLabelScale(&regionCodes[row]);
       int labelY = getCenteredLabelY(&regionNames[row], rowY, rowHeight - 3);
       if (selected)
-         fillGfxRoundedRectangleFixed(x + 18, labelY - 5, panelW - 36,
+         fillGfxRoundedRectangleFixed(x + 18, labelY - 5, panelW - 54,
                                       regionNames[row].tt.tex.h + 10, 7, activeTheme->rowHighlight);
       if (inUse)
          fillGfxRoundedRectangleFixed(x + 28, rowY + 7, 3, rowHeight - 17, 2, activeTheme->accent);
@@ -1330,25 +1465,33 @@ static void drawRegionPicker(void)
                     (selected ? activeTheme->textPrimary : activeTheme->textSecondary));
       setLabelColor(&regionCodes[row], selected ? activeTheme->textPrimary : activeTheme->textSecondary);
       moveLabel(&regionNames[row], x + 44, labelY);
-      moveLabel(&regionCodes[row], x + panelW - 42 - regionCodes[row].tt.tex.w,
+      moveLabel(&regionCodes[row], x + panelW - 32 - regionCodes[row].tt.tex.w,
                 getCenteredLabelY(&regionCodes[row], rowY, rowHeight - 3));
       drawLabel(&regionNames[row]);
       drawLabel(&regionCodes[row]);
    }
+
+   int trackY = y + listTop;
+   int trackH = home.regionVisible * rowHeight;
+   initScrollbar(&regionScrollbar, x + panelW - 24, trackY, 8, trackH, 5, 18,
+                 activeTheme->surface, activeTheme->accent);
+   drawScrollbar(&regionScrollbar, count, home.regionVisible, home.regionTop);
    regionHints.y = y + panelH - 40;
    drawButtonHints(&regionHints, home.screenW);
 }
 
 static int getSponsorPanelWidth(void)
 {
-   int width = home.screenW - 48;
-   return width < SPONSOR_PANEL_W ? width : SPONSOR_PANEL_W;
+   int preferred = isLargeUiScale() ? 900 : SPONSOR_PANEL_W;
+   int width = home.screenW - 40;
+   return width < preferred ? width : preferred;
 }
 
 static int getSponsorPanelHeight(void)
 {
-   int height = home.screenH - 48;
-   return height < SPONSOR_PANEL_H ? height : SPONSOR_PANEL_H;
+   int preferred = isLargeUiScale() ? 600 : SPONSOR_PANEL_H;
+   int height = home.screenH - 40;
+   return height < preferred ? height : preferred;
 }
 
 static void openSponsorBlockPanel(void)
@@ -1391,9 +1534,10 @@ static void drawSponsorBlockPanel(void)
 
    refreshLabelScale(&sponsorTitle);
    drawLabelCentered(&sponsorTitle, home.screenW / 2, y + 27);
+   setLabelText(&sponsorDescription, LOC(STR_SPONSORBLOCK_DESCRIPTION));
    refreshLabelScale(&sponsorDescription);
    setLabelColor(&sponsorDescription, activeTheme->textSecondary);
-   moveLabel(&sponsorDescription, x + 28, y + 56);
+   moveLabel(&sponsorDescription, x + (panelW - sponsorDescription.tt.tex.w) / 2, y + 56);
    drawLabel(&sponsorDescription);
 
    int rowTop = y + (panelH >= 480 ? (isLargeUiScale() ? 148 : 160) :
@@ -1405,12 +1549,14 @@ static void drawSponsorBlockPanel(void)
       int focused = row == home.sponsorblockSelected;
       if (focused)
          fillGfxRoundedRectangleFixed(x + 18, rowY, panelW - 36, rowHeight - 2, 7, activeTheme->rowHighlight);
-      fillGfxRoundedRectangleFixed(x + 29, rowY + rowHeight / 2 - 6, 10, 10, 5,
+      int categoryDot = isLargeUiScale() ? 14 : 10;
+      fillGfxRoundedRectangleFixed(x + 29, rowY + rowHeight / 2 - categoryDot / 2, categoryDot, categoryDot, categoryDot / 2,
                                     getSponsorCategoryColor((SponsorCategory)row));
       Label *name = &sponsorCategoryLabels[row];
+      setLabelText(name, getSponsorCategoryName((SponsorCategory)row));
       refreshLabelScale(name);
       setLabelColor(name, focused ? activeTheme->textPrimary : activeTheme->textSecondary);
-      moveLabel(name, x + 52, getCenteredLabelY(name, rowY, rowHeight - 2));
+      moveLabel(name, x + (isLargeUiScale() ? 58 : 52), getCenteredLabelY(name, rowY, rowHeight - 2));
       drawLabel(name);
 
       int chosen = getSponsorAction(row);
@@ -1421,6 +1567,7 @@ static void drawSponsorBlockPanel(void)
          int optionY = rowY + (rowHeight - optionHeight) / 2;
          fillGfxRoundedRectangleFixed(ox, optionY, optionWidth, optionHeight, 7, bg);
          Label *word = &sponsorActionLabels[option];
+         setLabelText(word, option == 0 ? LOC(STR_SKIP) : option == 1 ? LOC(STR_ASK) : LOC(STR_KEEP));
          refreshLabelScale(word);
          setLabelColor(word, selected ? (focused ? activeTheme->appBg : activeTheme->textPrimary) : 0xFF888888);
          moveLabel(word, ox + (optionWidth - word->tt.tex.w) / 2,
@@ -1523,14 +1670,14 @@ void openHomeSettingsPanelFromSearch(void)
 
 static const char *downloadResolutionName(int value)
 {
-   static const char *names[] = { "Auto", "480p", "720p", "1080p" };
+   const char *names[] = { LOC(STR_AUTO_QUALITY), LOC(STR_RESOLUTION_480P), LOC(STR_RESOLUTION_720P), LOC(STR_RESOLUTION_1080P) };
    return value >= 0 && value < 4 ? names[value] : names[0];
 }
 
 static const char *downloadLanguageName(const char *code, int originalAllowed)
 {
-   if (originalAllowed && strcmp(code, "original") == 0) return "Original upload";
-   if (strcmp(code, "off") == 0) return "Off";
+   if (originalAllowed && strcmp(code, "original") == 0) return LOC(STR_ORIGINAL_UPLOAD);
+   if (strcmp(code, "off") == 0) return LOC(STR_OFF);
    for (int i = 0; i < getDownloadLanguageCount(); i++) {
       const DownloadLanguage *language = getDownloadLanguageAt(i);
       if (language && strcmp(language->code, code) == 0) return language->name;
@@ -1885,26 +2032,31 @@ static void drawThemeCustomPanel(void)
 static void drawThemeConfirmPanel(void)
 {
    fillGfxRectangleFixed(0, 0, home.screenW, home.screenH, 0x88000000);
-   int panelW = 560, panelH = 238;
+   int panelW = isLargeUiScale() ? 700 : 620;
+   int panelH = isLargeUiScale() ? 300 : 258;
    if (panelW > home.screenW - 48) panelW = home.screenW - 48;
+   if (panelH > home.screenH - 48) panelH = home.screenH - 48;
    int x = (home.screenW - panelW) / 2;
    int y = (home.screenH - panelH) / 2;
    fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
    refreshLabelScale(&themeConfirmTitle);
-   drawLabelCentered(&themeConfirmTitle, home.screenW / 2, y + 28);
+   drawLabelCentered(&themeConfirmTitle, x + panelW / 2, y + 30);
 
    char message[96];
-   snprintf(message, sizeof message, "Apply %s theme?",
-            home.themePendingPreset == THEME_PRESET_CUSTOM ? "custom" :
-            getThemePresetName(home.themePendingPreset));
+   snprintf(message, sizeof message, LOC(STR_APPLY_THEME_FORMAT),
+            home.themePendingPreset == THEME_PRESET_CUSTOM ? LOC(STR_CUSTOM_LOWER) :
+            (home.themePendingPreset == 0 ? LOC(STR_THEME_CRTUBE) :
+             home.themePendingPreset == 1 ? LOC(STR_THEME_BLUE) :
+             home.themePendingPreset == 2 ? LOC(STR_THEME_GREEN) :
+             home.themePendingPreset == 3 ? LOC(STR_THEME_LIGHT) : LOC(STR_THEME_MONOCHROME)));
    setLabelIfChanged(&themeConfirmMessage, message);
    refreshLabelScale(&themeConfirmMessage);
-   drawLabelCentered(&themeConfirmMessage, home.screenW / 2, y + 94);
+   drawLabelCentered(&themeConfirmMessage, x + panelW / 2, y + 96);
 
    for (int i = 0; i < 2; i++) {
-      int bx = x + 112 + i * 176;
-      int by = y + 150;
+      int bx = x + (panelW - 2 * 144 - 32) / 2 + i * 176;
+      int by = y + 166;
       int selected = i == home.themeConfirmSelected;
       fillGfxRoundedRectangleFixed(bx, by, 136, 48, 9,
                               selected ? activeTheme->accent : activeTheme->surface);
@@ -1934,13 +2086,13 @@ static void updateSettingsPanel(void)
       if (isPadButtonPressed(PAD_BTN_LEFT) || isPadButtonPressed(PAD_BTN_RIGHT))
          updateOverwriteChoice = !updateOverwriteChoice;
       if (isPadButtonPressed(PAD_BTN_CROSS)) {
-         logInfo("[update-ui] overwrite prompt choice=%s\n", updateOverwriteChoice == 0 ? "YES" : "NO");
+         logInfo("[update-ui] overwrite prompt choice=%s\n", updateOverwriteChoice == 0 ? LOC(STR_YES_UPPER) : LOC(STR_NO_UPPER));
          if (updateOverwriteChoice == 0) {
             int downloadRc = startUpdateDownloadOverwrite();
             logInfo("[update-ui] overwrite download start rc=%d state=%d\n", downloadRc, getUpdateDownloadState());
             if (downloadRc != 0) {
                playlistToastShownAt = getTimeUs();
-               setLabelText(&playlistToastLabel, "Could not restart update download");
+               setLabelText(&playlistToastLabel, LOC(STR_COULD_NOT_RESTART_UPDATE_DOWNLOAD));
             }
          }
          updateOverwritePromptOpen = 0;
@@ -2002,6 +2154,7 @@ static void updateSettingsPanel(void)
    }
    if (home.themeOpen) { updateThemePanel(); return; }
    if (home.downloadSettingsOpen) { updateDownloadSettingsPanel(); return; }
+   if (home.languageConfirmOpen) { updateLanguageConfirm(); return; }
    if (home.regionOpen) { updateRegionPicker(); return; }
    if (home.sponsorblockOpen) { updateSponsorBlockPanel(); return; }
    if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
@@ -2033,7 +2186,7 @@ static void updateSettingsPanel(void)
       settingsCropOverscanRepeat.timer = 0;
       settingsCropOverscanRepeat.repeats = 0;
    }
-   if (home.settingsSelected == 9) {
+   if (home.settingsSelected == 10) {
       if (settingsScreensaverRepeat.timer == 0)
          settingsScreensaverRepeat.timer = sys_time_get_system_time();
       if (isRepeatDue(&settingsScreensaverRepeat, getPadButtonState(PAD_BTN_LEFT))) screensaverDelta = -1;
@@ -2042,7 +2195,7 @@ static void updateSettingsPanel(void)
       settingsScreensaverRepeat.timer = 0;
       settingsScreensaverRepeat.repeats = 0;
    }
-   if (home.settingsSelected == 9 && isPadButtonPressed(PAD_BTN_CROSS))
+   if (home.settingsSelected == 10 && isPadButtonPressed(PAD_BTN_CROSS))
       screensaverDelta = 1;
 
    if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
@@ -2065,23 +2218,25 @@ static void updateSettingsPanel(void)
       } else if (home.settingsSelected == 5 && isPadButtonPressed(PAD_BTN_CROSS)) {
          openRegionPicker();
       } else if (home.settingsSelected == 6 && isPadButtonPressed(PAD_BTN_CROSS)) {
-         openSponsorBlockPanel();
+         openAppLanguagePicker();
       } else if (home.settingsSelected == 7 && isPadButtonPressed(PAD_BTN_CROSS)) {
+         openSponsorBlockPanel();
+      } else if (home.settingsSelected == 8 && isPadButtonPressed(PAD_BTN_CROSS)) {
          home.downloadSettingsOpen = 1;
          home.downloadSettingsSelected = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
-      } else if (home.settingsSelected == 8 && isPadButtonPressed(PAD_BTN_CROSS)) {
+      } else if (home.settingsSelected == 9 && isPadButtonPressed(PAD_BTN_CROSS)) {
          home.themeOpen = 1;
          home.themeSelected = getActiveThemePreset();
          if (home.themeSelected < 0 || home.themeSelected >= THEME_ROW_COUNT) home.themeSelected = 0;
          home.themeCustomOpen = 0;
          home.themeConfirmOpen = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
-      } else if (home.settingsSelected == 10 && isPadButtonPressed(PAD_BTN_CROSS)) {
+      } else if (home.settingsSelected == 11 && isPadButtonPressed(PAD_BTN_CROSS)) {
          updateSettingsOpen = 1;
          updateSettingsSelected = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
-      } else if (home.settingsSelected == 9 && screensaverDelta) {
+      } else if (home.settingsSelected == 10 && screensaverDelta) {
          int timeout = getScreensaverTimeout();
          int option = timeout == 0 ? 0 : timeout / 30;
          option = (option + (screensaverDelta > 0 ? 1 : 10)) % 11;
@@ -2095,11 +2250,11 @@ static void drawDownloadSettingsPanel(void)
    setLabelIfChanged(&downloadSettingsValues[0], downloadResolutionName(getDownloadResolution()));
    setLabelIfChanged(&downloadSettingsValues[1], downloadLanguageName(getDownloadAudioLanguage(), 1));
    setLabelIfChanged(&downloadSettingsValues[2], strcmp(getDownloadAudioLanguage(), "original") == 0 ?
-                     "Not applicable" : (getDownloadAutoDubEnabled() ? "Allow auto-generated" : "Uploaded only"));
-   setLabelIfChanged(&downloadSettingsValues[3], getDownloadPrimarySubtitlesEnabled() ? "Auto (match audio)" : "Off");
+                     LOC(STR_NOT_APPLICABLE) : (getDownloadAutoDubEnabled() ? LOC(STR_ALLOW_AUTO_GENERATED) : LOC(STR_UPLOADED_ONLY)));
+   setLabelIfChanged(&downloadSettingsValues[3], getDownloadPrimarySubtitlesEnabled() ? LOC(STR_AUTO_MATCH_AUDIO) : LOC(STR_OFF));
    setLabelIfChanged(&downloadSettingsValues[4], downloadLanguageName(getDownloadSecondarySubtitleLanguage(), 0));
-   int panelW = DOWNLOAD_SETTINGS_PANEL_W;
-   int panelH = DOWNLOAD_SETTINGS_PANEL_H;
+   int panelW = isLargeUiScale() ? 820 : DOWNLOAD_SETTINGS_PANEL_W;
+   int panelH = isLargeUiScale() ? 560 : DOWNLOAD_SETTINGS_PANEL_H;
    if (panelW > home.screenW - 32) panelW = home.screenW - 32;
    if (panelH > home.screenH - 32) panelH = home.screenH - 32;
    int x = (home.screenW - panelW) / 2;
@@ -2143,32 +2298,32 @@ static void drawDownloadSettingsPanel(void)
 static void drawUpdateSettingsPanel(void)
 {
    char installed[96], latest[96], stateText[96];
-   snprintf(installed, sizeof installed, "Installed: %s", getInstalledVersion());
-   snprintf(latest, sizeof latest, "Latest Available: %s", getLatestVersion());
+   snprintf(installed, sizeof installed, LOC(STR_INSTALLED_VERSION), getInstalledVersion());
+   snprintf(latest, sizeof latest, LOC(STR_LATEST_AVAILABLE_VERSION), getLatestVersion());
    UpdateCheckState state = getUpdateCheckState();
    if (state == UPDATE_CHECK_AVAILABLE)
-      snprintf(stateText, sizeof stateText, "Status: Update available (%s)", getLatestVersion());
+      snprintf(stateText, sizeof stateText, LOC(STR_UPDATE_AVAILABLE_STATUS), getLatestVersion());
    else if (state == UPDATE_CHECK_RUNNING)
-      snprintf(stateText, sizeof stateText, "Status: Checking GitHub...");
+      snprintf(stateText, sizeof stateText, LOC(STR_CHECKING_GITHUB_STATUS));
    else if (state == UPDATE_CHECK_UP_TO_DATE)
-      snprintf(stateText, sizeof stateText, "Status: You are up to date");
+      snprintf(stateText, sizeof stateText, LOC(STR_UP_TO_DATE_STATUS));
    else if (state == UPDATE_CHECK_FAILED)
-      snprintf(stateText, sizeof stateText, "Status: Could not check for updates");
+      snprintf(stateText, sizeof stateText, LOC(STR_UPDATE_CHECK_FAILED_STATUS));
    else
-      snprintf(stateText, sizeof stateText, "Status: Not checked yet");
+      snprintf(stateText, sizeof stateText, LOC(STR_NOT_CHECKED_STATUS));
    setLabelIfChanged(&updatePanelInfo[0], installed);
    setLabelIfChanged(&updatePanelInfo[1], latest);
    setLabelIfChanged(&updatePanelInfo[2], stateText);
-   setLabelIfChanged(&updatePanelRows[0], getAutomaticUpdateChecks() ? "Automatic checks: On" : "Automatic checks: Off");
-   setLabelIfChanged(&updatePanelRows[1], state == UPDATE_CHECK_RUNNING ? "Checking GitHub..." : "Check for updates now");
+   setLabelIfChanged(&updatePanelRows[0], getAutomaticUpdateChecks() ? LOC(STR_AUTOMATIC_CHECKS_ON) : LOC(STR_AUTOMATIC_CHECKS_OFF));
+   setLabelIfChanged(&updatePanelRows[1], state == UPDATE_CHECK_RUNNING ? LOC(STR_CHECKING_GITHUB) : LOC(STR_CHECK_FOR_UPDATES_NOW));
    char releaseRow[224];
-   snprintf(releaseRow, sizeof releaseRow, "Release Notes - %s", getLatestVersion());
+   snprintf(releaseRow, sizeof releaseRow, LOC(STR_RELEASE_NOTES_VERSION), getLatestVersion());
    setLabelIfChanged(&updatePanelRows[2], releaseRow);
    setLabelIfChanged(&updatePanelRows[3], getUpdateDownloadState() == 1 ?
-                     "Download started - downloading..." : "Download Update");
-   setLabelIfChanged(&updatePanelRows[4], "Back");
+                     LOC(STR_UPDATE_DOWNLOAD_STARTED) : LOC(STR_DOWNLOAD_UPDATE));
+   setLabelIfChanged(&updatePanelRows[4], LOC(STR_BACK));
    setLabelIfChanged(&updatePanelRows[5],
-      "Install from XMB: ★ Package Manager > ★ Install Package Files > PS3™ System Storage");
+      LOC(STR_INSTALL_FROM_XMB));
 
    int w = UPDATE_PANEL_W < home.screenW - 32 ? UPDATE_PANEL_W : home.screenW - 32;
    int h = UPDATE_PANEL_H < home.screenH - 32 ? UPDATE_PANEL_H : home.screenH - 32;
@@ -2205,10 +2360,10 @@ static void drawUpdateSettingsPanel(void)
       fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
       fillGfxRoundedRectangle(px, py, pw, ph, 10, activeTheme->appBg);
       fillGfxRoundedRectangle(px, py, pw, 4, 2, activeTheme->accent);
-      setLabelIfChanged(&updateDialogTitle, updateOverwriteNewRelease ? "A different release is available" : "Update package already downloaded");
-      setLabelIfChanged(&updateDialogRows[0], updateOverwriteNewRelease ? "Download the new release and delete the old PKG?" : "Download it again and overwrite the existing PKG?");
-      setLabelIfChanged(&updateDialogRows[1], "Yes");
-      setLabelIfChanged(&updateDialogRows[2], "No");
+      setLabelIfChanged(&updateDialogTitle, updateOverwriteNewRelease ? LOC(STR_DIFFERENT_RELEASE_AVAILABLE) : LOC(STR_UPDATE_ALREADY_DOWNLOADED));
+      setLabelIfChanged(&updateDialogRows[0], updateOverwriteNewRelease ? LOC(STR_DOWNLOAD_NEW_DELETE_OLD) : LOC(STR_DOWNLOAD_AGAIN_OVERWRITE));
+      setLabelIfChanged(&updateDialogRows[1], LOC(STR_YES));
+      setLabelIfChanged(&updateDialogRows[2], LOC(STR_NO));
       refreshLabelScale(&updateDialogTitle);
       drawLabelCentered(&updateDialogTitle, home.screenW / 2, py + 28);
       for (int n = 0; n < 3; n++) {
@@ -2226,20 +2381,20 @@ static void drawUpdateSettingsPanel(void)
 
 static void drawUpdateDialog(void)
 {
-   setLabelIfChanged(&updateDialogTitle, "A new update is available");
+   setLabelIfChanged(&updateDialogTitle, LOC(STR_NEW_UPDATE_AVAILABLE_TITLE));
    char versionInfo[128];
-   snprintf(versionInfo, sizeof versionInfo, "Installed: %s    Latest: %s",
+   snprintf(versionInfo, sizeof versionInfo, LOC(STR_INSTALLED_LATEST_FORMAT),
             getInstalledVersion(), getLatestVersion());
    setLabelIfChanged(&updateDialogVersion, versionInfo);
-   static const char *const rows[] = {
-      "Release Notes", "Download Update", "Disable automatic checks",
-      "Do not notify about this release", "Close"
+   static const AppStringId rowIds[] = {
+      STR_RELEASE_NOTES, STR_DOWNLOAD_UPDATE, STR_DISABLE_AUTOMATIC_CHECKS,
+      STR_DO_NOT_NOTIFY_RELEASE, STR_CLOSE
    };
    for (int i = 0; i < 5; i++) {
       if (i == 1 && getUpdateDownloadState() == 1)
-         setLabelIfChanged(&updateDialogRows[i], "Downloading update...");
+         setLabelIfChanged(&updateDialogRows[i], LOC(STR_DOWNLOADING_UPDATE));
       else
-         setLabelIfChanged(&updateDialogRows[i], rows[i]);
+         setLabelIfChanged(&updateDialogRows[i], LOC(rowIds[i]));
    }
    int w = UPDATE_DIALOG_W < home.screenW - 32 ? UPDATE_DIALOG_W : home.screenW - 32;
    int h = UPDATE_DIALOG_H < home.screenH - 32 ? UPDATE_DIALOG_H : home.screenH - 32;
@@ -2270,10 +2425,10 @@ static void drawUpdateDialog(void)
       fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
       fillGfxRoundedRectangle(px, py, pw, ph, 10, activeTheme->appBg);
       fillGfxRoundedRectangle(px, py, pw, 4, 2, activeTheme->accent);
-      setLabelIfChanged(&updateDialogTitle, updateOverwriteNewRelease ? "A different release is available" : "Update package already downloaded");
-      setLabelIfChanged(&updateDialogRows[0], updateOverwriteNewRelease ? "Download the new release and delete the old PKG?" : "Download it again and overwrite the existing PKG?");
-      setLabelIfChanged(&updateDialogRows[1], "Yes");
-      setLabelIfChanged(&updateDialogRows[2], "No");
+      setLabelIfChanged(&updateDialogTitle, updateOverwriteNewRelease ? LOC(STR_DIFFERENT_RELEASE_AVAILABLE) : LOC(STR_UPDATE_ALREADY_DOWNLOADED));
+      setLabelIfChanged(&updateDialogRows[0], updateOverwriteNewRelease ? LOC(STR_DOWNLOAD_NEW_DELETE_OLD) : LOC(STR_DOWNLOAD_AGAIN_OVERWRITE));
+      setLabelIfChanged(&updateDialogRows[1], LOC(STR_YES));
+      setLabelIfChanged(&updateDialogRows[2], LOC(STR_NO));
       refreshLabelScale(&updateDialogTitle);
       drawLabelCentered(&updateDialogTitle, home.screenW / 2, py + 28);
       for (int n = 0; n < 3; n++) {
@@ -2332,10 +2487,10 @@ static void buildUpdateNotesLines(void)
    }
    if (!getLatestReleaseNotes()[0] && updateNotesLineCount < UPDATE_NOTES_MAX_LINES) {
       strCopy(updateNotesLineText[updateNotesLineCount++], LABEL_MAX_TEXT,
-              "No release notes were provided.");
+              LOC(STR_NO_RELEASE_NOTES));
    }
    if (!updateNotesLineCount) {
-      strCopy(updateNotesLineText[0], LABEL_MAX_TEXT, "No release notes were provided.");
+      strCopy(updateNotesLineText[0], LABEL_MAX_TEXT, LOC(STR_NO_RELEASE_NOTES));
       updateNotesLineCount = 1;
    }
    /* Convert Markdown headings and bold delimiters to native renderer tags. */
@@ -2411,6 +2566,16 @@ static void drawUpdateNotes(void)
 
 static void drawSettingsPanel(void)
 {
+   const char *settingNames[SETTINGS_ROW_COUNT] = {
+      LOC(STR_AUTOPLAY), LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING),
+      LOC(STR_OVERSCAN), LOC(STR_OVERSCAN_CROP), LOC(STR_CONTENT_REGION), LOC(STR_APP_LANGUAGE),
+      LOC(STR_SPONSORBLOCK), LOC(STR_DOWNLOAD_SETTINGS), LOC(STR_THEMES),
+      LOC(STR_SCREENSAVER_TIMEOUT), LOC(STR_UPDATES_ABOUT)
+   };
+   setLabelIfChanged(&settingsTitle, LOC(STR_SETTINGS));
+   for (int i = 0; i < SETTINGS_ROW_COUNT; i++)
+      setLabelIfChanged(&settingsLabels[i], settingNames[i]);
+
    // Avoid printf floating-point formatting here: the PS3 runtime may be built
    // without float printf support, which can leave only the trailing "x".
    const char *scaleValue = getGfxUiScaleFactor() >= 1.25f ? "1.5x" : "1.0x";
@@ -2426,56 +2591,59 @@ static void drawSettingsPanel(void)
    setLabelIfChanged(&settingsValues[4], cropOverscanValue);
    const ContentRegion *region = getContentRegionAt(getContentRegionIndex());
    setLabelIfChanged(&settingsValues[5], region ? region->name : getContentRegionCode());
-   setLabelIfChanged(&settingsValues[6], "Configure");
-   setLabelIfChanged(&settingsValues[7], "Configure");
-   setLabelIfChanged(&settingsValues[8], "Configure");
+   setLabelIfChanged(&settingsValues[6], getAppLanguageName(getApplicationLanguage()));
+   setLabelIfChanged(&settingsValues[7], LOC(STR_CONFIGURE));
+   setLabelIfChanged(&settingsValues[8], LOC(STR_CONFIGURE));
+   setLabelIfChanged(&settingsValues[9], LOC(STR_CONFIGURE));
    char screensaverValue[16];
    int screensaverSeconds = getScreensaverTimeout();
-   if (screensaverSeconds == 0) strCopy(screensaverValue, sizeof screensaverValue, "Off");
+   if (screensaverSeconds == 0) strCopy(screensaverValue, sizeof screensaverValue, LOC(STR_OFF));
    else snprintf(screensaverValue, sizeof screensaverValue, "%ds", screensaverSeconds);
-   setLabelIfChanged(&settingsValues[9], screensaverValue);
-   setLabelIfChanged(&settingsValues[10], "");
+   setLabelIfChanged(&settingsValues[10], screensaverValue);
+   setLabelIfChanged(&settingsValues[11], "");
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
    int x = (home.screenW - panelW) / 2;
    int y = (home.screenH - panelH) / 2;
-   fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
-   fillGfxRoundedRectangle(x, y, panelW, panelH, 10, activeTheme->appBg);
-   fillGfxRoundedRectangle(x, y, panelW, 4, 2, activeTheme->accent);
+   fillGfxRectangleFixed(0, 0, home.screenW, home.screenH, activeTheme->scrim);
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 10, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
    refreshLabelScale(&settingsTitle);
    drawLabelCentered(&settingsTitle, home.screenW / 2, y + 28);
 
-   int autoplayX = x + panelW - 40 - 132;
+   int toggleW = 176;
+   int toggleHalfW = toggleW / 2;
+   int autoplayX = x + panelW - 40 - toggleW;
    for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
       Label *name = &settingsLabels[i];
       int rowY = y + SETTINGS_ROW_TOP + i * SETTINGS_ROW_STEP;
       refreshLabelScale(name);
-      if (i == 10 && i == home.settingsSelected)
-         fillGfxRoundedRectangle(x + 24, rowY - 2, panelW - 48,
+      if (i == 11 && i == home.settingsSelected)
+         fillGfxRoundedRectangleFixed(x + 24, rowY - 2, panelW - 48,
                                  SETTINGS_ROW_HEIGHT + 4, 7, activeTheme->rowHighlight);
-      setLabelColor(name, (i == 10 && i == home.settingsSelected) ?
+      setLabelColor(name, (i == 11 && i == home.settingsSelected) ?
                           activeTheme->accent : activeTheme->textPrimary);
       moveLabel(name, x + 40, getCenteredLabelY(name, rowY, SETTINGS_ROW_HEIGHT));
       drawLabel(name);
-      if (i == 10) continue;
+      if (i == 11) continue;
 
       if (i == 0 || i == 1) {
          // Both boolean settings use the same compact OFF/ON switch.
          int enabled = i == 0 ? getAutoplayEnabled() : getEnable1080p60();
          int selected = enabled ? 1 : 0;
-         int toggleY = rowY + (SETTINGS_ROW_HEIGHT - 36) / 2;
-         int selectedX = autoplayX + selected * 66;
-         fillGfxRoundedRectangle(autoplayX, toggleY, 132, 36, 8, activeTheme->surface);
+         int toggleY = rowY + (SETTINGS_ROW_HEIGHT - 38) / 2;
+         int selectedX = autoplayX + selected * toggleHalfW;
+         fillGfxRoundedRectangleFixed(autoplayX, toggleY, toggleW, 38, 8, activeTheme->surface);
          if (i == home.settingsSelected)
-            fillGfxRoundedRectangle(selectedX - 4, toggleY - 4, 74, 44, 10, 0x38FFFFFF);
-         fillGfxRoundedRectangle(selectedX, toggleY, 66, 36, 8, activeTheme->accent);
+            fillGfxRoundedRectangleFixed(selectedX - 4, toggleY - 4, toggleHalfW + 8, 46, 10, 0x38FFFFFF);
+         fillGfxRoundedRectangleFixed(selectedX, toggleY, toggleHalfW, 38, 8, activeTheme->accent);
          for (int option = 0; option < 2; option++) {
             Label *optionLabel = &settingsAutoplayOptions[option];
             refreshLabelScale(optionLabel);
             setLabelColor(optionLabel, option == selected ? activeTheme->appBg : activeTheme->textPrimary);
             moveLabel(optionLabel,
-                      autoplayX + option * 66 + (66 - optionLabel->tt.tex.w) / 2,
-                      getCenteredLabelY(optionLabel, toggleY, 36));
+                      autoplayX + option * toggleHalfW + (toggleHalfW - optionLabel->tt.tex.w) / 2,
+                      getCenteredLabelY(optionLabel, toggleY, 38));
             drawLabel(optionLabel);
          }
          continue;
@@ -2483,16 +2651,16 @@ static void drawSettingsPanel(void)
 
       Label *value = &settingsValues[i];
       refreshLabelScale(value);
-      int valuePad = 12;
+      int valuePad = 14;
       int valueW = value->tt.tex.w + valuePad * 2;
-      int minValueW = 88;
+      int minValueW = 120;
       if (valueW < minValueW) valueW = minValueW;
       int valueX = x + panelW - 40 - valueW;
       int valueY = getCenteredLabelY(value, rowY, SETTINGS_ROW_HEIGHT);
       int valueH = value->tt.tex.h + 10;
 
       if (i == home.settingsSelected)
-         fillGfxRoundedRectangle(valueX, valueY - 5, valueW, valueH, 7,
+         fillGfxRoundedRectangleFixed(valueX, valueY - 5, valueW, valueH, 7,
                                  activeTheme->rowHighlight);
 
       setLabelColor(value, i == home.settingsSelected ? activeTheme->accent : activeTheme->textPrimary);
@@ -2576,6 +2744,7 @@ static void drawSearchSettingsOverlay(void)
          else if (home.sponsorblockOpen) drawSponsorBlockPanel();
       }
    }
+   if (home.languageConfirmOpen) drawLanguageConfirm();
    if (updateDialogOpen) drawUpdateDialog();
    if (updateNotesOpen) drawUpdateNotes();
 }
@@ -2674,12 +2843,12 @@ static void updateDownloadSpaceStats(void)
    if (ready) {
       formatDownloadSpace(usedBytes, usedText, sizeof usedText);
       formatDownloadSpace(availableBytes, availableValue, sizeof availableValue);
-      snprintf(availableText, sizeof availableText, "Available:%s", availableValue);
+      snprintf(availableText, sizeof availableText, LOC(STR_AVAILABLE_FORMAT), availableValue);
       downloadSpaceAvailableLow = availableBytes <= DOWNLOAD_SPACE_LOW_BYTES;
-      snprintf(prefix, sizeof prefix, "Used:%s / ", usedText);
+      snprintf(prefix, sizeof prefix, LOC(STR_USED_FORMAT), usedText);
    } else {
-      strCopy(prefix, sizeof prefix, "Used:-- / ");
-      strCopy(availableText, sizeof availableText, "Available:--");
+      strCopy(prefix, sizeof prefix, LOC(STR_USED_EMPTY));
+      strCopy(availableText, sizeof availableText, LOC(STR_AVAILABLE_EMPTY));
       downloadSpaceAvailableLow = 0;
    }
    setLabelIfChanged(&downloadSpacePrefixLabel, prefix);
@@ -2829,36 +2998,36 @@ static void finishDownloadPlaylistPreparation(void)
    }
 
    if (found < 0) {
-      setLabelText(&downloadPlaylistConfirmTitle, "Could not read playlist");
-      setLabelText(&downloadPlaylistConfirmFooter, "O Close");
+      setLabelText(&downloadPlaylistConfirmTitle, LOC(STR_COULD_NOT_READ_PLAYLIST));
+      setLabelText(&downloadPlaylistConfirmFooter, LOC(STR_CLOSE_HINT));
       return;
    }
    if (found == 0) {
-      setLabelText(&downloadPlaylistConfirmTitle, "Playlist contains no downloadable videos");
-      setLabelText(&downloadPlaylistConfirmFooter, "O Close");
+      setLabelText(&downloadPlaylistConfirmTitle, LOC(STR_PLAYLIST_NO_DOWNLOADABLE_VIDEOS_TITLE));
+      setLabelText(&downloadPlaylistConfirmFooter, LOC(STR_CLOSE_HINT));
       return;
    }
    if (downloadPlaylistMissingCount == 0) {
-      setLabelText(&downloadPlaylistConfirmTitle, "All playlist videos are already downloaded");
-      setLabelText(&downloadPlaylistConfirmFooter, "X Save playlist   O Cancel");
+      setLabelText(&downloadPlaylistConfirmTitle, LOC(STR_ALL_PLAYLIST_VIDEOS_DOWNLOADED));
+      setLabelText(&downloadPlaylistConfirmFooter, LOC(STR_SAVE_PLAYLIST_CANCEL));
       return;
    }
 
    char estimate[48], prompt[256];
    formatDownloadSpace(home.downloadPlaylistEstimatedBytes, estimate, sizeof estimate);
    if (home.downloadPlaylistEstimateUnknown > 0 && home.downloadPlaylistEstimatedBytes == 0)
-      snprintf(prompt, sizeof prompt, "Download %s?\n%d videos, size unavailable for %d",
+      snprintf(prompt, sizeof prompt, LOC(STR_PLAYLIST_DOWNLOAD_PROMPT_UNKNOWN),
                downloadPlaylistJob.title, downloadPlaylistMissingCount,
                home.downloadPlaylistEstimateUnknown);
    else if (home.downloadPlaylistEstimateUnknown > 0)
-      snprintf(prompt, sizeof prompt, "Download %s?\n%d videos, approximately %s (%d unknown)",
+      snprintf(prompt, sizeof prompt, LOC(STR_PLAYLIST_DOWNLOAD_PROMPT_ESTIMATE_UNKNOWN),
                downloadPlaylistJob.title, downloadPlaylistMissingCount, estimate,
                home.downloadPlaylistEstimateUnknown);
    else
-      snprintf(prompt, sizeof prompt, "Download %s?\n%d videos, approximately %s",
+      snprintf(prompt, sizeof prompt, LOC(STR_PLAYLIST_DOWNLOAD_PROMPT_ESTIMATE),
                downloadPlaylistJob.title, downloadPlaylistMissingCount, estimate);
    setLabelText(&downloadPlaylistConfirmTitle, prompt);
-   setLabelText(&downloadPlaylistConfirmFooter, "X Download    O Cancel");
+   setLabelText(&downloadPlaylistConfirmFooter, LOC(STR_DOWNLOAD_CANCEL));
 }
 
 static void openDownloadPlaylistConfirmation(const SearchResult *playlist)
@@ -2877,8 +3046,8 @@ static void openDownloadPlaylistConfirmation(const SearchResult *playlist)
    home.downloadPlaylistConfirmOpen = 1;
    downloadPlaylistPreparing = 1;
    downloadPlaylistOverlayRunning = 0;
-   setLabelText(&downloadPlaylistConfirmTitle, "Preparing playlist estimate...");
-   setLabelText(&downloadPlaylistConfirmFooter, "Please wait");
+   setLabelText(&downloadPlaylistConfirmTitle, LOC(STR_PREPARING_PLAYLIST_ESTIMATE));
+   setLabelText(&downloadPlaylistConfirmFooter, LOC(STR_PLEASE_WAIT));
    pauseVideoGrid(&home.grid);
    if (spawnJoinableThread(&downloadPlaylistThread, downloadPlaylistWorker, 0,
                            THREAD_PRIORITY_LOW, THREAD_STACK_SIZE_64KB,
@@ -2888,7 +3057,7 @@ static void openDownloadPlaylistConfirmation(const SearchResult *playlist)
       downloadPlaylistPreparing = 0;
       home.downloadPlaylistConfirmOpen = 0;
       resumeVideoGrid(&home.grid);
-      setLabelText(&playlistToastLabel, "Could not start playlist lookup");
+      setLabelText(&playlistToastLabel, LOC(STR_COULD_NOT_START_PLAYLIST_LOOKUP));
       playlistToastShownAt = getTimeUs();
    }
 }
@@ -2928,14 +3097,14 @@ static void submitPreparedDownloadPlaylist(int popOverlay)
    free(downloadPlaylistResults);
    downloadPlaylistResults = NULL;
 
-   if (found < 0) setLabelText(&playlistToastLabel, "Could not read playlist");
-   else if (queued == -1) setLabelText(&playlistToastLabel, "Could not start playlist downloads");
-   else if (queued == -2) setLabelText(&playlistToastLabel, "Download queue is full");
-   else if (queued == 0 && playlistSaved) setLabelText(&playlistToastLabel, "Playlist saved; no new downloads");
-   else if (queued == 0) setLabelText(&playlistToastLabel, "No new videos to download");
+   if (found < 0) setLabelText(&playlistToastLabel, LOC(STR_COULD_NOT_READ_PLAYLIST));
+   else if (queued == -1) setLabelText(&playlistToastLabel, LOC(STR_COULD_NOT_START_PLAYLIST_DOWNLOADS));
+   else if (queued == -2) setLabelText(&playlistToastLabel, LOC(STR_DOWNLOAD_QUEUE_FULL));
+   else if (queued == 0 && playlistSaved) setLabelText(&playlistToastLabel, LOC(STR_PLAYLIST_SAVED_NO_NEW_DOWNLOADS));
+   else if (queued == 0) setLabelText(&playlistToastLabel, LOC(STR_NO_NEW_VIDEOS_TO_DOWNLOAD));
    else {
       char toast[96];
-      snprintf(toast, sizeof toast, "Queued %d playlist video%s", queued, queued == 1 ? "" : "s");
+      snprintf(toast, sizeof toast, LOC(STR_QUEUED_PLAYLIST_VIDEOS), queued, queued == 1 ? "" : "s");
       setLabelText(&playlistToastLabel, toast);
    }
    playlistToastShownAt = getTimeUs();
@@ -2958,7 +3127,7 @@ static void updateDownloadPlaylistConfirmOverlay(void)
    updateDownloadOverlay();
    if (downloadPlaylistPreparing && downloadPlaylistThreadActive && !downloadPlaylistThreadDone && downloadPlaylistEstimateTotal > 0) {
       char progress[128];
-      snprintf(progress, sizeof progress, "Estimating download size: %d/%d", downloadPlaylistEstimateProgress, downloadPlaylistEstimateTotal);
+      snprintf(progress, sizeof progress, LOC(STR_ESTIMATING_DOWNLOAD_SIZE), downloadPlaylistEstimateProgress, downloadPlaylistEstimateTotal);
       setLabelText(&downloadPlaylistConfirmTitle, progress);
    }
    if (downloadPlaylistPreparing && downloadPlaylistThreadActive && downloadPlaylistThreadDone)
@@ -3322,6 +3491,10 @@ static void initHome(void)
    home.exitConfirmOpen = 0;
    home.exitConfirmSelected = 1;
    home.regionOpen = 0;
+   home.regionPickerLanguage = 0;
+   home.languageConfirmOpen = 0;
+   home.languageConfirmSelected = 1;
+   home.languagePending = APP_LANGUAGE_EN;
    home.sponsorblockOpen = 0;
    home.sponsorblockSelected = 0;
    regionRevisionSeen = getContentRegionRevision();
@@ -3341,20 +3514,20 @@ static void initHome(void)
              home.screenW - 2 * MARGIN_X - categoryTitleOffset, AUTO, TITLE_SIZE,
              activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabel(&downloadSpacePrefixLabel, &uiFont, 0, 0, AUTO, AUTO, 18,
-             activeTheme->textSecondary, TEXT_NOWRAP, "Used: -- /");
+             activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_USED_PREFIX));
    initLabel(&downloadSpaceAvailableLabel, &uiFont, 0, 0, AUTO, AUTO, 18,
-             activeTheme->textSecondary, TEXT_NOWRAP, " Available: --");
+             activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_AVAILABLE_PREFIX));
    setLabelScaleWithUi(&downloadSpacePrefixLabel, 1);
    setLabelScaleWithUi(&downloadSpaceAvailableLabel, 1);
    downloadSpaceAvailableLow = 0;
-   initLabel(&statusLabel, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, AUTO, 21, activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
+   initLabel(&statusLabel, &uiFont, MARGIN_X, gridTop, home.screenW - 2 * MARGIN_X, AUTO, 21, activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_LOADING_ELLIPSIS));
    initLabel(&playlistErrorLabel, &uiFont, MARGIN_X, 0, home.screenW - 2 * MARGIN_X, AUTO, 18,
-             activeTheme->textPrimary, TEXT_WRAP, "This playlist is private, restricted or unavailable.");
+             activeTheme->textPrimary, TEXT_WRAP, LOC(STR_PLAYLIST_PRIVATE_UNAVAILABLE));
    initLabel(&playlistToastLabel, &uiFont, 0, 0, home.screenW - 80, AUTO, 23,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Playlist added to Watch Later");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_PLAYLIST_ADDED_WATCH_LATER));
    int downloadPanelW = getDownloadManagerPanelWidth();
    initLabel(&downloadManagerTitle, &uiFont, 0, 0, downloadPanelW - 64, AUTO, 29,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Download management");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_DOWNLOAD_MANAGEMENT));
    for (int i = 0; i < 10; i++) {
       initLabel(&downloadManagerRows[i], &uiFont, 0, 0, downloadPanelW - 220, AUTO, 23,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
@@ -3369,13 +3542,13 @@ static void initHome(void)
              activeTheme->textSecondary, TEXT_NOWRAP, "");
    initButtonHints(&downloadManagerHints, &uiFont, 0, 20, 18, activeTheme->textSecondary);
    setButtonHintGap(&downloadManagerHints, 14);
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_DPAD_UP), "Move");
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_CROSS), "Select");
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_TRIANGLE), "All");
-   downloadManagerSquareHint = addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_SQUARE), "Delete");
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_DPAD_UP), LOC(STR_MOVE));
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_SELECT));
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_TRIANGLE), LOC(STR_ALL));
+   downloadManagerSquareHint = addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_SQUARE), LOC(STR_DELETE));
    addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_L1), "/");
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_R1), "Tabs");
-   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_R1), LOC(STR_TABS));
+   addButtonHint(&downloadManagerHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_BACK));
 
    setLabelScaleWithUi(&playlistErrorLabel, 1);
    setLabelScaleWithUi(&playlistToastLabel, 1);
@@ -3385,7 +3558,7 @@ static void initHome(void)
    // Home heading/status grow by rerasterising their font, while retaining their
    // original anchors instead of being pushed off the 4:3 safe area.
    setLabelScaleWithUi(&titleLabel, 1);
-   static const char *downloadCategoryNames[3] = { "All", "Videos", "Playlists" };
+   const char *downloadCategoryNames[3] = { LOC(STR_ALL), LOC(STR_VIDEOS), LOC(STR_PLAYLISTS) };
    for (int i = 0; i < 3; i++) {
       initLabel(&downloadCategoryLabels[i], &uiFont, 0, 0, AUTO, AUTO, 18,
                 activeTheme->textSecondary, TEXT_NOWRAP, downloadCategoryNames[i]);
@@ -3395,27 +3568,27 @@ static void initHome(void)
    if (downloadConfirmWidth > 760) downloadConfirmWidth = 760;
    if (downloadConfirmWidth < 320) downloadConfirmWidth = 320;
    initLabel(&downloadPlaylistConfirmTitle, &uiFont, 0, 0, downloadConfirmWidth, AUTO, 25,
-             activeTheme->textPrimary, TEXT_WRAP, "Download playlist?");
+             activeTheme->textPrimary, TEXT_WRAP, LOC(STR_DOWNLOAD_PLAYLIST_QUESTION));
    initLabel(&downloadPlaylistConfirmFooter, &uiFont, 0, 0, downloadConfirmWidth, AUTO, 19,
-             activeTheme->textSecondary, TEXT_NOWRAP, "X Download    O Cancel");
+             activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_DOWNLOAD_CANCEL));
    setLabelScaleWithUi(&downloadPlaylistConfirmTitle, 1);
    setLabelScaleWithUi(&downloadPlaylistConfirmFooter, 1);
    setLabelScaleWithUi(&statusLabel, 1);
 
    initButtonHints(&hints, &uiFont, 0, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
-   addButtonHint(&hints, getConsoleGlyph(GLYPH_CROSS), "Play");
-   homeSquareHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE), "Watch Later / Playlist (hold)");
-   homeDownloadHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R3), "Download");
-   addButtonHint(&hints, getConsoleGlyph(GLYPH_TRIANGLE), "Channel");
-   homeNewPlaylistHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L3), "New playlist");
-   addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT), "Search");
-   addButtonHint(&hints, getConsoleGlyph(GLYPH_START), "Settings");
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_PLAY));
+   homeSquareHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE), LOC(STR_WATCH_LATER_PLAYLIST_HOLD));
+   homeDownloadHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R3), LOC(STR_DOWNLOAD));
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_TRIANGLE), LOC(STR_CHANNEL));
+   homeNewPlaylistHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L3), LOC(STR_NEW_PLAYLIST));
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT), LOC(STR_SEARCH));
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_START), LOC(STR_SETTINGS));
    homeL1Hint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L1), "");
-   homeR1Hint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R1), "Category");
-   addButtonHint(&hints, getConsoleGlyph(GLYPH_R2), "Refresh");
-   homeSortHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L2), "Sort");
+   homeR1Hint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R1), LOC(STR_CATEGORY));
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_R2), LOC(STR_REFRESH));
+   homeSortHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L2), LOC(STR_SORT));
    // Reserve footer space for the longer playlist-page caption as well.
-   setButtonHintCaption(&hints, homeSortHint, "Shuffle");
+   setButtonHintCaption(&hints, homeSortHint, LOC(STR_SHUFFLE));
    setButtonHintsStableLayout(&hints, 1);
    setButtonHintGap(&hints, 14);
    homeFooterBottomY = home.screenH - (sdHintsTwoRows ? SD_HINTS_BOTTOM : HINTS_BOTTOM);
@@ -3433,43 +3606,50 @@ static void initHome(void)
    initLabel(&panelLine2,  &uiFont, 0, 0, accountTextW, AUTO, 22, activeTheme->textPrimary,   TEXT_NOWRAP_ELLIPSIS, "");
    initLabel(&panelCode,   &uiFont, 0, 0, accountTextW, AUTO, 56, activeTheme->textPrimary,   TEXT_NOWRAP, "");
    initLabel(&panelFooter, &uiFont, 0, 0, accountTextW, AUTO, 20, activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
-   initLabel(&settingsTitle, &uiFont, 0, 0, settingsTextW - 48, AUTO, 24, activeTheme->textPrimary, TEXT_NOWRAP, "Settings");
+   initLabel(&settingsTitle, &uiFont, 0, 0, settingsTextW - 48, AUTO, 27, activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_SETTINGS));
    initLabel(&themeTitle, &uiFont, 0, 0, THEME_PANEL_W - 48, AUTO, 28,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Themes");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_THEMES));
    for (int i = 0; i < THEME_ROW_COUNT; i++) {
-      const char *rowName = i == THEME_EDIT_CUSTOM_ROW ? "Edit Custom" : getThemePresetName(i);
+      const char *rowName = i == THEME_EDIT_CUSTOM_ROW ? LOC(STR_EDIT_CUSTOM) :
+         (i == 0 ? LOC(STR_THEME_CRTUBE) : i == 1 ? LOC(STR_THEME_BLUE) :
+          i == 2 ? LOC(STR_THEME_GREEN) : i == 3 ? LOC(STR_THEME_LIGHT) :
+          i == 4 ? LOC(STR_THEME_MONOCHROME) : getThemePresetName(i));
       initLabel(&themeRowLabels[i], &uiFont, 0, 0, 420, AUTO, 21,
                 activeTheme->textPrimary, TEXT_NOWRAP, rowName);
       setLabelScaleWithUi(&themeRowLabels[i], 1);
    }
    initLabel(&themeLegendLabels[0], &uiFont, 0, 0, 64, AUTO, 14,
-             activeTheme->textSecondary, TEXT_NOWRAP, "BACK");
+             activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_BACK_UPPER));
    initLabel(&themeLegendLabels[1], &uiFont, 0, 0, 54, AUTO, 14,
-             activeTheme->textSecondary, TEXT_NOWRAP, "ACC");
+             activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_ACCOUNT_ABBREVIATION));
    initLabel(&themeSelectionLeft, &uiFont, 0, 0, 64, AUTO, 24,
              activeTheme->accent, TEXT_NOWRAP, ">");
    initLabel(&themeSelectionRight, &uiFont, 0, 0, 64, AUTO, 24,
              activeTheme->accent, TEXT_NOWRAP, "<");
    initLabel(&themeCustomTitle, &uiFont, 0, 0, THEME_PANEL_W - 48, AUTO, 28,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Custom theme");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_CUSTOM_THEME));
    initLabel(&themeCustomLabels[0], &uiFont, 0, 0, 240, AUTO, 22,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Background");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_BACKGROUND));
    initLabel(&themeCustomLabels[1], &uiFont, 0, 0, 240, AUTO, 22,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Accent colour");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_ACCENT_COLOUR));
    initLabel(&themeCustomLabels[2], &uiFont, 0, 0, 300, AUTO, 22,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Apply");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_APPLY));
    initLabel(&themeCustomOptions[0], &uiFont, 0, 0, 100, AUTO, 20,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Dark");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_DARK));
    initLabel(&themeCustomOptions[1], &uiFont, 0, 0, 100, AUTO, 20,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Light");
-   initLabel(&themeConfirmTitle, &uiFont, 0, 0, 480, AUTO, 26,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Confirm theme change");
-   initLabel(&themeConfirmMessage, &uiFont, 0, 0, 480, AUTO, 18,
-             activeTheme->textSecondary, TEXT_NOWRAP, "Apply this theme?");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_LIGHT));
+   initLabel(&themeConfirmTitle, &uiFont, 0, 0, 560, AUTO, 28,
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_CONFIRM_THEME_CHANGE));
+   initLabel(&themeConfirmMessage, &uiFont, 0, 0, 560, AUTO, 20,
+             activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_APPLY_THEME_QUESTION));
    initLabel(&themeConfirmChoices[0], &uiFont, 0, 0, 100, AUTO, 20,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Yes");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_YES));
    initLabel(&themeConfirmChoices[1], &uiFont, 0, 0, 100, AUTO, 20,
-             activeTheme->textPrimary, TEXT_NOWRAP, "No");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_NO));
+   setLabelScaleWithUi(&themeConfirmTitle, 1);
+   setLabelScaleWithUi(&themeConfirmMessage, 1);
+   setLabelScaleWithUi(&themeConfirmChoices[0], 1);
+   setLabelScaleWithUi(&themeConfirmChoices[1], 1);
    setLabelScaleWithUi(&themeTitle, 1);
    setLabelScaleWithUi(&themeCustomTitle, 1);
    setLabelScaleWithUi(&themeConfirmTitle, 1);
@@ -3484,24 +3664,28 @@ static void initHome(void)
    for (int i = 0; i < 3; i++) setLabelScaleWithUi(&themeCustomLabels[i], 1);
    initButtonHints(&themeHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
    addButtonHint(&themeHints, getConsoleGlyph(GLYPH_DPAD_UP), NULL);
-   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Move");
+   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_DPAD_DOWN), LOC(STR_MOVE));
    addButtonHint(&themeHints, getConsoleGlyph(GLYPH_DPAD_LEFT), NULL);
-   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Change");
-   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_CROSS), "Select");
-   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
-   static const char *settingNames[SETTINGS_ROW_COUNT] = {
-      "Autoplay", "Enable 1080p60 (experimental)", "UI Scaling",
-      "Overscan", "Overscan (crop to fill)", "Content Region", "SponsorBlock",
-      "Download settings", "Themes", "Screensaver timeout", "Updates & About"
+   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), LOC(STR_CHANGE));
+   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_SELECT));
+   addButtonHint(&themeHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_BACK));
+   const char *settingNames[SETTINGS_ROW_COUNT] = {
+      LOC(STR_AUTOPLAY), LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING),
+      LOC(STR_OVERSCAN), LOC(STR_OVERSCAN_CROP), LOC(STR_CONTENT_REGION), LOC(STR_APP_LANGUAGE),
+      LOC(STR_SPONSORBLOCK), LOC(STR_DOWNLOAD_SETTINGS), LOC(STR_THEMES),
+      LOC(STR_SCREENSAVER_TIMEOUT), LOC(STR_UPDATES_ABOUT)
    };
+   setLabelScaleWithUi(&settingsTitle, 1);
    for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
-      initLabel(&settingsLabels[i], &uiFont, 0, 0, settingsTextW - 220, AUTO, 20,
+      initLabel(&settingsLabels[i], &uiFont, 0, 0, settingsTextW - 250, AUTO, 23,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, settingNames[i]);
-      initLabel(&settingsValues[i], &uiFont, 0, 0, 160, AUTO, 22,
+      initLabel(&settingsValues[i], &uiFont, 0, 0, 260, AUTO, 24,
                 activeTheme->textPrimary, TEXT_NOWRAP, "");
+      setLabelScaleWithUi(&settingsLabels[i], 1);
+      setLabelScaleWithUi(&settingsValues[i], 1);
    }
    initLabel(&updatePanelTitle, &uiFont, 0, 0, UPDATE_PANEL_W - 48, AUTO, 24,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Updates & About");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_UPDATES_ABOUT));
    for (int i = 0; i < 3; i++)
       initLabel(&updatePanelInfo[i], &uiFont, 0, 0, UPDATE_PANEL_W - 68, AUTO, 18,
                 activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
@@ -3511,28 +3695,28 @@ static void initHome(void)
    initLabel(&updatePanelRows[5], &uiFont, 0, 0, UPDATE_PANEL_W - 80, AUTO, 16,
              activeTheme->textSecondary, TEXT_WRAP, "");
    initLabel(&updateDialogTitle, &uiFont, 0, 0, UPDATE_DIALOG_W - 48, AUTO, 25,
-             activeTheme->textPrimary, TEXT_NOWRAP, "New update available");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_NEW_UPDATE_AVAILABLE));
    initLabel(&updateDialogVersion, &uiFont, 0, 0, UPDATE_DIALOG_W - 48, AUTO, 20,
              activeTheme->textSecondary, TEXT_NOWRAP, "");
    for (int i = 0; i < 6; i++)
       initLabel(&updateDialogRows[i], &uiFont, 0, 0, UPDATE_DIALOG_W - 80, AUTO, 19,
                 activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabel(&updateNotesTitle, &uiFont, 0, 0, UPDATE_NOTES_W - 120, AUTO, 24,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Release Notes");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_RELEASE_NOTES));
    initLabel(&updateNotesPageLabel, &uiFont, 0, 0, 120, AUTO, 18,
              activeTheme->textSecondary, TEXT_NOWRAP, "1/1");
    for (int i = 0; i < UPDATE_NOTES_VISIBLE_LINES; i++)
       initLabel(&updateNotesLines[i], &uiFont, 0, 0, UPDATE_NOTES_W - 64, AUTO, 23,
                 activeTheme->textPrimary, TEXT_NOWRAP, "");
    initButtonHints(&updateHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
-   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_DPAD_UP), "Page");
-   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Page");
-   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_CROSS), "Select");
-   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
+   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_DPAD_UP), LOC(STR_PAGE));
+   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_DPAD_DOWN), LOC(STR_PAGE));
+   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_SELECT));
+   addButtonHint(&updateHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_BACK));
    initLabel(&downloadSettingsTitle, &uiFont, 0, 0, DOWNLOAD_SETTINGS_PANEL_W - 48, AUTO, 24,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Download settings");
-   static const char *downloadSettingNames[DOWNLOAD_SETTINGS_ROW_COUNT] = {
-      "Video resolution", "Audio language", "Audio source", "Primary subtitles", "Secondary subtitles (optional)"
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_DOWNLOAD_SETTINGS));
+   const char *downloadSettingNames[DOWNLOAD_SETTINGS_ROW_COUNT] = {
+      LOC(STR_VIDEO_RESOLUTION), LOC(STR_AUDIO_LANGUAGE), LOC(STR_AUDIO_SOURCE), LOC(STR_PRIMARY_SUBTITLES), LOC(STR_SECONDARY_SUBTITLES_OPTIONAL)
    };
    for (int i = 0; i < DOWNLOAD_SETTINGS_ROW_COUNT; i++) {
       initLabel(&downloadSettingsLabels[i], &uiFont, 0, 0, DOWNLOAD_SETTINGS_PANEL_W / 2 - 50, AUTO, 19,
@@ -3542,107 +3726,115 @@ static void initHome(void)
    }
    initLabel(&downloadSettingsNotice, &uiFont, 0, 0, DOWNLOAD_SETTINGS_PANEL_W - 68, AUTO, 14,
              activeTheme->textSecondary, TEXT_WRAP,
-             "If requested audio is unavailable, original upload audio is used; primary subtitles follow the audio actually selected.");
+             LOC(STR_DOWNLOAD_AUDIO_SUBTITLE_NOTICE));
+   setLabelScaleWithUi(&downloadSettingsTitle, 1);
+   setLabelScaleWithUi(&downloadSettingsNotice, 1);
+   for (int i = 0; i < DOWNLOAD_SETTINGS_ROW_COUNT; i++) { setLabelScaleWithUi(&downloadSettingsLabels[i], 1); setLabelScaleWithUi(&downloadSettingsValues[i], 1); }
    initButtonHints(&downloadSettingsHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
-   addButtonHint(&downloadSettingsHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Move");
-   addButtonHint(&downloadSettingsHints, getConsoleGlyph(GLYPH_DPAD_LEFT), "Change");
-   addButtonHint(&downloadSettingsHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Change");
-   addButtonHint(&downloadSettingsHints, getConsoleGlyph(GLYPH_CROSS), "Cycle");
-   addButtonHint(&downloadSettingsHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
+   addButtonHint(&downloadSettingsHints, getConsoleGlyph(GLYPH_DPAD_DOWN), LOC(STR_MOVE));
+   addButtonHint(&downloadSettingsHints, getConsoleGlyph(GLYPH_DPAD_LEFT), LOC(STR_CHANGE));
+   addButtonHint(&downloadSettingsHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), LOC(STR_CHANGE));
+   addButtonHint(&downloadSettingsHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_CYCLE));
+   addButtonHint(&downloadSettingsHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_BACK));
 
-   initLabel(&settingsAutoplayOptions[0], &uiFont, 0, 0, 60, AUTO, 20,
-             activeTheme->textPrimary, TEXT_NOWRAP, "OFF");
-   initLabel(&settingsAutoplayOptions[1], &uiFont, 0, 0, 60, AUTO, 20,
-             activeTheme->textPrimary, TEXT_NOWRAP, "ON");
+   initLabel(&settingsAutoplayOptions[0], &uiFont, 0, 0, 84, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_OFF_UPPER));
+   initLabel(&settingsAutoplayOptions[1], &uiFont, 0, 0, 84, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_ON_UPPER));
+   setLabelScaleWithUi(&settingsAutoplayOptions[0], 1);
+   setLabelScaleWithUi(&settingsAutoplayOptions[1], 1);
    initLabel(&regionTitle, &uiFont, 0, 0, getRegionPanelWidth() - 48, AUTO, 24,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Content Region");
-   initLabel(&regionDescription, &uiFont, 0, 0, getRegionPanelWidth() - 150, AUTO, 15,
-             activeTheme->textSecondary, TEXT_NOWRAP, "Country used for YouTube content lists");
-   initLabel(&regionPosition, &uiFont, 0, 0, 80, AUTO, 15,
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_CONTENT_REGION));
+   initLabel(&regionDescription, &uiFont, 0, 0, getRegionPanelWidth() - 56, AUTO, 17,
+             activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_CONTENT_REGION_DESCRIPTION));
+   initLabel(&regionPosition, &uiFont, 0, 0, 120, AUTO, 18,
              activeTheme->textSecondary, TEXT_NOWRAP, "1 / 33");
+   setLabelScaleWithUi(&regionTitle, 1);
+   setLabelScaleWithUi(&regionDescription, 1);
+   setLabelScaleWithUi(&regionPosition, 1);
    for (int i = 0; i < getContentRegionCount() && i < REGION_MAX_ROWS; i++) {
       const ContentRegion *region = getContentRegionAt(i);
-      initLabel(&regionNames[i], &uiFont, 0, 0, getRegionPanelWidth() - 150, AUTO, 18,
+      initLabel(&regionNames[i], &uiFont, 0, 0, getRegionPanelWidth() - 190, AUTO, 21,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, region ? region->name : "");
-      initLabel(&regionCodes[i], &uiFont, 0, 0, 48, AUTO, 18,
+      initLabel(&regionCodes[i], &uiFont, 0, 0, 88, AUTO, 20,
                 activeTheme->textSecondary, TEXT_NOWRAP, region ? region->code : "");
       setLabelScaleWithUi(&regionNames[i], 1);
       setLabelScaleWithUi(&regionCodes[i], 1);
    }
    initLabel(&sponsorTitle, &uiFont, 0, 0, getSponsorPanelWidth() - 48, AUTO, 24,
-             activeTheme->textPrimary, TEXT_NOWRAP, "SponsorBlock");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_SPONSORBLOCK));
    initLabel(&sponsorDescription, &uiFont, 0, 0, getSponsorPanelWidth() - 56, AUTO, 15,
              activeTheme->textSecondary, TEXT_WRAP,
-             "Skip: automatically skip the segment.  Ask: press Triangle to skip it.  Keep: play it normally.");
+             LOC(STR_SPONSORBLOCK_DESCRIPTION));
    for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++) {
-      initLabel(&sponsorCategoryLabels[i], &uiFont, 0, 0, 250, AUTO, 18,
+      initLabel(&sponsorCategoryLabels[i], &uiFont, 0, 0, 300, AUTO, 22,
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, getSponsorCategoryName((SponsorCategory)i));
       setLabelScaleWithUi(&sponsorCategoryLabels[i], 1);
    }
-   initLabel(&sponsorActionLabels[0], &uiFont, 0, 0, SPONSOR_OPTION_W, AUTO, 16,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Skip");
-   initLabel(&sponsorActionLabels[1], &uiFont, 0, 0, SPONSOR_OPTION_W, AUTO, 16,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Ask");
-   initLabel(&sponsorActionLabels[2], &uiFont, 0, 0, SPONSOR_OPTION_W, AUTO, 16,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Keep");
+   initLabel(&sponsorActionLabels[0], &uiFont, 0, 0, SPONSOR_OPTION_W, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_SKIP));
+   initLabel(&sponsorActionLabels[1], &uiFont, 0, 0, SPONSOR_OPTION_W, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_ASK));
+   initLabel(&sponsorActionLabels[2], &uiFont, 0, 0, SPONSOR_OPTION_W, AUTO, 20,
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_KEEP));
    for (int i = 0; i < 3; i++) setLabelScaleWithUi(&sponsorActionLabels[i], 1);
    initButtonHints(&sponsorHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
-   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_DPAD_UP), "Move");
-   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_DPAD_LEFT), "Change");
-   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Change");
-   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_CROSS), "Cycle");
-   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
+   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_DPAD_UP), LOC(STR_MOVE));
+   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_DPAD_LEFT), LOC(STR_CHANGE));
+   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), LOC(STR_CHANGE));
+   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_CYCLE));
+   addButtonHint(&sponsorHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_BACK));
 
    initButtonHints(&regionHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
-   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_CROSS), "Choose");
+   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_CHOOSE));
    addButtonHint(&regionHints, getConsoleGlyph(GLYPH_DPAD_UP), "");
-   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Move");
+   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_DPAD_DOWN), LOC(STR_MOVE));
    addButtonHint(&regionHints, getConsoleGlyph(GLYPH_L2), "");
-   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_R2), "Page");
-   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
+   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_R2), LOC(STR_PAGE));
+   addButtonHint(&regionHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_BACK));
    // Use native PS3 controller glyphs instead of textual button names.
-   // The three action glyphs are grouped before their shared "Change" caption.
+   // The three action glyphs are grouped before their shared LOC(STR_CHANGE) caption.
    initButtonHints(&settingsHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
-   addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_CROSS), "Open / Select");
+   addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_OPEN_SELECT));
    addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_DPAD_LEFT), "");
-   addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Change");
-   addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_CIRCLE), "Close");
+   addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), LOC(STR_CHANGE));
+   addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_CLOSE));
 
    initLabel(&exitConfirmTitle, &uiFont, 0, 0, EXIT_CONFIRM_PANEL_W - 48, AUTO, 28,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Exit CRTube");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_EXIT_CRTUBE));
    initLabel(&exitConfirmMessage, &uiFont, 0, 0, EXIT_CONFIRM_PANEL_W - 48, AUTO, 20,
-             activeTheme->textSecondary, TEXT_NOWRAP, "Are you sure you want to close the app?");
+             activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_CONFIRM_CLOSE_APP));
    initLabel(&exitConfirmChoices[0], &uiFont, 0, 0, 100, AUTO, 20,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Yes");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_YES));
    initLabel(&exitConfirmChoices[1], &uiFont, 0, 0, 100, AUTO, 20,
-             activeTheme->textPrimary, TEXT_NOWRAP, "No");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_NO));
    initButtonHints(&exitConfirmHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
-   addButtonHint(&exitConfirmHints, getConsoleGlyph(GLYPH_CROSS), "Choose");
-   addButtonHint(&exitConfirmHints, getConsoleGlyph(GLYPH_DPAD_LEFT), "Change");
+   addButtonHint(&exitConfirmHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_CHOOSE));
+   addButtonHint(&exitConfirmHints, getConsoleGlyph(GLYPH_DPAD_LEFT), LOC(STR_CHANGE));
    addButtonHint(&exitConfirmHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "");
-   addButtonHint(&exitConfirmHints, getConsoleGlyph(GLYPH_CIRCLE), "Cancel");
+   addButtonHint(&exitConfirmHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_CANCEL));
 
    // Settings is a compact control panel; keep its typography at a stable
    // physical size even when the rest of the UI uses the 1.5x SD font scale.
    for (int i = 0; i < TREND_COUNT; i++) {
       initLabel(&trendingChipLabels[i], &uiFont, 0, 0, 220, AUTO, TREND_CHIP_FONT_SIZE,
-                activeTheme->textPrimary, TEXT_NOWRAP, TrendingNames[i]);
+                activeTheme->textPrimary, TEXT_NOWRAP, LOC(TrendingNameIds[i]));
       setLabelScaleWithUi(&trendingChipLabels[i], 1);
       initIcon(&trendingChipIcons[i], TrendingIcons[i], TREND_CHIP_ICON_SIZE);
    }
    for (int i = 0; i < LIVE_COUNT; i++) {
       initLabel(&liveChipLabels[i], &uiFont, 0, 0, 180, AUTO, TREND_CHIP_FONT_SIZE,
-                activeTheme->textPrimary, TEXT_NOWRAP, LiveNames[i]);
+                activeTheme->textPrimary, TEXT_NOWRAP, LOC(LiveNameIds[i]));
       setLabelScaleWithUi(&liveChipLabels[i], 1);
    }
-   static const char *HomeSortNames[SORT_COUNT] = { "Relevance", "Views", "Newest" };
+   const char *HomeSortNames[SORT_COUNT] = { LOC(STR_RELEVANCE), LOC(STR_VIEWS), LOC(STR_NEWEST) };
    for (int i = 0; i < SORT_COUNT; i++) {
       initLabel(&homeSortLabels[i], &uiFont, 0, 0, AUTO, AUTO, HOME_SORT_TEXT_SIZE,
                 activeTheme->textSecondary, TEXT_NOWRAP, HomeSortNames[i]);
       setLabelScaleWithUi(&homeSortLabels[i], 1);
    }
-   static const char *PlaylistSortNames[PLAYLIST_SORT_COUNT] = { "Newest", "A-Z" };
-   static const char *LocalPlaylistTabNames[2] = { "Watch Later", "PS3" };
+   const char *PlaylistSortNames[PLAYLIST_SORT_COUNT] = { LOC(STR_NEWEST), LOC(STR_A_TO_Z) };
+   const char *LocalPlaylistTabNames[2] = { LOC(STR_WATCH_LATER), LOC(STR_PS3) };
    for (int i = 0; i < PLAYLIST_SORT_COUNT; i++) {
       initLabel(&playlistSortLabels[i], &uiFont, 0, 0, AUTO, AUTO, HOME_SORT_TEXT_SIZE,
                 activeTheme->textSecondary, TEXT_NOWRAP, PlaylistSortNames[i]);
@@ -3655,8 +3847,8 @@ static void initHome(void)
    }
    updateHomeSortHint();
    initButtonHints(&panelHints, &uiFont, panelY + getAccountPanelHeight() - 48, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
-   panelConfirmHint = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CROSS),  "Try again");
-   panelBackHint    = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CIRCLE), "Close");
+   panelConfirmHint = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CROSS),  LOC(STR_TRY_AGAIN));
+   panelBackHint    = addButtonHint(&panelHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_CLOSE));
 
    int gridHeight = homeFooterTopY - gridTop - (sdHintsTwoRows ? SD_GRID_BOTTOM_GAP : GRID_BOTTOM_GAP);
    if (gridHeight < 120) gridHeight = 120;
@@ -3724,7 +3916,7 @@ static int handleHomeSquareAction(const SearchResult *selected)
       if (!selected->isLocalPlaylist && addPlaylistToWatchLater(selected) == 0) {
          playlistWatchLaterRevisionSeen = getPlaylistWatchLaterRevision();
          playlistToastShownAt = getTimeUs();
-         setLabelText(&playlistToastLabel, "Playlist added to Watch Later");
+         setLabelText(&playlistToastLabel, LOC(STR_PLAYLIST_ADDED_WATCH_LATER));
          if (home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 0) loadCategory();
       }
       return 1;
@@ -3799,7 +3991,7 @@ static void downloadManagerConfirmAction(void)
          else rejected++;
       }
       snprintf(home.downloadManagerMessage, sizeof home.downloadManagerMessage,
-               rejected ? "Cancel requested: %d, unavailable: %d" : "Cancellation requested for %d",
+               rejected ? LOC(STR_CANCEL_REQUESTED_FORMAT) : LOC(STR_CANCELLATION_REQUESTED_FORMAT),
                accepted, rejected);
    } else {
       const char *ids[DOWNLOAD_MANAGEMENT_MAX_ITEMS];
@@ -3808,10 +4000,10 @@ static void downloadManagerConfirmAction(void)
          for (int i = 0; i < requested; i++)
             removeVideoFromAllDownloadPlaylists(home.downloadManagerSelectedIds[i]);
          snprintf(home.downloadManagerMessage, sizeof home.downloadManagerMessage,
-                  "Deleting %d item%s...", requested, requested == 1 ? "" : "s");
+                  LOC(STR_DELETING_ITEMS_FORMAT), requested, requested == 1 ? "" : "s");
       } else {
          strCopy(home.downloadManagerMessage, sizeof home.downloadManagerMessage,
-                 "Could not queue deletion");
+                 LOC(STR_COULD_NOT_QUEUE_DELETION));
       }
    }
 
@@ -3851,7 +4043,7 @@ static void updateDownloadManagement(void)
 
    if (downloadManagerSquareHint >= 0)
       setButtonHintCaption(&downloadManagerHints, downloadManagerSquareHint,
-         home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING ? "Cancel" : "Delete");
+         home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING ? LOC(STR_CANCEL) : LOC(STR_DELETE));
 
    if (home.downloadManagerConfirmOpen) {
       if (isPadButtonPressed(PAD_BTN_CIRCLE)) {
@@ -3923,15 +4115,15 @@ static void updateDownloadManagement(void)
    }
 
    if (loading == 2)
-      strCopy(home.downloadManagerMessage, sizeof home.downloadManagerMessage, "Library unavailable");
+      strCopy(home.downloadManagerMessage, sizeof home.downloadManagerMessage, LOC(STR_LIBRARY_UNAVAILABLE));
    else if (loading == 1 &&
             (!home.downloadManagerMessage[0] ||
-             strcmp(home.downloadManagerMessage, "Library unavailable") == 0))
-      strCopy(home.downloadManagerMessage, sizeof home.downloadManagerMessage, "Loading library...");
+             strcmp(home.downloadManagerMessage, LOC(STR_LIBRARY_UNAVAILABLE)) == 0))
+      strCopy(home.downloadManagerMessage, sizeof home.downloadManagerMessage, LOC(STR_LOADING_LIBRARY));
    else if (!loading &&
-            (strcmp(home.downloadManagerMessage, "Loading library...") == 0 ||
-             strcmp(home.downloadManagerMessage, "Library unavailable") == 0 ||
-             strncmp(home.downloadManagerMessage, "Deleting ", 9) == 0))
+            (strcmp(home.downloadManagerMessage, LOC(STR_LOADING_LIBRARY)) == 0 ||
+             strcmp(home.downloadManagerMessage, LOC(STR_LIBRARY_UNAVAILABLE)) == 0 ||
+             strncmp(home.downloadManagerMessage, LOC(STR_DELETING_PREFIX), strlen(LOC(STR_DELETING_PREFIX))) == 0))
       home.downloadManagerMessage[0] = 0;
 }
 
@@ -3960,7 +4152,7 @@ static void updateHome(void)
    if (previousUpdateDownloadState == 1 && currentUpdateDownloadState != 1) {
       playlistToastShownAt = getTimeUs();
       setLabelText(&playlistToastLabel, currentUpdateDownloadState == 2 ?
-                   "Update Download Complete" : "Update Download Failed");
+                   LOC(STR_UPDATE_DOWNLOAD_COMPLETE) : LOC(STR_UPDATE_DOWNLOAD_FAILED));
    }
    previousUpdateDownloadState = currentUpdateDownloadState;
    if (updateOverwritePromptOpen && updateDialogOpen) {
@@ -3973,10 +4165,10 @@ static void updateHome(void)
             updateOverwriteChoice = !updateOverwriteChoice;
          if (isPadButtonPressed(PAD_BTN_CROSS)) {
             logInfo("[update-ui] confirmation submit type=DOWNLOAD_OVERWRITE choice=%s\n",
-                    updateOverwriteChoice == 0 ? "YES" : "NO");
+                    updateOverwriteChoice == 0 ? LOC(STR_YES_UPPER) : LOC(STR_NO_UPPER));
             if (updateOverwriteChoice == 0 && startUpdateDownloadOverwrite() != 0) {
                playlistToastShownAt = getTimeUs();
-               setLabelText(&playlistToastLabel, "Could not restart update download");
+               setLabelText(&playlistToastLabel, LOC(STR_COULD_NOT_RESTART_UPDATE_DOWNLOAD));
             }
             updateOverwritePromptOpen = 0;
          }
@@ -4013,7 +4205,7 @@ static void updateHome(void)
             logInfo("[update-ui] automatic dialog action=DOWNLOAD download_state=%d\n", getUpdateDownloadState());
             if (getUpdateDownloadState() == 1) {
                playlistToastShownAt = getTimeUs();
-               setLabelText(&playlistToastLabel, "Update download is already running");
+               setLabelText(&playlistToastLabel, LOC(STR_UPDATE_DOWNLOAD_ALREADY_RUNNING));
             } else if (isUpdateDownloaded()) {
                updateOverwritePromptOpen = 1;
                updateOverwriteChoice = 0;
@@ -4023,7 +4215,7 @@ static void updateHome(void)
                logInfo("[update-ui] automatic dialog download start rc=%d state=%d\n", downloadRc, getUpdateDownloadState());
                if (downloadRc != 0) {
                   playlistToastShownAt = getTimeUs();
-                  setLabelText(&playlistToastLabel, "Could not start update download");
+                  setLabelText(&playlistToastLabel, LOC(STR_COULD_NOT_START_UPDATE_DOWNLOAD));
                }
             }
          }
@@ -4118,7 +4310,7 @@ static void updateHome(void)
          } else {
             logWarn("[home] Triangle: async channel lookup failed video=%s\n",
                     home.channelLookupItem.videoId);
-            setLabelText(&playlistToastLabel, "Channel unavailable");
+            setLabelText(&playlistToastLabel, LOC(STR_CHANNEL_UNAVAILABLE));
             playlistToastShownAt = getTimeUs();
          }
          return;
@@ -4132,7 +4324,7 @@ static void updateHome(void)
    }
    if (downloadPlaylistPreparing && downloadPlaylistThreadActive && !downloadPlaylistThreadDone && downloadPlaylistEstimateTotal > 0) {
       char progress[128];
-      snprintf(progress, sizeof progress, "Estimating download size: %d/%d", downloadPlaylistEstimateProgress, downloadPlaylistEstimateTotal);
+      snprintf(progress, sizeof progress, LOC(STR_ESTIMATING_DOWNLOAD_SIZE), downloadPlaylistEstimateProgress, downloadPlaylistEstimateTotal);
       setLabelText(&downloadPlaylistConfirmTitle, progress);
    }
    if (downloadPlaylistPreparing && downloadPlaylistThreadActive && downloadPlaylistThreadDone)
@@ -4181,7 +4373,7 @@ static void updateHome(void)
                uint64_t currentBytes = 0;
                int currentCount = 0;
                if (getDownloadPlaylistDeleteInfo(home.playlistDeleteId, &currentBytes, &currentCount) < 0) {
-                  setLabelText(&playlistToastLabel, "Could not measure playlist files");
+                  setLabelText(&playlistToastLabel, LOC(STR_COULD_NOT_MEASURE_PLAYLIST_FILES));
                   playlistToastShownAt = getTimeUs();
                   home.playlistDeleteConfirmOpen = 0;
                   return;
@@ -4192,10 +4384,10 @@ static void updateHome(void)
                   return;
                }
                if (deleteDownloadPlaylistAndVideos(home.playlistDeleteId) == 0) {
-                  setLabelText(&playlistToastLabel, "Playlist and its videos deleted");
+                  setLabelText(&playlistToastLabel, LOC(STR_PLAYLIST_AND_VIDEOS_DELETED));
                   playlistToastShownAt = getTimeUs();
                } else {
-                  setLabelText(&playlistToastLabel, "Could not delete download playlist");
+                  setLabelText(&playlistToastLabel, LOC(STR_COULD_NOT_DELETE_DOWNLOAD_PLAYLIST));
                   playlistToastShownAt = getTimeUs();
                }
             } else {
@@ -4305,7 +4497,7 @@ static void updateHome(void)
       setPlaylistShuffleContext(1);
       playlistToastShownAt = getTimeUs();
       setLabelText(&playlistToastLabel,
-                   isPlaylistShuffleEnabled() ? "Playlist shuffle: ON" : "Playlist shuffle: OFF");
+                   isPlaylistShuffleEnabled() ? LOC(STR_PLAYLIST_SHUFFLE_ON) : LOC(STR_PLAYLIST_SHUFFLE_OFF));
       updateHomeSortHint();
       return;
    }
@@ -4342,27 +4534,27 @@ static void updateHome(void)
                        home.category == HOME_DOWNLOADS)) showDownload = 1;
       setButtonHintShown(&hints, homeDownloadHint, showDownload);
       setButtonHintCaption(&hints, homeDownloadHint,
-                           home.category == HOME_DOWNLOADS ? "Manage downloads" :
-                           (hintItem && hintItem->isPlaylist ? "Download playlist" : "Download"));
+                           home.category == HOME_DOWNLOADS ? LOC(STR_MANAGE_DOWNLOADS) :
+                           (hintItem && hintItem->isPlaylist ? LOC(STR_DOWNLOAD_PLAYLIST) : LOC(STR_DOWNLOAD)));
    }
    if (homeSquareHint >= 0) {
       if (home.category == HOME_WATCHLATER)
-         setButtonHintCaption(&hints, homeSquareHint, "Remove (confirm) / Playlist (hold)");
+         setButtonHintCaption(&hints, homeSquareHint, LOC(STR_REMOVE_CONFIRM_PLAYLIST_HOLD));
       else if (home.category == HOME_LOCAL_PLAYLIST_CONTENTS)
          setButtonHintCaption(&hints, homeSquareHint,
-            home.playlistReturnCategory == HOME_DOWNLOADS ? "Remove / Delete (hold)" : "Remove (confirm)");
+            home.playlistReturnCategory == HOME_DOWNLOADS ? LOC(STR_REMOVE_DELETE_HOLD) : LOC(STR_REMOVE_CONFIRM));
       else if (home.category == HOME_DOWNLOADS) {
          const SearchResult *downloadHintItem = gridSelected(&home.grid);
          setButtonHintCaption(&hints, homeSquareHint,
-            downloadHintItem && downloadHintItem->isPlaylist ? "Rename / Delete (hold)" : "Add to playlist / Delete (hold)");
+            downloadHintItem && downloadHintItem->isPlaylist ? LOC(STR_RENAME_DELETE_HOLD) : LOC(STR_ADD_PLAYLIST_DELETE_HOLD));
       }
       else if (home.category == HOME_LOCAL_PLAYLISTS)
          setButtonHintCaption(&hints, homeSquareHint,
-                              home.localPlaylistTab == 0 ? "Remove (hold)" : "Rename / Delete (hold)");
+                              home.localPlaylistTab == 0 ? LOC(STR_REMOVE_HOLD) : LOC(STR_RENAME_DELETE_HOLD));
       else if (home.category == HOME_PLAYLISTS)
-         setButtonHintCaption(&hints, homeSquareHint, "Save playlist");
+         setButtonHintCaption(&hints, homeSquareHint, LOC(STR_SAVE_PLAYLIST));
       else
-         setButtonHintCaption(&hints, homeSquareHint, "Watch Later / Playlist (hold)");
+         setButtonHintCaption(&hints, homeSquareHint, LOC(STR_WATCH_LATER_PLAYLIST_HOLD));
    }
    if (home.category == HOME_DOWNLOADS && homeSquareHint >= 0) {
       const SearchResult *squareItem = gridSelected(&home.grid);
@@ -4384,11 +4576,11 @@ static void updateHome(void)
    }
    if (((home.category == HOME_LOCAL_PLAYLISTS && home.localPlaylistTab == 1) ||
         (home.category == HOME_DOWNLOADS && home.downloadCategory != 1)) && isPadButtonPressed(PAD_BTN_L3)) {
-      char defaultName[LOCAL_PLAYLIST_NAME_LEN]; snprintf(defaultName, sizeof defaultName, "Playlist %d",
+      char defaultName[LOCAL_PLAYLIST_NAME_LEN]; snprintf(defaultName, sizeof defaultName, LOC(STR_PLAYLIST_NAME_FORMAT),
                (home.category == HOME_DOWNLOADS ? getDownloadPlaylistCount() : getLocalPlaylistCount()) + 1);
       home.playlistNameAction = 1;
       home.playlistNameTargetId[0] = 0;
-      oskInputBegin("New playlist", defaultName, onHomePlaylistNameEntered); return;
+      oskInputBegin(LOC(STR_NEW_PLAYLIST), defaultName, onHomePlaylistNameEntered); return;
    }
    if (gridStage(&home.grid) != GRID_READY) return;
    if (homeNewPlaylistHint >= 0) setButtonHintShown(&hints, homeNewPlaylistHint,
@@ -4436,7 +4628,7 @@ static void updateHome(void)
             home.playlistDeleteFromWatchLater = 5;
             if (getDownloadPlaylistDeleteInfo(home.playlistDeleteId, &home.playlistDeleteBytes,
                                               &home.playlistDeleteVideoCount) < 0) {
-               setLabelText(&playlistToastLabel, "Could not measure playlist files");
+               setLabelText(&playlistToastLabel, LOC(STR_COULD_NOT_MEASURE_PLAYLIST_FILES));
                playlistToastShownAt = getTimeUs();
                return;
             }
@@ -4449,7 +4641,7 @@ static void updateHome(void)
             squarePressedAt = 0;
             home.playlistNameAction = 2;
             strCopy(home.playlistNameTargetId, sizeof home.playlistNameTargetId, selected->localPlaylistId);
-            oskInputBegin("Rename download playlist", selected->title, onHomePlaylistNameEntered);
+            oskInputBegin(LOC(STR_RENAME_DOWNLOAD_PLAYLIST), selected->title, onHomePlaylistNameEntered);
             return;
          }
          return;
@@ -4550,7 +4742,7 @@ static void updateHome(void)
    if (home.category == HOME_PLAYLISTS) {
       if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 1);
       if (homeSquareHint >= 0) {
-         setButtonHintCaption(&hints, homeSquareHint, "Save playlist");
+         setButtonHintCaption(&hints, homeSquareHint, LOC(STR_SAVE_PLAYLIST));
          setButtonHintShown(&hints, homeSquareHint, 1);
       }
       if (handleHomeSquareAction(selected)) return;
@@ -4566,7 +4758,7 @@ static void updateHome(void)
       if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, selected->isPlaylist);
       if (homeSquareHint >= 0) {
          setButtonHintCaption(&hints, homeSquareHint,
-                              home.localPlaylistTab == 0 ? "Remove (hold)" : "Rename / Delete (hold)");
+                              home.localPlaylistTab == 0 ? LOC(STR_REMOVE_HOLD) : LOC(STR_RENAME_DELETE_HOLD));
          setButtonHintShown(&hints, homeSquareHint, 1);
       }
       if (isPadButtonPressed(PAD_BTN_R3) && selected->isPlaylist) { openDownloadPlaylistConfirmation(selected); return; }
@@ -4588,7 +4780,7 @@ static void updateHome(void)
                if (home.localPlaylistTab == 1 && selected->isLocalPlaylist && selected->localPlaylistId[0]) {
                   home.playlistNameAction = 2;
                   strCopy(home.playlistNameTargetId, sizeof home.playlistNameTargetId, selected->localPlaylistId);
-                  oskInputBegin("Rename playlist", selected->title, onHomePlaylistNameEntered);
+                  oskInputBegin(LOC(STR_RENAME_PLAYLIST), selected->title, onHomePlaylistNameEntered);
                }
                return;
             }
@@ -4625,8 +4817,8 @@ static void updateHome(void)
                              home.playlistReturnCategory != HOME_DOWNLOADS));
       if (homeSquareHint >= 0) {
          setButtonHintCaption(&hints, homeSquareHint,
-                              home.category == HOME_WATCHLATER ? "Remove / Playlist (hold)" :
-                              (home.playlistReturnCategory == HOME_DOWNLOADS ? "Remove / Delete (hold)" : "Remove"));
+                              home.category == HOME_WATCHLATER ? LOC(STR_REMOVE_PLAYLIST_HOLD) :
+                              (home.playlistReturnCategory == HOME_DOWNLOADS ? LOC(STR_REMOVE_DELETE_HOLD) : LOC(STR_REMOVE)));
          setButtonHintShown(&hints, homeSquareHint, 1);
       }
    } else if (home.category == HOME_PLAYLIST_CONTENTS) {
@@ -4634,14 +4826,14 @@ static void updateHome(void)
       if (homeSquareHint >= 0) setButtonHintShown(&hints, homeSquareHint, 0);
    } else if (homeSquareHint >= 0) {
       if (homeDownloadHint >= 0) setButtonHintShown(&hints, homeDownloadHint, 1);
-      setButtonHintCaption(&hints, homeSquareHint, "Watch Later / Playlist (hold)");
+      setButtonHintCaption(&hints, homeSquareHint, LOC(STR_WATCH_LATER_PLAYLIST_HOLD));
       setButtonHintShown(&hints, homeSquareHint, 1);
    }
 
    int inDownloadedPlaylist = home.category == HOME_LOCAL_PLAYLIST_CONTENTS &&
                               home.playlistReturnCategory == HOME_DOWNLOADS;
    if (homeDownloadHint >= 0 && inDownloadedPlaylist) {
-      setButtonHintCaption(&hints, homeDownloadHint, "Manage downloads");
+      setButtonHintCaption(&hints, homeDownloadHint, LOC(STR_MANAGE_DOWNLOADS));
       setButtonHintShown(&hints, homeDownloadHint, 1);
    }
 
@@ -4730,11 +4922,11 @@ static void drawDownloadManagement(void)
    fillGfxRectangleFixed(0, 0, home.screenW, home.screenH, activeTheme->scrim);
    fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
-   setLabelText(&downloadManagerTitle, "Download management");
+   setLabelText(&downloadManagerTitle, LOC(STR_DOWNLOAD_MANAGEMENT));
    refreshLabelScale(&downloadManagerTitle);
    drawLabelAt(&downloadManagerTitle, x + 30, y + 14);
 
-   static const char *categoryNames[3] = { "Ongoing", "Completed", "Failed" };
+   const char *categoryNames[3] = { LOC(STR_ONGOING), LOC(STR_COMPLETED), LOC(STR_FAILED) };
    int tabGap = 8;
    int tabW = (panelW - 48 - tabGap * 2) / 3;
    int tabY = y + 66;
@@ -4767,13 +4959,13 @@ static void drawDownloadManagement(void)
             if (percent < 0) percent = 0;
             if (percent > 100) percent = 100;
             snprintf(status, sizeof status, "%s%d%%",
-                     item->cancelling ? "Cancelling " : "", percent);
+                     item->cancelling ? LOC(STR_CANCELLING) : "", percent);
          } else if (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING) {
-            strCopy(status, sizeof status, "Queued");
+            strCopy(status, sizeof status, LOC(STR_QUEUED));
          } else if (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_COMPLETED) {
             status[0] = 0;
          } else {
-            strCopy(status, sizeof status, "Failed");
+            strCopy(status, sizeof status, LOC(STR_FAILED));
          }
 
          if (selected)
@@ -4827,10 +5019,10 @@ static void drawDownloadManagement(void)
 
    if (home.downloadManagerMessage[0] || loading || totalCount == 0) {
       const char *message = home.downloadManagerMessage[0] ? home.downloadManagerMessage :
-         (loading ? "Loading library..." :
-          (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING ? "No ongoing downloads" :
+         (loading ? LOC(STR_LOADING_LIBRARY) :
+          (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING ? LOC(STR_NO_ONGOING_DOWNLOADS) :
            (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_COMPLETED ?
-            "No completed downloads" : "No failed downloads")));
+            LOC(STR_NO_COMPLETED_DOWNLOADS) : LOC(STR_NO_FAILED_DOWNLOADS))));
       setLabelText(&downloadManagerFooter, message);
       refreshLabelScale(&downloadManagerFooter);
       drawLabelAt(&downloadManagerFooter, x + 28, y + panelH - 54);
@@ -4872,11 +5064,11 @@ static void drawDownloadManagement(void)
 
       char prompt[DOWNLOAD_MANAGEMENT_TITLE_LEN];
       if (home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_ONGOING)
-         snprintf(prompt, sizeof prompt, "Cancel %d download%s?", home.downloadManagerSelectedCount,
+         snprintf(prompt, sizeof prompt, LOC(STR_CANCEL_DOWNLOAD_COUNT), home.downloadManagerSelectedCount,
                   home.downloadManagerSelectedCount == 1 ? "" : "s");
       else
-         snprintf(prompt, sizeof prompt, "Delete %d %s item%s?", home.downloadManagerSelectedCount,
-                  home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_FAILED ? "failed" : "downloaded",
+         snprintf(prompt, sizeof prompt, LOC(STR_DELETE_DOWNLOAD_ITEMS), home.downloadManagerSelectedCount,
+                  home.downloadManagerCategory == DOWNLOAD_MANAGEMENT_FAILED ? LOC(STR_FAILED_LOWER) : LOC(STR_DOWNLOADED_LOWER),
                   home.downloadManagerSelectedCount == 1 ? "" : "s");
       setLabelText(&downloadManagerTitle, prompt);
       refreshLabelScale(&downloadManagerTitle);
@@ -4884,13 +5076,29 @@ static void drawDownloadManagement(void)
                 cy + (int)(34 * uiScale + 0.5f));
       drawLabel(&downloadManagerTitle);
 
-      setLabelText(&downloadManagerFooter, "X Confirm                         O Cancel");
+      setLabelText(&downloadManagerFooter, LOC(STR_CONFIRM_CANCEL_FOOTER));
       refreshLabelScale(&downloadManagerFooter);
       moveLabel(&downloadManagerFooter, home.screenW / 2 - downloadManagerFooter.tt.tex.w / 2,
                 cy + (int)(94 * uiScale + 0.5f));
       drawLabel(&downloadManagerFooter);
-      setLabelText(&downloadManagerTitle, "Download management");
+      setLabelText(&downloadManagerTitle, LOC(STR_DOWNLOAD_MANAGEMENT));
    }
+}
+
+static void refreshHomeHintCaptions(void)
+{
+   // Button-hint labels are allocated once; refresh their text after an
+   // application-language change instead of retaining the startup language.
+   setButtonHintCaption(&hints, 0, LOC(STR_PLAY));
+   setButtonHintCaption(&hints, 1, LOC(STR_WATCH_LATER_PLAYLIST_HOLD));
+   setButtonHintCaption(&hints, 2, LOC(STR_DOWNLOAD));
+   setButtonHintCaption(&hints, 3, LOC(STR_CHANNEL));
+   setButtonHintCaption(&hints, 4, LOC(STR_NEW_PLAYLIST));
+   setButtonHintCaption(&hints, 5, LOC(STR_SEARCH));
+   setButtonHintCaption(&hints, 6, LOC(STR_SETTINGS));
+   setButtonHintCaption(&hints, 8, LOC(STR_CATEGORY));
+   setButtonHintCaption(&hints, 9, LOC(STR_REFRESH));
+   setButtonHintCaption(&hints, 10, LOC(STR_SORT));
 }
 
 static void drawHome(void)
@@ -4917,7 +5125,7 @@ static void drawHome(void)
          drawLoadingIndicator(home.screenW / 2, home.screenH / 2, &homeLoadingStartedUs);
       } else {
          homeLoadingStartedUs = 0;
-         setLabelText(&statusLabel, stage == GRID_ERROR ? "Unable to load content" : "No results");
+         setLabelText(&statusLabel, stage == GRID_ERROR ? LOC(STR_UNABLE_TO_LOAD_CONTENT) : LOC(STR_NO_RESULTS));
          drawLabel(&statusLabel);
       }
    }
@@ -4931,6 +5139,7 @@ static void drawHome(void)
    if (homeSupportsSort() || homeSupportsPlaylistSort()) drawHomeSortPills();
    drawPlaylistShuffleBadge();
    if (home.category == HOME_DOWNLOADS) drawDownloadSpaceStatus();
+   refreshHomeHintCaptions();
    drawButtonHintsFitted(&hints, home.screenW, homeFooterBottomY, HINT_ROW_GAP, MAX_HINT_ROWS);
    if (!home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen) drawSidebar();
    if (home.downloadPlaylistConfirmOpen) {
@@ -4958,6 +5167,7 @@ static void drawHome(void)
          if (home.regionOpen) drawRegionPicker();
          else if (home.sponsorblockOpen) drawSponsorBlockPanel();
       }
+      if (home.languageConfirmOpen) drawLanguageConfirm();
    }
    if (updateDialogOpen) drawUpdateDialog();
    if (updateNotesOpen) drawUpdateNotes();
@@ -4975,29 +5185,29 @@ static void drawHome(void)
    }
    if (home.playlistDeleteConfirmOpen) {
       setLabelText(&exitConfirmTitle,
-                   home.playlistDeleteFromWatchLater == 1 ? "Remove playlist" :
-                   home.playlistDeleteFromWatchLater == 2 ? "Delete download" :
-                   (home.playlistDeleteFromWatchLater == 3 || home.playlistDeleteFromWatchLater == 4) ? "Remove video" :
-                   home.playlistDeleteFromWatchLater == 5 ? "Delete download playlist" : "Delete playlist");
+                   home.playlistDeleteFromWatchLater == 1 ? LOC(STR_REMOVE_PLAYLIST) :
+                   home.playlistDeleteFromWatchLater == 2 ? LOC(STR_DELETE_DOWNLOAD) :
+                   (home.playlistDeleteFromWatchLater == 3 || home.playlistDeleteFromWatchLater == 4) ? LOC(STR_REMOVE_VIDEO) :
+                   home.playlistDeleteFromWatchLater == 5 ? LOC(STR_DELETE_DOWNLOAD_PLAYLIST) : LOC(STR_DELETE_PLAYLIST));
       char deleteMessage[192];
       if (home.playlistDeleteFromWatchLater == 5) {
          char freed[48]; formatDownloadSpace(home.playlistDeleteBytes, freed, sizeof freed);
-         snprintf(deleteMessage, sizeof deleteMessage, "Delete playlist and %d videos? Frees %s",
+         snprintf(deleteMessage, sizeof deleteMessage, LOC(STR_DELETE_PLAYLIST_AND_VIDEOS),
                   home.playlistDeleteVideoCount, freed);
       } else {
          strCopy(deleteMessage, sizeof deleteMessage,
-                 home.playlistDeleteFromWatchLater == 1 ? "Remove this playlist from Watch Later?" :
-                 home.playlistDeleteFromWatchLater == 2 ? "Delete this downloaded video from the HDD?" :
-                 home.playlistDeleteFromWatchLater == 3 ? "Remove this video from Watch Later?" :
-                 home.playlistDeleteFromWatchLater == 4 ? "Remove this video from this PS3 playlist?" :
-                 "Delete this playlist and its videos?");
+                 home.playlistDeleteFromWatchLater == 1 ? LOC(STR_REMOVE_FROM_WATCH_LATER) :
+                 home.playlistDeleteFromWatchLater == 2 ? LOC(STR_DELETE_DOWNLOADED_VIDEO) :
+                 home.playlistDeleteFromWatchLater == 3 ? LOC(STR_REMOVE_VIDEO_WATCH_LATER) :
+                 home.playlistDeleteFromWatchLater == 4 ? LOC(STR_REMOVE_VIDEO_PS3_PLAYLIST) :
+                 LOC(STR_DELETE_PLAYLIST_AND_VIDEOS_QUESTION));
       }
       setLabelText(&exitConfirmMessage, deleteMessage);
-      setLabelText(&exitConfirmChoices[0], "Yes"); setLabelText(&exitConfirmChoices[1], "No");
+      setLabelText(&exitConfirmChoices[0], LOC(STR_YES)); setLabelText(&exitConfirmChoices[1], LOC(STR_NO));
       int saved = home.exitConfirmSelected; home.exitConfirmSelected = home.playlistDeleteConfirmSelected;
       drawExitConfirmation(); home.playlistDeleteConfirmSelected = home.exitConfirmSelected; home.exitConfirmSelected = saved;
-      setLabelText(&exitConfirmTitle, "Exit CRTube");
-      setLabelText(&exitConfirmMessage, "Are you sure you want to close the app?");
+      setLabelText(&exitConfirmTitle, LOC(STR_EXIT_CRTUBE));
+      setLabelText(&exitConfirmMessage, LOC(STR_CONFIRM_CLOSE_APP));
    }
    if (home.downloadManagerOpen) {
       drawDownloadManagement();

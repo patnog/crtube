@@ -1,5 +1,6 @@
 // Search page: persistent recent queries before the first search, then the existing VideoGrid results.
 #include "app-config.h"
+#include "localization.h"
 #include "dbg.h"
 #include "screens/search.h"
 #include "screens/home.h"
@@ -55,8 +56,8 @@
 #define CHANNEL_AVATAR_CACHE_LIMIT (5ULL * 1024ULL * 1024ULL)
 #define CHANNEL_INFO_TEXT_SIZE 24
 #define CHANNEL_AVATAR_SIZE 152
-static const char *SortNames[SORT_COUNT] = { "Relevance", "Views", "Newest" };
-static const char *ChannelSortNames[CHANNEL_SORT_COUNT] = { "Latest", "Popular", "Oldest" };
+static const AppStringId SortNameIds[SORT_COUNT] = { STR_RELEVANCE, STR_VIEWS, STR_NEWEST };
+static const AppStringId ChannelSortNameIds[CHANNEL_SORT_COUNT] = { STR_LATEST, STR_POPULAR_SORT, STR_OLDEST };
 
 static char         pendingQuery[SEARCH_QUERY_LEN];
 static SearchResult pendingChannel;
@@ -145,6 +146,7 @@ static int channelAvatarDecodeAttempted;
 static Label channelInfoPageLabel;
 static int channelInfoVisible;
 static int channelInfoPage;
+static int channelInfoLineHeight;
 static ChannelAboutInfo channelInfoData;
 static ChannelAboutInfo channelInfoWorkerData;
 static char channelInfoFallbackAvatarUrl[512];
@@ -193,11 +195,11 @@ static void updateSearchHints(void)
 {
    int hasHistory = search.historyCount > 0;
    int fieldAction = search.landing ? (search.historySelection >= 0 ? 1 : 0) : search.fieldFocused;
-   setButtonHintCaption(&hints, crossHint, fieldAction ? (search.landing ? "Search" : "Type") :
-                        (search.landing ? "Type" : "Play"));
+   setButtonHintCaption(&hints, crossHint, fieldAction ? (search.landing ? LOC(STR_SEARCH) : LOC(STR_TYPE)) :
+                        (search.landing ? LOC(STR_TYPE) : LOC(STR_PLAY_HINT)));
    if (squareHint >= 0) {
       setButtonHintShown(&hints, squareHint, search.landing ? search.historySelection >= 0 : !search.fieldFocused);
-      setButtonHintCaption(&hints, squareHint, search.landing ? "Delete / Clear all (hold)" : "Watch Later / Playlist (hold)");
+      setButtonHintCaption(&hints, squareHint, search.landing ? LOC(STR_DELETE_CLEAR_ALL_HOLD) : LOC(STR_WATCH_LATER_PLAYLIST_HOLD_SEARCH));
    }
    if (triangleHint >= 0) setButtonHintShown(&hints, triangleHint, !search.landing && !search.fieldFocused);
 
@@ -206,7 +208,7 @@ static void updateSearchHints(void)
    if (settingsHint >= 0) setButtonHintShown(&hints, settingsHint, !search.landing);
    if (sortHint >= 0) {
       setButtonHintShown(&hints, sortHint, !search.landing && (!search.channelId[0] || search.channelName[0]));
-      setButtonHintCaption(&hints, sortHint, search.channelId[0] ? "Description" : "Sort");
+      setButtonHintCaption(&hints, sortHint, search.channelId[0] ? LOC(STR_DESCRIPTION_HINT) : LOC(STR_SORT));
    }
    if (channelPrevHint >= 0) setButtonHintShown(&hints, channelPrevHint, !search.landing && search.channelId[0]);
    if (channelNextHint >= 0) setButtonHintShown(&hints, channelNextHint, !search.landing && search.channelId[0]);
@@ -228,8 +230,8 @@ static void setQueryField(void)
       setLabelText(&queryPromptSuffix, "");
    } else {
       setLabelText(&queryLabel, "");
-      setLabelText(&queryPromptPrefix, "Press ");
-      setLabelText(&queryPromptSuffix, " to enter search");
+      setLabelText(&queryPromptPrefix, LOC(STR_PRESS_SPACE));
+      setLabelText(&queryPromptSuffix, LOC(STR_TO_ENTER_SEARCH));
       setLabelColor(&queryPromptPrefix, activeTheme->textSecondary);
       setLabelColor(&queryPromptSuffix, activeTheme->textSecondary);
    }
@@ -505,27 +507,43 @@ static void renderChannelInfoText(void)
    char content[6144];
    const char *description = channelInfoData.channelDescription;
    if (!description[0])
-      description = channelInfoWorkerActive ? "Loading channel information..." : "No description available.";
-   int used = snprintf(content, sizeof content, "DESCRIPTION\n\n%s\n\n\nMORE INFORMATION\n\n",
-                       description);
+      description = channelInfoWorkerActive ? LOC(STR_LOADING_CHANNEL_INFORMATION) : LOC(STR_NO_DESCRIPTION_AVAILABLE);
+   int used = snprintf(content, sizeof content, "%s\n\n%s\n\n\n%s\n\n",
+                       LOC(STR_DESCRIPTION_HEADING), description,
+                       LOC(STR_MORE_INFORMATION));
    if (used < 0) used = 0;
    if (used >= (int)sizeof content) used = sizeof content - 1;
    int infoRows = 0;
-   infoRows += appendChannelInfoRow(content, sizeof content, &used, "Subscribers", channelInfoData.channelSubscribers);
-   infoRows += appendChannelInfoRow(content, sizeof content, &used, "Videos", channelInfoData.channelVideoCount);
-   infoRows += appendChannelInfoRow(content, sizeof content, &used, "Views", channelInfoData.channelViewCount);
-   infoRows += appendChannelInfoRow(content, sizeof content, &used, "Country", channelInfoData.channelCountry);
-   infoRows += appendChannelInfoRow(content, sizeof content, &used, "Joined", channelInfoData.channelJoinedDate);
+   infoRows += appendChannelInfoRow(content, sizeof content, &used, LOC(STR_SUBSCRIBERS), channelInfoData.channelSubscribers);
+   infoRows += appendChannelInfoRow(content, sizeof content, &used, LOC(STR_VIDEOS), channelInfoData.channelVideoCount);
+   infoRows += appendChannelInfoRow(content, sizeof content, &used, LOC(STR_VIEWS), channelInfoData.channelViewCount);
+   infoRows += appendChannelInfoRow(content, sizeof content, &used, LOC(STR_COUNTRY), channelInfoData.channelCountry);
+   infoRows += appendChannelInfoRow(content, sizeof content, &used, LOC(STR_JOINED), channelInfoData.channelJoinedDate);
    if (infoRows == 0 && used < (int)sizeof content - 1)
-      snprintf(content + used, sizeof content - used, "No additional information available.");
+      snprintf(content + used, sizeof content - used, LOC(STR_NO_ADDITIONAL_INFORMATION));
    if (channelInfoTexture.valid) freeTextTexture(&channelInfoTexture);
    // Use the inverse-scaled logical content width. The display transform then
    // produces the intended visible width at both UI scales and aspect ratios.
    int textX, textY, textW, textH;
    getChannelInfoTextRect(&textX, &textY, &textW, &textH);
    (void)textX; (void)textY; (void)textH;
-   renderFontRaw(&channelInfoTexture, &uiFont, CHANNEL_INFO_TEXT_SIZE, content,
-                 activeTheme->textPrimary, textW, TEXT_WRAP);
+   TextEnd textEnd;
+   memset(&textEnd, 0, sizeof textEnd);
+   renderFontRawEx(&channelInfoTexture, &uiFont, CHANNEL_INFO_TEXT_SIZE, content,
+                   activeTheme->textPrimary, textW, TEXT_WRAP, NULL, &textEnd);
+   channelInfoLineHeight = textEnd.valid ? textEnd.lineHeight : CHANNEL_INFO_TEXT_SIZE;
+   if (channelInfoLineHeight < 1) channelInfoLineHeight = CHANNEL_INFO_TEXT_SIZE;
+}
+
+/* Keep page boundaries on complete rendered text lines. The texture is rendered
+ * once in full; page navigation only changes the source rectangle, so the crop
+ * height must be an integer number of font line cells. */
+static int getChannelInfoPageHeight(int viewHeight)
+{
+   int lineHeight = channelInfoLineHeight > 0 ? channelInfoLineHeight : CHANNEL_INFO_TEXT_SIZE;
+   int linesPerPage = viewHeight / lineHeight;
+   if (linesPerPage < 1) linesPerPage = 1;
+   return linesPerPage * lineHeight;
 }
 
 static int searchFetch(const char *token, SearchResults *out, void *user)
@@ -595,16 +613,16 @@ static int searchFetch(const char *token, SearchResults *out, void *user)
 
 static void updateTriangleHint(void)
 {
-   const char *caption = "Channel";
-   if (search.channelId[0]) caption = isSubscribed(search.channelId) ? "Unsubscribe" : "Subscribe";
+   const char *caption = LOC(STR_CHANNEL_NAME);
+   if (search.channelId[0]) caption = isSubscribed(search.channelId) ? LOC(STR_UNSUBSCRIBE) : LOC(STR_SUBSCRIBE);
    if (triangleHint >= 0) setButtonHintCaption(&hints, triangleHint, caption);
 }
 
 static void setHeading(void)
 {
    setQueryField();
-   if (search.channelId[0]) setLabelText(&sortLabel, ChannelSortNames[search.channelSort]);
-   else setLabelText(&sortLabel, SortNames[search.sort]);
+   if (search.channelId[0]) setLabelText(&sortLabel, LOC(ChannelSortNameIds[search.channelSort]));
+   else setLabelText(&sortLabel, LOC(SortNameIds[search.sort]));
    updateTriangleHint();
    updateSearchHints();
 }
@@ -665,7 +683,7 @@ static void enterChannel(const SearchResult *item)
    strCopy(channelReturn.playlistId, sizeof channelReturn.playlistId, item->playlistId);
    strCopy(search.channelId, sizeof search.channelId, item->channelId);
    strCopy(search.channelName, sizeof search.channelName,
-           item->author[0] ? item->author : "Channel");
+           item->author[0] ? item->author : LOC(STR_CHANNEL_NAME));
    cancelImagePriorityAsync();
    if (channelAvatarTexture.offset) freeGfxTexture(&channelAvatarTexture);
    channelAvatarTexture.offset = 0;
@@ -766,7 +784,7 @@ static void initSearch(void)
    if (pendingIsChannel) {
       strCopy(search.channelId, sizeof search.channelId, pendingChannel.channelId);
       strCopy(search.channelName, sizeof search.channelName,
-              pendingChannel.author[0] ? pendingChannel.author : "Channel");
+              pendingChannel.author[0] ? pendingChannel.author : LOC(STR_CHANNEL_NAME));
       channelAvatarCachePath(search.channelId, channelAvatarPath, sizeof channelAvatarPath);
       migrateLegacyChannelAvatarCache(search.channelId, channelAvatarPath);
       strCopy(channelInfoData.channelName, sizeof channelInfoData.channelName, search.channelName);
@@ -788,14 +806,14 @@ static void initSearch(void)
    if (channelNameWidth < 1) channelNameWidth = 1;
    initLabel(&channelAvatarNameLabel, &uiFont, 0, 0, channelNameWidth, AUTO, 26,
              activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS,
-             search.channelName[0] ? search.channelName : "Channel");
+             search.channelName[0] ? search.channelName : LOC(STR_CHANNEL_NAME));
    setLabelScaleWithUi(&channelAvatarNameLabel, 1);
    int sortPad = (int)(4 * search.uiScale + 0.5f);
    int sortGap = (int)(3 * search.uiScale + 0.5f);
    int sortGroupWidth = 0;
    for (int i = 0; i < SORT_COUNT; i++) {
       initLabel(&sortLabels[i], &uiFont, 0, 0, AUTO, AUTO, SORT_TEXT_SIZE,
-                activeTheme->textSecondary, TEXT_NOWRAP, SortNames[i]);
+                activeTheme->textSecondary, TEXT_NOWRAP, LOC(SortNameIds[i]));
       setLabelScaleWithUi(&sortLabels[i], 1);
       search.sortPillWidth[i] = sortLabels[i].tt.tex.w + sortPad * 2;
       sortGroupWidth += search.sortPillWidth[i];
@@ -832,7 +850,7 @@ static void initSearch(void)
                 activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
    setLabelScaleWithUi(&queryLabel, 1);
    initLabelRaw(&queryPromptPrefix, &uiFont, 0, 0, search.fieldWidth, FIELD_H - 10,
-                PROMPT_TEXT_SIZE, activeTheme->textSecondary, TEXT_NOWRAP, "Press ");
+                PROMPT_TEXT_SIZE, activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_PRESS_SPACE));
    setLabelScaleWithUi(&queryPromptPrefix, 1);
    searchCrossGlyph = getConsoleGlyph(GLYPH_CROSS);
    int promptCrossH = (int)(PROMPT_TEXT_SIZE * search.uiScale * 0.92f + 0.5f);
@@ -844,12 +862,12 @@ static void initSearch(void)
                            (int)(8 * search.uiScale + 0.5f);
    if (promptSuffixWidth < 32) promptSuffixWidth = 32;
    initLabelRaw(&queryPromptSuffix, &uiFont, 0, 0, promptSuffixWidth, FIELD_H - 10,
-                PROMPT_TEXT_SIZE, activeTheme->textSecondary, TEXT_NOWRAP, " to enter search");
+                PROMPT_TEXT_SIZE, activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_TO_ENTER_SEARCH));
    setLabelScaleWithUi(&queryPromptSuffix, 1);
    initLabel(&sortLabel, &uiFont, 0, 0, AUTO, AUTO, 21,
              activeTheme->textSecondary, TEXT_NOWRAP, "");
    setLabelScaleWithUi(&sortLabel, 1);
-   static const char *const channelCategoryNames[4] = { "Videos", "LIVE", "Shorts", "Playlists" };
+   const char *channelCategoryNames[4] = { LOC(STR_VIDEOS), LOC(STR_LIVE_UPPER), LOC(STR_SHORTS), LOC(STR_PLAYLISTS) };
    int channelCategoryGap = (int)(6 * search.uiScale + 0.5f);
    int channelCategoryPad = (int)(18 * search.uiScale + 0.5f);
    int channelColW[2] = { 0, 0 };
@@ -875,21 +893,21 @@ static void initSearch(void)
    }
    initLabelRaw(&statusLabel, &uiFont, MARGIN_X, 0,
                 search.screenW - 2 * MARGIN_X, AUTO, 21,
-                activeTheme->textSecondary, TEXT_NOWRAP, "Loading...");
+                activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_LOADING_TEXT));
    setLabelScaleWithUi(&statusLabel, 1);
    initLabel(&historyTitleLabel, &uiFont, MARGIN_X, 0, AUTO, AUTO, 24,
-             activeTheme->textSecondary, TEXT_NOWRAP, "Recent searches");
+             activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_RECENT_SEARCHES));
    setLabelScaleWithUi(&historyTitleLabel, 1);
    initLabel(&historyEmptyLabel, &uiFont, MARGIN_X, 0, AUTO, AUTO, 22,
-             activeTheme->textSecondary, TEXT_NOWRAP, "No recent searches");
+             activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_NO_RECENT_SEARCHES));
    setLabelScaleWithUi(&historyEmptyLabel, 1);
    int historyConfirmWidth = (int)((search.screenW * 0.90f - 40) / search.uiScale);
    if (historyConfirmWidth > 620) historyConfirmWidth = 620;
    if (historyConfirmWidth < 240) historyConfirmWidth = 240;
    initLabel(&historyConfirmTitle, &uiFont, 0, 0, historyConfirmWidth, AUTO, 27,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Delete all search history?");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_DELETE_ALL_SEARCH_HISTORY));
    initLabel(&historyConfirmFooter, &uiFont, 0, 0, historyConfirmWidth, AUTO, 19,
-             activeTheme->textSecondary, TEXT_NOWRAP, "X Confirm       O Cancel");
+             activeTheme->textSecondary, TEXT_NOWRAP, LOC(STR_CONFIRM_CANCEL_SEARCH_HISTORY));
    setLabelScaleWithUi(&historyConfirmTitle, 1);
    setLabelScaleWithUi(&historyConfirmFooter, 1);
    for (int i = 0; i < MAX_SEARCH_HISTORY; i++) {
@@ -901,25 +919,25 @@ static void initSearch(void)
    initIcon(&searchIcon, ICON_SEARCH, 28);
 
    initButtonHints(&hints, &uiFont, 0, HINT_GLYPH_H, HINT_TEXT, activeTheme->textSecondary);
-   crossHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_CROSS), "Type");
-   addButtonHint(&hints, getConsoleGlyph(GLYPH_CIRCLE), "Back");
-   squareHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE), "Watch Later");
-   triangleHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_TRIANGLE), "Channel");
-   selectHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT), "Search");
-   downloadHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R3), "Download");
-   settingsHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_START), "Settings");
-   sortHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L2), "Sort");
+   crossHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_TYPE));
+   addButtonHint(&hints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_BACK));
+   squareHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SQUARE), LOC(STR_WATCH_LATER_BADGE));
+   triangleHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_TRIANGLE), LOC(STR_CHANNEL_NAME));
+   selectHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_SELECT), LOC(STR_SEARCH));
+   downloadHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R3), LOC(STR_DOWNLOAD));
+   settingsHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_START), LOC(STR_SETTINGS_HINT));
+   sortHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L2), LOC(STR_SORT));
    channelPrevHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_L1), "");
-   channelNextHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R1), "Category");
-   refreshHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R2), "Refresh");
+   channelNextHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R1), LOC(STR_CATEGORY_HINT));
+   refreshHint = addButtonHint(&hints, getConsoleGlyph(GLYPH_R2), LOC(STR_REFRESH_HINT));
    clearHistoryHint = -1;
    setButtonHintsStableLayout(&hints, 1);
    // Measure the longest dynamic captions so later mode changes cannot need an unreserved row.
-   setButtonHintCaption(&hints, crossHint, "Open playlist");
-   setButtonHintCaption(&hints, squareHint, "Watch Later / Playlist (hold)");
-   setButtonHintCaption(&hints, triangleHint, "Unsubscribe");
+   setButtonHintCaption(&hints, crossHint, LOC(STR_OPEN_PLAYLIST));
+   setButtonHintCaption(&hints, squareHint, LOC(STR_WATCH_LATER_PLAYLIST_HOLD_SEARCH));
+   setButtonHintCaption(&hints, triangleHint, LOC(STR_UNSUBSCRIBE));
    search.footerRows = getButtonHintsFitRows(&hints, search.screenW, MAX_HINT_ROWS);
-   setButtonHintCaption(&hints, squareHint, "Watch Later");
+   setButtonHintCaption(&hints, squareHint, LOC(STR_WATCH_LATER_BADGE));
    if (search.footerRows < 1) search.footerRows = 1;
    float hintGlyphFinal = HINT_GLYPH_H * (isGfxSdVideoOutput() ? 1.5f : search.uiScale);
    int footerRowStep = (int)((hintGlyphFinal + HINT_ROW_GAP) * hints.fitScale + 0.5f);
@@ -992,7 +1010,9 @@ static void updateSearch(void)
       int textX, textY, textW, viewH;
       getChannelInfoTextRect(&textX, &textY, &textW, &viewH);
       (void)textX; (void)textY; (void)textW;
-      int pageCount = channelInfoTexture.tex.h > 0 ? (channelInfoTexture.tex.h + viewH - 1) / viewH : 1;
+      int pageHeight = getChannelInfoPageHeight(viewH);
+      int pageCount = channelInfoTexture.tex.h > 0 ?
+                      (channelInfoTexture.tex.h + pageHeight - 1) / pageHeight : 1;
       if (isPadButtonPressed(PAD_BTN_DOWN) || isPadButtonPressed(PAD_BTN_RIGHT)) {
          if (channelInfoPage + 1 < pageCount) channelInfoPage++;
       } else if (isPadButtonPressed(PAD_BTN_UP) || isPadButtonPressed(PAD_BTN_LEFT)) {
@@ -1083,7 +1103,7 @@ static void updateSearch(void)
       }
       if (isPadButtonPressed(PAD_BTN_CROSS)) {
          if (search.historySelection < 0) {
-            oskInputBegin("Search YouTube", search.query, onQueryEntered);
+            oskInputBegin(LOC(STR_SEARCH_YOUTUBE), search.query, onQueryEntered);
          } else {
             char chosen[SEARCH_QUERY_LEN];
             strCopy(chosen, sizeof chosen, search.history[search.historySelection]);
@@ -1108,7 +1128,7 @@ static void updateSearch(void)
 
    if (isPadButtonPressed(PAD_BTN_SELECT) ||
        (search.fieldFocused && isPadButtonPressed(PAD_BTN_CROSS))) {
-      oskInputBegin("Search YouTube", search.query, onQueryEntered);
+      oskInputBegin(LOC(STR_SEARCH_YOUTUBE), search.query, onQueryEntered);
       return;
    }
    if (isPadButtonPressed(PAD_BTN_R2)) { reload(0); return; }
@@ -1207,13 +1227,13 @@ static void updateSearch(void)
    const SearchResult *selected = gridSelected(&search.grid);
    if (!selected) return;
    if (selected->isPlaylist) {
-      setButtonHintCaption(&hints, crossHint, "Open playlist");
-      if (squareHint >= 0) { setButtonHintCaption(&hints, squareHint, "Save playlist"); setButtonHintShown(&hints, squareHint, 1); }
+      setButtonHintCaption(&hints, crossHint, LOC(STR_OPEN_PLAYLIST));
+      if (squareHint >= 0) { setButtonHintCaption(&hints, squareHint, LOC(STR_SAVE_PLAYLIST_HINT)); setButtonHintShown(&hints, squareHint, 1); }
       if (triangleHint >= 0) setButtonHintShown(&hints, triangleHint, 0);
-      if (downloadHint >= 0) { setButtonHintShown(&hints, downloadHint, 1); setButtonHintCaption(&hints, downloadHint, "Download playlist"); }
+      if (downloadHint >= 0) { setButtonHintShown(&hints, downloadHint, 1); setButtonHintCaption(&hints, downloadHint, LOC(STR_DOWNLOAD_PLAYLIST_HINT)); }
    } else {
-      setButtonHintCaption(&hints, crossHint, "Play");
-      if (squareHint >= 0) { setButtonHintCaption(&hints, squareHint, "Watch Later / Playlist (hold)"); setButtonHintShown(&hints, squareHint, 1); }
+      setButtonHintCaption(&hints, crossHint, LOC(STR_PLAY_HINT));
+      if (squareHint >= 0) { setButtonHintCaption(&hints, squareHint, LOC(STR_WATCH_LATER_PLAYLIST_HOLD_SEARCH)); setButtonHintShown(&hints, squareHint, 1); }
       if (triangleHint >= 0) setButtonHintShown(&hints, triangleHint, 1);
       if (downloadHint >= 0) setButtonHintShown(&hints, downloadHint, 1);
    }
@@ -1462,11 +1482,11 @@ static void drawSearch(void)
       } else {
          GridStage stage = gridStage(&search.grid);
          if (stage == GRID_EMPTY && search.channelId[0]) {
-            static const char *const emptyCategoryText[4] = {
-               "No videos available in this channel", "No LIVE streams available in this channel",
-               "No Shorts available in this channel", "No playlists available in this channel"
+            static const AppStringId emptyCategoryTextIds[4] = {
+               STR_NO_CHANNEL_VIDEOS, STR_NO_CHANNEL_LIVE,
+               STR_NO_CHANNEL_SHORTS, STR_NO_CHANNEL_PLAYLISTS
             };
-            setLabelText(&statusLabel, emptyCategoryText[search.channelCategory]);
+            setLabelText(&statusLabel, LOC(emptyCategoryTextIds[search.channelCategory]));
             refreshLabelScale(&statusLabel);
             int gridAreaH = search.footerTopY - search.gridTop - GRID_BOTTOM_GAP;
             int x = (search.screenW - statusLabel.tt.tex.w) / 2;
@@ -1474,8 +1494,8 @@ static void drawSearch(void)
             moveLabel(&statusLabel, x, y);
          } else {
             const char *message = stage == GRID_ERROR ?
-               (search.channelId[0] ? "Unable to load this channel category" : "Unable to load results") :
-               (stage == GRID_EMPTY ? "No results" : "Loading...");
+               (search.channelId[0] ? LOC(STR_UNABLE_TO_LOAD_CHANNEL_CATEGORY) : LOC(STR_UNABLE_TO_LOAD_RESULTS)) :
+               (stage == GRID_EMPTY ? LOC(STR_NO_RESULTS) : LOC(STR_LOADING_TEXT));
             if (stage == GRID_RUNNING) {
                drawLoadingIndicator(search.screenW / 2, search.screenH / 2, &searchLoadingStartedUs);
             } else {
@@ -1523,7 +1543,7 @@ static void drawSearch(void)
          fillGfxRoundedRectangle(avatarX, avatarY, avatarSize, avatarSize, 8, activeTheme->surface);
       }
 
-      setLabelText(&channelAvatarNameLabel, search.channelName[0] ? search.channelName : "Channel");
+      setLabelText(&channelAvatarNameLabel, search.channelName[0] ? search.channelName : LOC(STR_CHANNEL_NAME));
       setLabelColor(&channelAvatarNameLabel, activeTheme->textPrimary);
       moveLabel(&channelAvatarNameLabel,
                 channelInfoVisibleCoordX(avatarX + avatarSize + 20),
@@ -1533,12 +1553,13 @@ static void drawSearch(void)
 
       int textX, textY, textW, viewH;
       getChannelInfoTextRect(&textX, &textY, &textW, &viewH);
+      int pageHeight = getChannelInfoPageHeight(viewH);
       int pageCount = channelInfoTexture.tex.h > 0 ?
-                      (channelInfoTexture.tex.h + viewH - 1) / viewH : 1;
+                      (channelInfoTexture.tex.h + pageHeight - 1) / pageHeight : 1;
       if (channelInfoPage >= pageCount) channelInfoPage = pageCount - 1;
-      int pageTop = channelInfoPage * viewH;
+      int pageTop = channelInfoPage * pageHeight;
       int visibleH = channelInfoTexture.tex.h - pageTop;
-      if (visibleH > viewH) visibleH = viewH;
+      if (visibleH > pageHeight) visibleH = pageHeight;
       if (visibleH > 0) {
          float top = (float)pageTop / channelInfoTexture.tex.h;
          float bottom = (float)(pageTop + visibleH) / channelInfoTexture.tex.h;

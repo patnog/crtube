@@ -7,6 +7,7 @@
 // http fetch overlaps the streaming http client.
 
 #include "app-config.h"
+#include "localization.h"
 #include "video-grid.h"
 
 #include "gfx.h"
@@ -1285,7 +1286,7 @@ static void materializeTile(VideoGrid *grid, int i)
       playlistCountOnly(item->duration, count, sizeof count);
       setLabelText(&grid->durations[i], count);
    } else {
-      setLabelText(&grid->durations[i], item->isLive ? "LIVE" : item->duration);
+      setLabelText(&grid->durations[i], item->isLive ? LOC(STR_LIVE_UPPER) : item->duration);
    }
 }
 
@@ -1381,7 +1382,7 @@ static void applyResolvedLiveStatus(VideoGrid *grid)
       SearchResult *item = &grid->results.items[i];
       if (!item->liveStatusChecked) continue;
       if (i >= grid->winStart && i < grid->winEnd)
-         setLabelText(&grid->durations[i], item->isLive ? "LIVE" : item->duration);
+         setLabelText(&grid->durations[i], item->isLive ? LOC(STR_LIVE_UPPER) : item->duration);
       item->liveStatusChecked = 0;
    }
 }
@@ -1552,9 +1553,9 @@ void initVideoGrid(VideoGrid *grid, Font *font, int x, int y, int width, int hei
       setLabelScaleWithUi(&grid->metas[i], 1);
       setLabelScaleWithUi(&grid->durations[i], 1);
    }
-   initLabel(&grid->watchLaterBadge, font, 0, 0, AUTO, AUTO, WATCHLATER_BADGE_SIZE, 0xFFFFFFFF, TEXT_NOWRAP, "Watch Later");
+   initLabel(&grid->watchLaterBadge, font, 0, 0, AUTO, AUTO, WATCHLATER_BADGE_SIZE, 0xFFFFFFFF, TEXT_NOWRAP, LOC(STR_WATCH_LATER_BADGE));
    setLabelScaleWithUi(&grid->watchLaterBadge, 1);
-   initLabel(&grid->membersOnlyBadge, font, 0, 0, AUTO, AUTO, DUR_SIZE, 0xFF00FF00, TEXT_NOWRAP, "*Members only");
+   initLabel(&grid->membersOnlyBadge, font, 0, 0, AUTO, AUTO, DUR_SIZE, 0xFF00FF00, TEXT_NOWRAP, LOC(STR_MEMBERS_ONLY));
    float badgeScale = getGfxUiScaleFactor();
    if (badgeScale < 1.0f) badgeScale = 1.0f;
    if (sdOutput) grid->membersOnlyBadge.size = (int)(DUR_SIZE * 1.5f / badgeScale + 0.5f);

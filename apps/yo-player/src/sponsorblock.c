@@ -9,6 +9,7 @@
 // negotiate (it is RSA-only). Under the system (cellHttp) transport this host would be unreachable.
 
 #include "sponsorblock.h"
+#include "localization.h"
 #include "http.h"
 #include "dbg.h"
 
@@ -22,9 +23,6 @@
 static const char *CATEGORY_API_NAMES[SPONSOR_CATEGORY_COUNT] = {
    "sponsor", "selfpromo", "interaction", "intro", "outro", "music_offtopic", "filler"
 };
-static const char *CATEGORY_LABELS[SPONSOR_CATEGORY_COUNT] = {
-   "Sponsor", "Self-promo", "Interaction", "Intro", "Outro", "Off-topic music", "Filler"
-};
 static const unsigned CATEGORY_COLORS[SPONSOR_CATEGORY_COUNT] = {
    0xFF00D400,   // sponsor        - green
    0xFFFFFF00,   // selfpromo      - yellow
@@ -36,7 +34,19 @@ static const unsigned CATEGORY_COLORS[SPONSOR_CATEGORY_COUNT] = {
 };
 
 unsigned    getSponsorCategoryColor(SponsorCategory category) { return CATEGORY_COLORS[category]; }
-const char *getSponsorCategoryName(SponsorCategory category)  { return CATEGORY_LABELS[category]; }
+const char *getSponsorCategoryName(SponsorCategory category)
+{
+   switch (category) {
+      case SPONSOR_SPONSOR: return LOC(STR_SPONSOR_CATEGORY_SPONSOR);
+      case SPONSOR_SELFPROMO: return LOC(STR_SPONSOR_CATEGORY_SELF_PROMO);
+      case SPONSOR_INTERACTION: return LOC(STR_SPONSOR_CATEGORY_INTERACTION);
+      case SPONSOR_INTRO: return LOC(STR_SPONSOR_CATEGORY_INTRO);
+      case SPONSOR_OUTRO: return LOC(STR_SPONSOR_CATEGORY_OUTRO);
+      case SPONSOR_MUSIC_OFFTOPIC: return LOC(STR_SPONSOR_CATEGORY_OFFTOPIC_MUSIC);
+      case SPONSOR_FILLER: return LOC(STR_SPONSOR_CATEGORY_FILLER);
+      default: return "";
+   }
+}
 
 // the category enum for a "category":"..." within [from,end), or -1 if it's one we don't handle.
 static int readCategory(const char *from, const char *end)

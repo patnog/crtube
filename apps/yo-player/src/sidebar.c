@@ -1,6 +1,7 @@
 // Sliding home navigation overlay. The grid remains underneath and is never
 // resized. Trending and Live each have category tabs in the page header.
 #include "sidebar.h"
+#include "localization.h"
 
 #include "gfx.h"
 #include "theme.h"
@@ -37,31 +38,31 @@
 #define ROW_SECTION                 1
 
 typedef struct {
-   const char *name;
+   AppStringId nameId;
    IconId icon;
    int action;
    int flags;
 } SidebarRow;
 
 static const SidebarRow mainRows[SIDEBAR_MAIN_ROWS] = {
-   { "Search",         ICON_SEARCH,    SIDEBAR_SEARCH,                 0 },
-   { "Recommended",    ICON_STAR,      SIDEBAR_RECOMMENDED,            0 },
-   { "Subscriptions",  ICON_GOOGLE,    SIDEBAR_ACCOUNT_SUBSCRIPTIONS,  0 },
-   { "History",        ICON_HISTORY,   SIDEBAR_ACCOUNT_HISTORY,        0 },
-   { "Watch Later",    ICON_CLOCK,     SIDEBAR_ACCOUNT_WATCH_LATER,    0 },
-   { "Playlists",      ICON_DOCS,      SIDEBAR_PLAYLISTS,              0 },
-   { "Trending",       ICON_UP_BIG,    SIDEBAR_TRENDING,               0 },
-   { "Live",           ICON_WIFI,      SIDEBAR_LIVE,                    0 },
-   { "PS3",            0,              -1,                             ROW_SECTION },
-   { "Subscriptions",  ICON_HDD,       SIDEBAR_PS3_SUBSCRIPTIONS,      0 },
-   { "History",        ICON_HISTORY,   SIDEBAR_PS3_HISTORY,            0 },
-   { "Watch Later",    ICON_CLOCK,     SIDEBAR_PS3_WATCH_LATER,        0 },
-   { "Playlists",      ICON_DOCS,      SIDEBAR_PS3_PLAYLISTS,          0 },
-   { "Downloads",      ICON_DOWNLOAD,  SIDEBAR_DOWNLOADS,              0 },
-   { "APP",            0,              -1,                             ROW_SECTION },
-   { "Account",        ICON_GOOGLE,    SIDEBAR_ACCOUNT,                0 },
-   { "Settings",       ICON_COG,       SIDEBAR_SETTINGS,               0 },
-   { "Exit App",        0,              SIDEBAR_EXIT,                    0 }
+   { STR_SEARCH,         ICON_SEARCH,    SIDEBAR_SEARCH,                 0 },
+   { STR_RECOMMENDED,    ICON_STAR,      SIDEBAR_RECOMMENDED,            0 },
+   { STR_SUBSCRIPTIONS,  ICON_GOOGLE,    SIDEBAR_ACCOUNT_SUBSCRIPTIONS,  0 },
+   { STR_HISTORY,        ICON_HISTORY,   SIDEBAR_ACCOUNT_HISTORY,        0 },
+   { STR_WATCH_LATER,    ICON_CLOCK,     SIDEBAR_ACCOUNT_WATCH_LATER,    0 },
+   { STR_PLAYLISTS,      ICON_DOCS,      SIDEBAR_PLAYLISTS,              0 },
+   { STR_TRENDING,       ICON_UP_BIG,    SIDEBAR_TRENDING,               0 },
+   { STR_LIVE,           ICON_WIFI,      SIDEBAR_LIVE,                    0 },
+   { STR_PS3,            0,              -1,                             ROW_SECTION },
+   { STR_SUBSCRIPTIONS,  ICON_HDD,       SIDEBAR_PS3_SUBSCRIPTIONS,      0 },
+   { STR_HISTORY,        ICON_HISTORY,   SIDEBAR_PS3_HISTORY,            0 },
+   { STR_WATCH_LATER,    ICON_CLOCK,     SIDEBAR_PS3_WATCH_LATER,        0 },
+   { STR_PLAYLISTS,      ICON_DOCS,      SIDEBAR_PS3_PLAYLISTS,          0 },
+   { STR_DOWNLOADS,      ICON_DOWNLOAD,  SIDEBAR_DOWNLOADS,              0 },
+   { STR_APP,            0,              -1,                             ROW_SECTION },
+   { STR_ACCOUNT,        ICON_GOOGLE,    SIDEBAR_ACCOUNT,                0 },
+   { STR_SETTINGS,       ICON_COG,       SIDEBAR_SETTINGS,               0 },
+   { STR_EXIT_APP,        0,              SIDEBAR_EXIT,                    0 }
 };
 
 static struct {
@@ -96,7 +97,11 @@ static int getPanelWidth(int screenW, float uiScale)
 {
    if (uiScale < 1.0f) uiScale = 1.0f;
    int fontSize = (int)(SIDEBAR_TEXT_SIZE * uiScale + 0.5f);
-   int textWidth = (int)(measureFontText(side.font, fontSize, "Recommended") + 0.5f);
+   int textWidth = 0;
+   for (int i = 0; i < SIDEBAR_MAIN_ROWS; i++) {
+      int measured = (int)(measureFontText(side.font, fontSize, LOC(mainRows[i].nameId)) + 0.5f);
+      if (measured > textWidth) textWidth = measured;
+   }
    int twoSpaces = (int)(measureFontText(side.font, fontSize, "  ") + 0.5f);
    // End the bright panel about two spaces after its longest navigation label;
    // the fixed dark rail and arrow occupy the remaining edge strip.
@@ -104,8 +109,9 @@ static int getPanelWidth(int screenW, float uiScale)
    int width = SIDEBAR_TEXT_LEFT + contentOffset + textWidth + twoSpaces +
                SIDEBAR_EDGE_STRIP_WIDTH + SIDEBAR_RIGHT_PAD;
    if (width < SIDEBAR_MIN_WIDTH) width = SIDEBAR_MIN_WIDTH;
-   if (width > SIDEBAR_MAX_WIDTH) width = SIDEBAR_MAX_WIDTH;
-   int maxWidth = screenW * 72 / 100;
+   int maxPanelWidth = screenW * 84 / 100;
+   if (width > maxPanelWidth) width = maxPanelWidth;
+   int maxWidth = screenW * 84 / 100;
    if (width > maxWidth) width = maxWidth;
    if (width > screenW) width = screenW;
    return width;
@@ -178,14 +184,14 @@ void initSidebar(Font *font, int screenW, int screenH)
 
    int contentOffset = screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
    initLabel(&side.title, font, 0, 0,
-             SIDEBAR_MAX_WIDTH - SIDEBAR_CONTENT_LEFT - contentOffset - SIDEBAR_EDGE_STRIP_WIDTH - SIDEBAR_RIGHT_PAD,
+             screenW - SIDEBAR_CONTENT_LEFT - contentOffset - SIDEBAR_EDGE_STRIP_WIDTH - SIDEBAR_RIGHT_PAD,
              56, SIDEBAR_TITLE_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP, "CRTube");
    setLabelScaleWithUi(&side.title, 1);
 
    for (int i = 0; i < SIDEBAR_MAIN_ROWS; i++) {
       initLabel(&side.mainNames[i], font, 0, 0,
-                SIDEBAR_MAX_WIDTH - SIDEBAR_TEXT_LEFT - contentOffset - SIDEBAR_EDGE_STRIP_WIDTH - SIDEBAR_RIGHT_PAD,
-                46, (mainRows[i].flags & ROW_SECTION) ? SIDEBAR_SECTION_TEXT_SIZE : SIDEBAR_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, mainRows[i].name);
+                screenW - SIDEBAR_TEXT_LEFT - contentOffset - SIDEBAR_EDGE_STRIP_WIDTH - SIDEBAR_RIGHT_PAD,
+                46, (mainRows[i].flags & ROW_SECTION) ? SIDEBAR_SECTION_TEXT_SIZE : SIDEBAR_TEXT_SIZE, activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, LOC(mainRows[i].nameId));
       setLabelScaleWithUi(&side.mainNames[i], 1);
       if (mainRows[i].icon) initIcon(&side.mainIcons[i], mainRows[i].icon, SIDEBAR_ICON_SIZE);
    }
@@ -384,12 +390,18 @@ static void drawEdge(int panelX)
                         activeTheme->textPrimary);
 }
 
+static void setSidebarLabelIfChanged(Label *label, const char *text)
+{
+   if (strcmp(label->text, text) != 0) setLabelText(label, text);
+}
+
 static void drawMainRows(int panelX)
 {
    int end = side.scrollTop + side.visibleRows;
    if (end > SIDEBAR_MAIN_ROWS) end = SIDEBAR_MAIN_ROWS;
    for (int i = side.scrollTop; i < end; i++) {
       int rowY = SIDEBAR_ROWS_TOP + (i - side.scrollTop) * SIDEBAR_ROW_STEP;
+      setSidebarLabelIfChanged(&side.mainNames[i], LOC(mainRows[i].nameId));
       if (mainRows[i].flags & ROW_SECTION) {
          refreshLabelScale(&side.mainNames[i]);
          int contentOffset = side.screenW * SIDEBAR_CONTENT_OFFSET_PCT / 100;
@@ -428,7 +440,16 @@ void drawSidebar(void)
 {
    float currentScale = getGfxUiScaleFactor();
    if (currentScale < 1.0f) currentScale = 1.0f;
-   if (currentScale != side.uiScale) {
+   int languageChanged = 0;
+   for (int i = 0; i < SIDEBAR_MAIN_ROWS; i++) {
+      const char *localized = LOC(mainRows[i].nameId);
+      if (strcmp(side.mainNames[i].text, localized) != 0) {
+         setLabelText(&side.mainNames[i], localized);
+         languageChanged = 1;
+      }
+      refreshLabelScale(&side.mainNames[i]);
+   }
+   if (currentScale != side.uiScale || languageChanged) {
       side.uiScale = currentScale;
       side.panelW = getPanelWidth(side.screenW, side.uiScale);
    }

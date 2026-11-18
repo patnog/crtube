@@ -1,4 +1,5 @@
 #include "app-config.h"
+#include "localization.h"
 #include "screens/playlist-picker.h"
 #include "storage.h"
 #include "font.h"
@@ -97,7 +98,7 @@ static void initPicker(void)
    if (picker.panelW > PICKER_PANEL_MAX_W) picker.panelW = PICKER_PANEL_MAX_W;
    pickerFont = openSystemFont(FONT_POP);
    initLabel(&pickerTitle, &pickerFont, 0, 0, picker.panelW - 48, AUTO, 26,
-             activeTheme->textPrimary, TEXT_NOWRAP, "Add to playlist");
+             activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_ADD_TO_PLAYLIST));
    setLabelScaleWithUi(&pickerTitle, 1);
 
    // Keep a clear gap below the scaled title. At UI scale 1.5x the title
@@ -113,9 +114,9 @@ static void initPicker(void)
    for (int i = 0; i < PICKER_MAX_ROWS; i++) {
       const char *name = "";
       if (!picker.downloadsOnly && i == 0) {
-         name = "Watch Later";
+         name = LOC(STR_WATCH_LATER_BADGE);
       } else if (i == picker.count - 1) {
-         name = "Create playlist";
+         name = LOC(STR_CREATE_PLAYLIST_ACTION);
       } else {
          int playlistIndex = i - (picker.downloadsOnly ? 0 : 1);
          if (playlistIndex >= 0 && playlistIndex < picker.playlistCount)
@@ -126,8 +127,8 @@ static void initPicker(void)
       setLabelScaleWithUi(&pickerRows[i], 1);
    }
    initButtonHints(&pickerHints, &pickerFont, 0, 28, 15, activeTheme->textSecondary);
-   addButtonHint(&pickerHints, getConsoleGlyph(GLYPH_CROSS), "Add");
-   addButtonHint(&pickerHints, getConsoleGlyph(GLYPH_CIRCLE), "Cancel");
+   addButtonHint(&pickerHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_ADD));
+   addButtonHint(&pickerHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_CANCEL));
    setButtonHintsStableLayout(&pickerHints, 1);
    keepPickerSelectionVisible();
 }
@@ -166,9 +167,9 @@ static void updatePicker(void)
    }
    if (picker.selected == picker.count - 1) {
       char defaultName[LOCAL_PLAYLIST_NAME_LEN];
-      snprintf(defaultName, sizeof defaultName, "Playlist %d",
+      snprintf(defaultName, sizeof defaultName, LOC(STR_PLAYLIST_NAME_FORMAT),
                (picker.downloadsOnly ? getDownloadPlaylistCount() : getLocalPlaylistCount()) + 1);
-      if (!oskInputBegin("Create playlist", defaultName, onPlaylistNameEntered))
+      if (!oskInputBegin(LOC(STR_CREATE_PLAYLIST_ACTION), defaultName, onPlaylistNameEntered))
          picker.oskDone = 0;
       return;
    }

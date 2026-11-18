@@ -3,6 +3,7 @@
 
 #include "app-config.h"
 #include "settings.h"
+#include "localization.h"
 #include "sponsorblock.h"
 #include "settings-file.h"
 #include "gfx.h"
@@ -36,6 +37,8 @@ static const char *DEFAULT_SETTINGS =
    "# playback-subtitle-language affects Playback > Options > Subs language only; download settings use subtitle-language\n"
    "# auto-translate-language: auto follows Content Region; off disables automatic translation; otherwise use a language code\n"
    "region=US\n"
+   "app-language=en\n"
+   "# application interface language (currently: en)\n"
    "# country used for YouTube content lists (two-letter gl code); default US\n"
    "\n"
    "sponsorblock-mode=ads\n"
@@ -203,6 +206,7 @@ static const ContentRegion REGIONS[] = {
 static volatile int regionIndex = -1;
 static unsigned regionRevision;
 static int regionUnsaved;
+static int applicationLanguage = APP_LANGUAGE_EN;
 
 static int defaultRegionIndex(void)
 {
@@ -244,6 +248,8 @@ void loadSettings(void)
    regionIndex = defaultRegionIndex();
    regionRevision = 0;
    regionUnsaved = 0;
+   applicationLanguage = APP_LANGUAGE_EN;
+   setAppLanguage(APP_LANGUAGE_EN);
    if (loadSettingsFile(SETTINGS_PATH, DEFAULT_SETTINGS, text, sizeof text) == 1)
       logInfo("[settings] created %s with defaults\n", SETTINGS_PATH);
 
@@ -425,6 +431,17 @@ void loadSettings(void)
       if (!region && rewriteSettingKey(SETTINGS_PATH, "region", "US") != 0)
          logWarn("[settings] could not add default content region\n");
    }
+
+   const char *appLanguage = findSettingValue(text, "app-language");
+   applicationLanguage = APP_LANGUAGE_EN;
+   if (appLanguage) {
+      if (strcmp(appLanguage, "pt-BR") == 0) applicationLanguage = APP_LANGUAGE_PT_BR;
+      else if (strcmp(appLanguage, "en") != 0)
+         logWarn("[settings] unsupported app-language '%s', using en\n", appLanguage);
+   }
+   setAppLanguage(applicationLanguage);
+   if (!appLanguage && rewriteSettingKey(SETTINGS_PATH, "app-language", "en") != 0)
+      logWarn("[settings] could not add default app-language\n");
 
    const char *downloadValue = findSettingValue(text, "download-resolution");
    downloadResolution = downloadValue ? atoi(downloadValue) : DOWNLOAD_RESOLUTION_AUTO;
@@ -897,6 +914,25 @@ int setScreensaverTimeout(int seconds)
 
    screensaverTimeout = seconds;
    logInfo("[settings] screensaver-timeout=%d\n", screensaverTimeout);
+   return 0;
+}
+
+int getApplicationLanguage(void)
+{
+   return applicationLanguage;
+}
+
+int setApplicationLanguage(int language)
+{
+   if (language < 0 || language >= APP_LANGUAGE_COUNT) return -1;
+   const char *code = language == APP_LANGUAGE_PT_BR ? "pt-BR" : "en";
+   if (rewriteSettingKey(SETTINGS_PATH, "app-language", code) != 0) {
+      logWarn("[settings] could not persist app-language=%s\n", code);
+      return -1;
+   }
+   applicationLanguage = language;
+   setAppLanguage(language);
+   logInfo("[settings] app-language=%s\n", code);
    return 0;
 }
 

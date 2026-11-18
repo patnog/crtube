@@ -6,6 +6,7 @@
 // simple-lib-av. Bring-up diagnostics go to the bridge log (dbg.h).
 
 #include <sys/process.h>
+#include "localization.h"
 
 #ifdef PSL1GHT
 #include <cell/fs/cell_fs_file_api.h>
@@ -186,6 +187,7 @@ int main(int argc, char **argv)
    BOOT_MARK("pad\n");
 
    initStats(5, 5, 14, activeTheme->textSecondary);
+   initLocalization();
    initStorage();          // prefs (last category) + watch history, under this build’s private data directory
    maintainSubtitleTranslationCache(); // daily 30-day expiry + orphaned temporary-file cleanup
    initAccount();          // saved YouTube sign-in, if any (account.txt beside the prefs)

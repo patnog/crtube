@@ -2,6 +2,7 @@
 
 #include "app-config.h"
 #include "storage.h"
+#include "localization.h"
 #include "vfs.h"
 #include "string-utilities.h"   // strCopy
 #include <string.h>
@@ -291,9 +292,9 @@ static void loadLocalHistory(void)
          SearchResult *item = &localHistory[localHistoryCount++];
          memset(item, 0, sizeof *item);
          strCopy(item->videoId, sizeof item->videoId, line);
-         strCopy(item->title, sizeof item->title, title[0] ? title : "Untitled video");
+         strCopy(item->title, sizeof item->title, title[0] ? title : LOC(STR_UNTITLED_VIDEO));
          strCopy(item->author, sizeof item->author, author);
-         strCopy(item->published, sizeof item->published, "On PS3");
+         strCopy(item->published, sizeof item->published, LOC(STR_ON_PS3));
       }
    }
    free(buffer);
@@ -367,9 +368,9 @@ void recordLocalHistory(const char *videoId, const char *title, const char *auth
    memset(&localHistory[0], 0, sizeof localHistory[0]);
    strCopy(localHistory[0].videoId, sizeof localHistory[0].videoId, videoId);
    strCopy(localHistory[0].title, sizeof localHistory[0].title,
-           title && title[0] ? title : "Untitled video");
+           title && title[0] ? title : LOC(STR_UNTITLED_VIDEO));
    strCopy(localHistory[0].author, sizeof localHistory[0].author, author ? author : "");
-   strCopy(localHistory[0].published, sizeof localHistory[0].published, "On PS3");
+   strCopy(localHistory[0].published, sizeof localHistory[0].published, LOC(STR_ON_PS3));
    localHistoryCount++;
    saveLocalHistory();
 }
@@ -708,10 +709,11 @@ int getLocalPlaylists(SearchResults *out)
       tile->isLocalPlaylist = 1;
       strCopy(tile->localPlaylistId, sizeof tile->localPlaylistId, meta->id);
       strCopy(tile->title, sizeof tile->title, meta->name);
-      strCopy(tile->author, sizeof tile->author, "This PS3");
-      snprintf(tile->duration, sizeof tile->duration, "%d video%s", displayCount,
-               displayCount == 1 ? "" : "s");
-      strCopy(tile->published, sizeof tile->published, "On PS3");
+      strCopy(tile->author, sizeof tile->author, LOC(STR_THIS_PS3));
+      snprintf(tile->duration, sizeof tile->duration,
+                LOC(displayCount == 1 ? STR_VIDEO_COUNT_SINGULAR_FORMAT : STR_VIDEO_COUNT_PLURAL_FORMAT),
+                displayCount);
+      strCopy(tile->published, sizeof tile->published, LOC(STR_ON_PS3));
       strCopy(tile->thumbnailVideoId, sizeof tile->thumbnailVideoId, meta->newestVideoId);
    }
    free(buffer);
@@ -1134,10 +1136,11 @@ int getDownloadPlaylists(SearchResults *out)
       tile->isLocalPlaylist = 1;
       strCopy(tile->localPlaylistId, sizeof tile->localPlaylistId, meta->id);
       strCopy(tile->title, sizeof tile->title, meta->name);
-      strCopy(tile->author, sizeof tile->author, "Downloads");
-      snprintf(tile->duration, sizeof tile->duration, "%d video%s", displayCount,
-               displayCount == 1 ? "" : "s");
-      strCopy(tile->published, sizeof tile->published, "Local download");
+      strCopy(tile->author, sizeof tile->author, LOC(STR_DOWNLOADS));
+      snprintf(tile->duration, sizeof tile->duration,
+                LOC(displayCount == 1 ? STR_VIDEO_COUNT_SINGULAR_FORMAT : STR_VIDEO_COUNT_PLURAL_FORMAT),
+                displayCount);
+      strCopy(tile->published, sizeof tile->published, LOC(STR_LOCAL_DOWNLOAD));
       strCopy(tile->thumbnailVideoId, sizeof tile->thumbnailVideoId, meta->newestVideoId);
       if (!meta->createdAt) {
          char path[160]; VfsStat stat;

@@ -10,6 +10,7 @@
 // the UI thread adopts the built player and pulls frames each render frame.
 
 #include "app-config.h"
+#include "localization.h"
 #include "../../BUILD_CONFIG.h"
 #include "screens/play.h"
 #include "screens/home.h"
@@ -144,17 +145,16 @@ static void flushSubtitleRenderDiag(uint64_t nowUs)
 #define MAX_PLAYBACK_QUALITIES 12
 #define OPTIONS_DROPDOWN_MAX MAX_AUDIO_TRACKS
 #define OPTIONS_DROPDOWN_VISIBLE_MAX 10
-static const char *optionsNames[OPTIONS_COUNT] = {"Quality", "Audio", "Subtitles", "Subs language", "Chapters", "Crop to Fill", "Autoplay", "Download", "Playback Settings"};
-static const char *optionsValues[OPTIONS_COUNT][OPTIONS_DROPDOWN_MAX] = {
-   {"Auto"},
-   {"Default"},
-   {"Off", "On"},
-   {"English"},
-   {"Open chapters"},
-   {"Off", "On"},
-   {"Off", "On"},
-   {"Start"},
-   {"Open settings"}
+static const AppStringId optionsValueIds[OPTIONS_COUNT][OPTIONS_DROPDOWN_MAX] = {
+   {STR_QUALITY_AUTO_LABEL},
+   {STR_DEFAULT},
+   {STR_OFF, STR_ON},
+   {STR_ENGLISH},
+   {STR_OPEN_CHAPTERS},
+   {STR_OFF, STR_ON},
+   {STR_OFF, STR_ON},
+   {STR_START},
+   {STR_OPEN_SETTINGS}
 };
 static int optionsValueCounts[OPTIONS_COUNT] = {1, 1, 2, 1, 1, 2, 2, 1, 1};
 static char optionsQualityLabels[OPTIONS_DROPDOWN_MAX][32];
@@ -180,19 +180,19 @@ static Label optionsCurrentValueLabels[3]; // Quality, Audio, Subs language
 // Playback-owned settings panel. It deliberately shares the persisted settings APIs
 // with navigation, but owns its input state, labels, layout and SponsorBlock submenu.
 #define PLAYBACK_SETTINGS_COUNT 9
-#define PLAYBACK_SETTINGS_ROW_H 40
-#define PLAYBACK_SETTINGS_PANEL_W 650
+#define PLAYBACK_SETTINGS_ROW_H 44
+#define PLAYBACK_SETTINGS_PANEL_W 760
 #define PLAYBACK_SETTINGS_PANEL_H 450
 #define PLAYBACK_AUTO_TRANSLATE_VISIBLE_ROWS 8
 #define PLAYBACK_AUTO_TRANSLATE_ROW_H 38
 #define PLAYBACK_AUTO_TRANSLATE_PANEL_H 410
 #define PLAYBACK_SUBTITLE_STYLE_COUNT 5
 #define PLAYBACK_SUBTITLE_STYLE_PANEL_H 490
-#define PLAYBACK_SPONSOR_PANEL_W 780
+#define PLAYBACK_SPONSOR_PANEL_W 900
 #define PLAYBACK_SPONSOR_PANEL_H 470
-#define PLAYBACK_SPONSOR_ROW_H 42
-#define PLAYBACK_SPONSOR_OPTION_W 82
-#define PLAYBACK_SPONSOR_OPTION_GAP 5
+#define PLAYBACK_SPONSOR_ROW_H 50
+#define PLAYBACK_SPONSOR_OPTION_W 104
+#define PLAYBACK_SPONSOR_OPTION_GAP 8
 #define PLAYBACK_SD_SCALE_PATH CRTUBE_DATA_DIR "/sd-ui-scale.txt"
 static int playbackSettingsOpen, playbackSettingsSelected;
 static int playbackAutoTranslateOpen, playbackAutoTranslateSelected;
@@ -479,6 +479,11 @@ static struct {
    long             liveBaseRefreshVideoStartSq, liveBaseRefreshVideoEdgeSq, liveBaseRefreshAudioEdgeSq;
    int              liveBaseRefreshWindowSec;
    uint64_t         liveLastFrameUs;  // last newly presented frame; detects a stalled LIVE transport
+   int              liveEndCheckActive;
+   volatile int     liveEndCheckDone;
+   int              liveEndCheckResult;
+   sys_ppu_thread_t liveEndCheckTid;
+   int              liveEndDetected;
    int              liveFailureVisible;
    VideoPlayer     *vodRetiringPlayer;
    int              vodRefreshActive;
@@ -1102,10 +1107,10 @@ static void prepareQualityOptions(void)
    optionsValueCounts[0] = count;
    optionsQualityTargets[0] = -1;
    if (state.autoResolutionIndex >= 0) {
-      snprintf(optionsQualityLabels[0], sizeof optionsQualityLabels[0], "Auto (%dp%d)",
+      snprintf(optionsQualityLabels[0], sizeof optionsQualityLabels[0], LOC(STR_AUTO_QUALITY_FORMAT),
                state.videoHeights[state.autoResolutionIndex], state.videoFps[state.autoResolutionIndex]);
    } else {
-      strCopy(optionsQualityLabels[0], sizeof optionsQualityLabels[0], "Auto");
+      strCopy(optionsQualityLabels[0], sizeof optionsQualityLabels[0], LOC(STR_QUALITY_AUTO_LABEL));
    }
    for (int item = 1; item < count; item++) {
       int target = state.videoCount - item;
@@ -1130,9 +1135,9 @@ static void prepareAudioOptions(void)
       optionsValueCounts[1] = 1;
       if (state.resolutionIndex >= 0 && state.resolutionIndex < state.videoCount &&
           state.videoHasAudio[state.resolutionIndex])
-         strCopy(optionsAudioLabels[0], sizeof optionsAudioLabels[0], "Original upload");
+         strCopy(optionsAudioLabels[0], sizeof optionsAudioLabels[0], LOC(STR_ORIGINAL_UPLOAD_PLAYBACK));
       else
-         strCopy(optionsAudioLabels[0], sizeof optionsAudioLabels[0], "Unavailable");
+         strCopy(optionsAudioLabels[0], sizeof optionsAudioLabels[0], LOC(STR_UNAVAILABLE));
       return;
    }
 
@@ -1381,8 +1386,11 @@ static int appendAutoTranslatedCaptionTrack(const char *targetLanguage, int loca
    memset(translated, 0, sizeof *translated);
    const char *languageName = getAutoTranslateLanguageName(targetLanguage);
    if (!languageName || !languageName[0]) languageName = targetLanguage;
-   snprintf(translated->name, sizeof translated->name, "%.*s (auto-translated)",
-            (int)sizeof translated->name - 19, languageName);
+   const char *translatedSuffix = LOC(STR_AUTO_TRANSLATED_SUFFIX);
+   size_t suffixLength = strlen(translatedSuffix);
+   size_t maxLanguageLength = sizeof translated->name - suffixLength - 1;
+   snprintf(translated->name, sizeof translated->name, "%.*s%s",
+            (int)maxLanguageLength, languageName, translatedSuffix);
    strCopy(translated->languageCode, sizeof translated->languageCode, targetLanguage);
    strCopy(translated->sourceLanguageCode, sizeof translated->sourceLanguageCode, source.languageCode);
    strCopy(translated->url, sizeof translated->url, source.url);
@@ -1425,7 +1433,8 @@ static void worker(uint64_t arg)
    setHttpRequestGroup(&state.requestGroup);
    StreamInfo *info = NULL;
    if (requestedIsLocal) {
-      char fallback[256] = "Downloaded video";
+      char fallback[256];
+      strCopy(fallback, sizeof fallback, LOC(STR_DOWNLOADED_VIDEO));
       const char *base = strrchr(requestedLocalPath, '/');
       if (base) {
          strCopy(fallback, sizeof fallback, base + 1);
@@ -1433,7 +1442,7 @@ static void worker(uint64_t arg)
          if (extension) *extension = 0;
       }
       strCopy(state.title, sizeof state.title, fallback);
-      strCopy(state.author, sizeof state.author, "Downloaded");
+      strCopy(state.author, sizeof state.author, LOC(STR_DOWNLOADED_AUTHOR));
       char localDescription[16384] = "";
       loadDownloadedMetadata(requestedLocalPath, state.title, sizeof state.title,
                              state.author, sizeof state.author,
@@ -1468,9 +1477,9 @@ static void worker(uint64_t arg)
       }
       parseChapters(state.description ? state.description : "", &state.chapters);
       { ChapterList downloadedChapters; if (loadDownloadedChapters(requestedLocalPath, &downloadedChapters) > 0) state.chapters = downloadedChapters; }
-      if (!state.likeCount[0]) strCopy(state.likeCount, sizeof state.likeCount, "Offline");
-      if (!state.viewCount[0]) strCopy(state.viewCount, sizeof state.viewCount, "Offline");
-      if (!state.publishedDate[0]) strCopy(state.publishedDate, sizeof state.publishedDate, "Offline");
+      if (!state.likeCount[0]) strCopy(state.likeCount, sizeof state.likeCount, LOC(STR_OFFLINE));
+      if (!state.viewCount[0]) strCopy(state.viewCount, sizeof state.viewCount, LOC(STR_OFFLINE));
+      if (!state.publishedDate[0]) strCopy(state.publishedDate, sizeof state.publishedDate, LOC(STR_OFFLINE));
       state.isLive = 0;
       state.videoCount = 0;
       state.resolutionIndex = -1;
@@ -1479,7 +1488,7 @@ static void worker(uint64_t arg)
                                allocGfxVideoBuffer, freeGfxVideoBuffer, &state.cancelRequested);
       if (!state.pendingPlayer || !waitForInitialPlayerReady(state.pendingPlayer, 10000)) {
          if (state.pendingPlayer) { destroyVideoPlayer(state.pendingPlayer); state.pendingPlayer = NULL; }
-         if (!playbackCancelRequested()) fail("could not play downloaded file");
+         if (!playbackCancelRequested()) fail(LOC(STR_COULD_NOT_PLAY_DOWNLOADED_FILE));
          goto done;
       }
       char downloadedId[12];
@@ -1495,7 +1504,7 @@ static void worker(uint64_t arg)
    info = calloc(1, sizeof *info);   // large format/URL table; keep it off the stack
    const Extractor *extractor = findExtractor(requestedInput);
    if (playbackCancelRequested()) goto done;
-   if (!info || !extractor) { fail("unrecognised link or id"); goto done; }
+   if (!info || !extractor) { fail(LOC(STR_UNRECOGNIZED_LINK_ID)); goto done; }
 
    // resolve (stage stays STAGE_LOADING, set by initPlay's memset, until we adopt or fail)
 #if BUILD_DIAG_LIVE_RECOVERY
@@ -1512,7 +1521,7 @@ static void worker(uint64_t arg)
 #endif
    if (playbackCancelRequested()) goto done;
    if (extractResult != 0 || info->formatCount == 0) {
-      fail(extractResult == -2 ? "This video is available to channel members only." : "resolve failed");
+      fail(extractResult == -2 ? LOC(STR_CHANNEL_MEMBERS_ONLY_VIDEO) : LOC(STR_RESOLVE_FAILED));
       goto done;
    }
    strCopy(state.title, sizeof state.title, info->title);
@@ -1540,7 +1549,7 @@ static void worker(uint64_t arg)
    appendAutoTranslatedCaptionTrack(getAutoTranslateLanguage(), 0);
 
    const StreamFormat *video = pickBestPlaybackVideo(info);
-   if (!video) { fail("no playable mp4 video"); goto done; }
+   if (!video) { fail(LOC(STR_NO_PLAYABLE_MP4_VIDEO)); goto done; }
    int isLivePlayback = info->isLive || info->isPostLive || video->isLiveSegmented;
    state.liveAndroidClient = isLivePlayback && info->liveAndroidClient;
    state.liveAndroidFallbackSession = state.liveAndroidClient;
@@ -1554,7 +1563,7 @@ static void worker(uint64_t arg)
       if (!candidate->hasAudio && !availableAudio && video->hasAudio) continue;
       addPlaybackQuality(candidate, qualityFormats, availableAudio != NULL);
    }
-   if (state.videoCount == 0) { fail("no playable mp4 video"); goto done; }
+   if (state.videoCount == 0) { fail(LOC(STR_NO_PLAYABLE_MP4_VIDEO)); goto done; }
    // Keep the selector's exact default rendition as the Auto choice when it shares a
    // resolution/FPS pair with another duplicate format.
    for (int i = 0; i < state.videoCount; i++) {
@@ -1570,7 +1579,7 @@ static void worker(uint64_t arg)
    state.autoResolutionIndex = state.videoCount - 1;
    int selectedQuality = (isLivePlayback || preferredQualityHeight <= 0) ?
                          state.videoCount - 1 : findPreferredQuality();
-   if (selectedQuality < 0) { fail("no playable mp4 video"); goto done; }
+   if (selectedQuality < 0) { fail(LOC(STR_NO_PLAYABLE_MP4_VIDEO)); goto done; }
    video = qualityFormats[selectedQuality];
    state.resolutionIndex = selectedQuality;
    // A muxed rendition carries its own audio. Video-only choices use the original/default AAC track.
@@ -1605,7 +1614,7 @@ static void worker(uint64_t arg)
          if (original) {
             int n = state.audioCount++;
             strCopy(state.audioIds[n], sizeof state.audioIds[n], "__original_upload__");
-            strCopy(state.audioNames[n], sizeof state.audioNames[n], "Original upload");
+            strCopy(state.audioNames[n], sizeof state.audioNames[n], LOC(STR_ORIGINAL_UPLOAD_PLAYBACK));
             strCopy(state.audioUrls[n], sizeof state.audioUrls[n], original->url);
             state.audioItags[n] = original->itag;
             logInfo("[audio-diag] preserved original AAC itag=%d urlLen=%d\n",
@@ -1742,7 +1751,7 @@ static void worker(uint64_t arg)
       }
       goto done;
    }
-   if (!state.pendingPlayer) { fail("primary and fallback streams failed"); goto done; }
+   if (!state.pendingPlayer) { fail(LOC(STR_PRIMARY_FALLBACK_STREAMS_FAILED)); goto done; }
 
    // The initial pre-roll fallback may have selected a different format. Keep the live quality
    // index and the HUD aligned with the rendition that actually opened.
@@ -1884,9 +1893,9 @@ static void showVodRefreshFailure(void)
    state.vodRefreshActive = 0;
    state.liveFailureVisible = 1;
    state.stage = STAGE_FAILED;
-   strCopy(state.message, sizeof state.message, "Unable to renew this video playback.");
-   setLabelText(&liveFailureTitleLabel, "Playback failed");
-   setLabelText(&liveFailureBodyLabel, "The video could not be renewed after 5 recovery attempts.");
+   strCopy(state.message, sizeof state.message, LOC(STR_UNABLE_TO_RENEW_VIDEO));
+   setLabelText(&liveFailureTitleLabel, LOC(STR_PLAYBACK_FAILED));
+   setLabelText(&liveFailureBodyLabel, LOC(STR_VIDEO_RENEW_FAILED));
    logError("[yt-vod-refresh] exhausted 5 recovery attempts; playback stopped\n");
 }
 
@@ -1913,7 +1922,7 @@ static void scheduleVodHttpRefresh(void)
    unsigned delayMs = delaysMs[state.vodRefreshAttempts++];
    logWarn("[yt-vod-refresh] recovery attempt %d/5 in %u ms at %.2fs\n",
            state.vodRefreshAttempts, delayMs, state.vodRefreshPosition);
-   strCopy(state.message, sizeof state.message, "Refreshing video playback...");
+   strCopy(state.message, sizeof state.message, LOC(STR_REFRESHING_VIDEO_PLAYBACK));
    setLabelText(&statusLabel, state.message);
    state.stage = STAGE_LOADING;
    state.firstFrameSeen = 0;
@@ -1972,9 +1981,9 @@ static void showLiveRefreshFailure(void)
    state.liveRefreshActive = 0;
    state.liveFailureVisible = 1;
    state.stage = STAGE_FAILED;
-   strCopy(state.message, sizeof state.message, "Unable to reconnect to this LIVE stream.");
-   setLabelText(&liveFailureTitleLabel, "LIVE playback failed");
-   setLabelText(&liveFailureBodyLabel, "The stream could not be renewed after 5 attempts.");
+   strCopy(state.message, sizeof state.message, LOC(STR_UNABLE_TO_RECONNECT_LIVE));
+   setLabelText(&liveFailureTitleLabel, LOC(STR_LIVE_PLAYBACK_FAILED));
+   setLabelText(&liveFailureBodyLabel, LOC(STR_LIVE_RENEW_FAILED));
    logError("[yt-live-refresh] exhausted 5 renewal attempts; playback stopped\n");
 }
 
@@ -2006,7 +2015,7 @@ static void scheduleLiveRefresh(void)
            state.player ? isVideoPlayerUsingSeparateAudio(state.player) : 0,
            state.liveSegmentSec, state.liveWindowSegs, state.liveEdgeSq, state.liveFloorSq);
 #endif
-   strCopy(state.message, sizeof state.message, "Reconnecting to LIVE...");
+   strCopy(state.message, sizeof state.message, LOC(STR_RECONNECTING_LIVE));
    state.stage = STAGE_LOADING;
    state.firstFrameSeen = 0;
    state.liveAnchored = 0;
@@ -2111,10 +2120,10 @@ static void metadataWorker(uint64_t arg)
             strCopy(state.likeCount, sizeof state.likeCount, likes);
          }
       } else {
-         strCopy(state.likeCount, sizeof state.likeCount, "Unavailable");
+         strCopy(state.likeCount, sizeof state.likeCount, LOC(STR_UNAVAILABLE));
       }
    } else {
-      strCopy(state.likeCount, sizeof state.likeCount, "Unavailable");
+      strCopy(state.likeCount, sizeof state.likeCount, LOC(STR_UNAVAILABLE));
    }
    __sync_synchronize();
    state.metadataWorkerDone = 1;
@@ -2157,6 +2166,44 @@ static void autoplayWorker(uint64_t arg)
 }
 
 static void launchVideo(const char *input, int addToNavigation);
+
+// A stalled LIVE can mean either a temporary transport failure or a broadcast that ended.
+// Ask YouTube's player endpoint before entering the normal LIVE renewal loop.
+static void liveEndCheckWorker(uint64_t arg)
+{
+   (void)arg;
+   char videoId[12] = "";
+   const Extractor *extractor = findExtractor(requestedInput);
+   state.liveEndCheckResult = -1;
+   setHttpRequestGroup(&state.requestGroup);
+   if (!playbackCancelRequested() && extractor && extractor->getLiveEndedStatus &&
+       extractPlaybackId(requestedInput, videoId))
+      state.liveEndCheckResult = extractor->getLiveEndedStatus(videoId);
+   __sync_synchronize();
+   state.liveEndCheckDone = 1;
+   setHttpRequestGroup(NULL);
+   exitThread();
+}
+
+static void scheduleLiveEndCheck(void)
+{
+   if (!state.isLive || state.liveEnded || state.liveEndDetected || state.liveFailureVisible ||
+       state.liveEndCheckActive || state.liveRefreshActive || state.liveBaseRefreshActive ||
+       state.threadActive || state.resolutionSwitchThreadActive || state.audioSwitchThreadActive ||
+       state.liveReopenThreadActive || state.subThreadActive) return;
+
+   state.liveEndCheckDone = 0;
+   state.liveEndCheckResult = -1;
+   state.liveEndCheckActive = (spawnJoinableThread(&state.liveEndCheckTid, liveEndCheckWorker, 0,
+                               THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB,
+                               "yt-live-end-check") == 0);
+   if (!state.liveEndCheckActive) {
+      logWarn("[yt-live-end] could not start status check; falling back to LIVE renewal\n");
+      scheduleLiveRefresh();
+      return;
+   }
+   logInfo("[yt-live-end] checking YouTube status after stalled LIVE transport\n");
+}
 
 void setPlaylistShuffleEnabled(int enabled)
 {
@@ -2439,38 +2486,38 @@ static void initPlay(void)
       initLabel(&statLabels[i], &uiFont, 0, 0, statsTextMaxWidth, AUTO, playbackSubtitleFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");
    initLabel(&timeLeftLabel,  &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
    initLabel(&timeRightLabel, &uiFont, 0, 0, 200, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "");
-   initLabelRaw(&liveBadgeLabel, &uiFont, 0, 0, 120, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "LIVE");
-   initLabelRaw(&backToLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "Back to");
-   initLabelRaw(&liveFailureTitleLabel, &uiFont, 0, 0, 760, AUTO, playbackFontSize(30), activeTheme->textPrimary, TEXT_NOWRAP, "LIVE playback failed");
-   initLabelRaw(&liveFailureBodyLabel, &uiFont, 0, 0, 760, AUTO, playbackFontSize(22), activeTheme->textSecondary, TEXT_WRAP, "The stream could not be renewed after 5 attempts.");
+   initLabelRaw(&liveBadgeLabel, &uiFont, 0, 0, 120, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_LIVE_BADGE));
+   initLabelRaw(&backToLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_BACK_TO));
+   initLabelRaw(&liveFailureTitleLabel, &uiFont, 0, 0, 760, AUTO, playbackFontSize(30), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_LIVE_PLAYBACK_FAILED));
+   initLabelRaw(&liveFailureBodyLabel, &uiFont, 0, 0, 760, AUTO, playbackFontSize(22), activeTheme->textSecondary, TEXT_WRAP, LOC(STR_LIVE_RENEW_FAILED));
    initButtonHints(&liveFailureHints, &uiFont, 0, 28, 15, activeTheme->textSecondary);
-   addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CROSS), "Return");
-   addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CIRCLE), "Return");
+   addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_RETURN));
+   addButtonHint(&liveFailureHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_RETURN));
    setButtonHintsStableLayout(&liveFailureHints, 1);
    // Use two rows so playback controls remain readable at 1.5x UI scale.
    // drawButtonHintsFitted() only scales down when the available width requires it.
    initButtonHints(&playbackHints, &uiFont, 0, 30, 20, activeTheme->textSecondary);
    setButtonHintGap(&playbackHints, 8);
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CROSS), "Play/Pause");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_PLAY_PAUSE));
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_LEFT), NULL);
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), "Seek");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), LOC(STR_SEEK));
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_L1), NULL);
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R1), "Chapter/Video (hold)");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R1), LOC(STR_CHAPTER_VIDEO_HOLD));
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_UP), NULL);
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_DOWN), "Volume");
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_TRIANGLE), "Subtitles");
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_L2), "OSD");
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R2), "Crop");
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R3), "Stats");
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CIRCLE), "Hide OSD");
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_START), "Options");
-   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_SELECT), "Description");
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_DPAD_DOWN), LOC(STR_VOLUME));
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_TRIANGLE), LOC(STR_SUBTITLES));
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_L2), LOC(STR_OSD));
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R2), LOC(STR_CROP));
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_R3), LOC(STR_STATS));
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_HIDE_OSD));
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_START), LOC(STR_OPTIONS));
+   addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_SELECT), LOC(STR_DESCRIPTION));
    initLabelRaw(&toastLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");   // raw: shows track names
-   initLabelRaw(&askPromptPrefixLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "Press");
-   initLabelRaw(&askPromptSuffixLabel, &uiFont, 0, 0, 260, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, "to skip sponsor");
+   initLabelRaw(&askPromptPrefixLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_PRESS));
+   initLabelRaw(&askPromptSuffixLabel, &uiFont, 0, 0, 260, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_TO_SKIP_SPONSOR));
    initLabelRaw(&titleLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");
    initLabelRaw(&authorLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(20), activeTheme->textSecondary, TEXT_WRAP, "");
-   initLabelRaw(&nextNoticeHeadingLabel, &uiFont, 0, 0, 500, AUTO, playbackFontSize(22), activeTheme->accent, TEXT_NOWRAP, "NEXT VIDEO");
+   initLabelRaw(&nextNoticeHeadingLabel, &uiFont, 0, 0, 500, AUTO, playbackFontSize(22), activeTheme->accent, TEXT_NOWRAP, LOC(STR_NEXT_VIDEO));
    initLabelRaw(&nextNoticeTitleLabel, &uiFont, 0, 0, 1040, AUTO, playbackFontSize(30), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabelRaw(&subtitleLabel, &uiFont, 0, 0, state.screenW - 160, AUTO, playbackSubtitleFontSize(SUBTITLE_TEXT_SIZE), activeTheme->textPrimary, TEXT_WRAP, "");
    initLabelRaw(&playbackInfoLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");
@@ -2481,27 +2528,28 @@ static void initPlay(void)
    optionsVisible = optionsDropdownOpen = optionsSelected = optionsDropdownSelected = 0;
    lastSubtitlePick = -1;
    suppressPlaybackCrossUntilRelease = 0;
+   const char *localizedOptionsNames[OPTIONS_COUNT] = { LOC(STR_QUALITY), LOC(STR_AUDIO), LOC(STR_SUBTITLES), LOC(STR_SUBS_LANGUAGE), LOC(STR_CHAPTERS), LOC(STR_CROP_TO_FILL), LOC(STR_AUTOPLAY), LOC(STR_DOWNLOAD), LOC(STR_PLAYBACK_SETTINGS) };
    for (int i = 0; i < OPTIONS_COUNT; i++)
-      initLabelRaw(&optionsLabels[i], &uiFont, 0, 0, 520, AUTO, playbackFontSize(27), activeTheme->textPrimary, TEXT_NOWRAP, optionsNames[i]);
+      initLabelRaw(&optionsLabels[i], &uiFont, 0, 0, 520, AUTO, playbackFontSize(27), activeTheme->textPrimary, TEXT_NOWRAP, localizedOptionsNames[i]);
    for (int i = 0; i < OPTIONS_DROPDOWN_MAX; i++)
       initLabelRaw(&optionsValueLabels[i], &uiFont, 0, 0, 360, AUTO, playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "");
-   initLabelRaw(&optionsDownloadLabel, &uiFont, 0, 0, 150, AUTO, playbackFontSize(23), activeTheme->textPrimary, TEXT_NOWRAP, "Start");
+   initLabelRaw(&optionsDownloadLabel, &uiFont, 0, 0, 150, AUTO, playbackFontSize(23), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_START));
    optionsDownloadPressedUntil = 0;
    initLabelRaw(&optionsCurrentValueLabels[0], &uiFont, 0, 0, 0, AUTO,
                 playbackFontSize(27), activeTheme->textSecondary, TEXT_NOWRAP, "");
    initLabelRaw(&optionsCurrentValueLabels[1], &uiFont, 0, 0, 400, AUTO,
-                playbackFontSize(27), activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
+                playbackFontSize(27), activeTheme->textSecondary, TEXT_NOWRAP, "");
    initLabelRaw(&optionsCurrentValueLabels[2], &uiFont, 0, 0, 400, AUTO,
-                playbackFontSize(27), activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
+                playbackFontSize(27), activeTheme->textSecondary, TEXT_NOWRAP, "");
 
    playbackSettingsOpen = playbackSponsorOpen = playbackSubtitleStyleOpen = playbackAutoTranslateOpen = 0;
    playbackSettingsSelected = playbackSponsorSelected = playbackAutoTranslateSelected = 0;
    autoTranslateRefreshPending = 0;
    initLabelRaw(&playbackSettingsTitle, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 48, AUTO,
-                playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "Playback Settings");
-   static const char *playbackSettingNames[PLAYBACK_SETTINGS_COUNT] = {
-      "Enable 1080p60 (experimental)", "UI Scaling", "Overscan", "Overscan (crop to fill)",
-      "Subtitle Style", "Subtitle Offset", "Auto-translate subtitles", "SponsorBlock", "OSD Timeout"
+                playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_PLAYBACK_SETTINGS));
+   const char *playbackSettingNames[PLAYBACK_SETTINGS_COUNT] = {
+      LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING), LOC(STR_OVERSCAN), LOC(STR_OVERSCAN_CROP),
+      LOC(STR_SUBTITLE_STYLE), LOC(STR_SUBTITLE_OFFSET), LOC(STR_AUTO_TRANSLATE_SUBTITLES), LOC(STR_SPONSORBLOCK), LOC(STR_OSD_TIMEOUT)
    };
    for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
       initLabelRaw(&playbackSettingsLabels[i], &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 290, AUTO,
@@ -2511,18 +2559,18 @@ static void initPlay(void)
                    playbackFontSize(20), activeTheme->textPrimary, TEXT_NOWRAP, "");
    }
    initLabelRaw(&playbackSettingsToggleLabels[0], &uiFont, 0, 0, 60, AUTO,
-                playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP, "OFF");
+                playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_OFF_UPPER));
    initLabelRaw(&playbackSettingsToggleLabels[1], &uiFont, 0, 0, 60, AUTO,
-                playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP, "ON");
+                playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_ON_UPPER));
    initLabelRaw(&playbackAutoTranslateTitle, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 48, AUTO,
-                playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "Auto-translate subtitles");
+                playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_AUTO_TRANSLATE_SUBTITLES));
    for (int i = 0; i < PLAYBACK_AUTO_TRANSLATE_VISIBLE_ROWS; i++)
       initLabelRaw(&playbackAutoTranslateRows[i], &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 100, AUTO,
                    playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabelRaw(&playbackSubtitleStyleTitle, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 48, AUTO,
-                playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "Subtitle Style");
-   static const char *subtitleStyleNames[PLAYBACK_SUBTITLE_STYLE_COUNT] = {
-      "Text Color", "Background Color", "Background Opacity", "Text Highlight", "Font Size"
+                playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_SUBTITLE_STYLE));
+   const char *subtitleStyleNames[PLAYBACK_SUBTITLE_STYLE_COUNT] = {
+      LOC(STR_TEXT_COLOR), LOC(STR_BACKGROUND_COLOR), LOC(STR_BACKGROUND_OPACITY), LOC(STR_TEXT_HIGHLIGHT), LOC(STR_FONT_SIZE)
    };
    for (int i = 0; i < PLAYBACK_SUBTITLE_STYLE_COUNT; i++)
       initLabelRaw(&playbackSubtitleStyleLabels[i], &uiFont, 0, 0, 300, AUTO,
@@ -2530,17 +2578,17 @@ static void initPlay(void)
    initLabelRaw(&playbackSubtitlePreview, &uiFont, 0, 0, 520, AUTO,
                 playbackSubtitleFontSize(22 + getSubtitleStyle(4) * 4), 0xFFFFFFFF, TEXT_WRAP, "Lorem Ipsum");
    initLabelRaw(&playbackSponsorTitle, &uiFont, 0, 0, PLAYBACK_SPONSOR_PANEL_W - 48, AUTO,
-                playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, "SponsorBlock");
+                playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_SPONSORBLOCK));
    for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++)
-      initLabelRaw(&playbackSponsorCategoryLabels[i], &uiFont, 0, 0, 340, AUTO,
-                   playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS,
+      initLabelRaw(&playbackSponsorCategoryLabels[i], &uiFont, 0, 0, 420, AUTO,
+                   playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS,
                    getSponsorCategoryName((SponsorCategory)i));
    initLabelRaw(&playbackSponsorActionLabels[0], &uiFont, 0, 0, PLAYBACK_SPONSOR_OPTION_W, AUTO,
-                playbackFontSize(16), activeTheme->textPrimary, TEXT_NOWRAP, "Skip");
+                playbackFontSize(20), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_SKIP));
    initLabelRaw(&playbackSponsorActionLabels[1], &uiFont, 0, 0, PLAYBACK_SPONSOR_OPTION_W, AUTO,
-                playbackFontSize(16), activeTheme->textPrimary, TEXT_NOWRAP, "Ask");
+                playbackFontSize(20), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_ASK));
    initLabelRaw(&playbackSponsorActionLabels[2], &uiFont, 0, 0, PLAYBACK_SPONSOR_OPTION_W, AUTO,
-                playbackFontSize(16), activeTheme->textPrimary, TEXT_NOWRAP, "Keep");
+                playbackFontSize(20), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_KEEP));
 
    state.subtitlePick = state.subtitleFetched = -1;   // default off (memset left them 0)
    state.subtitleScanFrom = -1;
@@ -2554,7 +2602,7 @@ static void initPlay(void)
 
    state.threadActive = (spawnJoinableThread(&state.workerTid, worker, 0,
                          THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-play") == 0);
-   if (!state.threadActive) fail("couldn't start worker");
+   if (!state.threadActive) fail(LOC(STR_COULD_NOT_START_PLAYBACK_WORKER));
 
    if (hasSponsorBlockActions() && isBareVideoId(requestedInput))
       state.sbThreadActive = (spawnJoinableThread(&state.sbWorkerTid, sponsorWorker, 0,
@@ -2601,19 +2649,29 @@ static void refreshPlaybackInfoHud(void)
    if (state.vidW > 0 && state.vidH > 0)
       used = snprintf(info, sizeof info, "%dx%d", state.vidW, state.vidH);
    else
-      used = snprintf(info, sizeof info, "Resolution unavailable");
+      used = snprintf(info, sizeof info, LOC(STR_RESOLUTION_UNAVAILABLE));
 
-   if (state.audioPick >= 0 && state.audioPick < state.audioCount)
-      used += snprintf(info + used, sizeof info - used, "\nAudio: %s", state.audioNames[state.audioPick]);
-   else if (state.audItag && state.audItag == state.vidItag)
-      used += snprintf(info + used, sizeof info - used, "\nAudio: Embedded");
-   else if (state.audItag)
-      used += snprintf(info + used, sizeof info - used, "\nAudio: AAC");
-   else
-      used += snprintf(info + used, sizeof info - used, "\nAudio: unavailable");
+   if (state.audioPick >= 0 && state.audioPick < state.audioCount) {
+      used += snprintf(info + used, sizeof info - used, "\n");
+      used += snprintf(info + used, sizeof info - used, LOC(STR_PLAYBACK_AUDIO_FORMAT),
+                       state.audioNames[state.audioPick]);
+   } else if (state.audItag && state.audItag == state.vidItag) {
+      used += snprintf(info + used, sizeof info - used, "\n");
+      used += snprintf(info + used, sizeof info - used, LOC(STR_PLAYBACK_AUDIO_FORMAT), LOC(STR_AUDIO_EMBEDDED));
+   } else if (state.audItag) {
+      used += snprintf(info + used, sizeof info - used, "\n");
+      used += snprintf(info + used, sizeof info - used, LOC(STR_PLAYBACK_AUDIO_FORMAT), LOC(STR_AUDIO_AAC));
+   } else {
+      used += snprintf(info + used, sizeof info - used, "\n");
+      used += snprintf(info + used, sizeof info - used, LOC(STR_PLAYBACK_AUDIO_FORMAT),
+                       LOC(STR_UNAVAILABLE));
+   }
 
-   if (state.subtitlePick >= 0 && state.subtitlePick < state.captionCount)
-      snprintf(info + used, sizeof info - used, "\nSubtitles: %s", state.captionTracks[state.subtitlePick].name);
+   if (state.subtitlePick >= 0 && state.subtitlePick < state.captionCount) {
+      used += snprintf(info + used, sizeof info - used, "\n");
+      snprintf(info + used, sizeof info - used, LOC(STR_PLAYBACK_SUBTITLES_FORMAT),
+               state.captionTracks[state.subtitlePick].name);
+   }
 
    setLabelText(&playbackInfoLabel, info);
 }
@@ -2671,16 +2729,16 @@ static void showSelectedSubtitleToast(void)
    int trackIndex = state.subtitlePick;
 
    if (trackIndex < 0 || trackIndex >= state.captionCount) {
-      showToast("Subtitles: OFF");
+      showToast(LOC(STR_SUBTITLES_OFF));
       return;
    }
 
    const CaptionTrack *track = &state.captionTracks[trackIndex];
    if (track->isAutoGenerated && !strstr(track->name, "auto-generated") &&
        !strstr(track->name, "auto-translated")) {
-      snprintf(notice, sizeof notice, "Subtitles: %s (auto-generated)", track->name);
+      snprintf(notice, sizeof notice, LOC(STR_SUBTITLES_AUTO_GENERATED_FORMAT), track->name);
    } else {
-      snprintf(notice, sizeof notice, "Subtitles: %s", track->name);
+      snprintf(notice, sizeof notice, LOC(STR_SUBTITLES_FORMAT), track->name);
    }
    showToast(notice);
 }
@@ -2782,12 +2840,12 @@ static void subtitleWorker(uint64_t arg)
 // Triangle only toggles subtitles. The selected track is retained while OFF.
 static void toggleSubtitles(void)
 {
-   if (state.captionCount == 0 || state.isLive) { showToast("No subtitles"); return; }
+   if (state.captionCount == 0 || state.isLive) { showToast(LOC(STR_NO_SUBTITLES)); return; }
 
    if (subtitlesEnabled) {
       subtitlesEnabled = 0;
       setSubtitleTrack(-1);
-      showToast("Subtitles: OFF");
+      showToast(LOC(STR_SUBTITLES_OFF));
       return;
    }
 
@@ -2795,7 +2853,7 @@ static void toggleSubtitles(void)
    applyPreferredSubtitleTrack();
    if (state.subtitlePick < 0) {
       subtitlesEnabled = 0;
-      showToast("No subtitles available");
+      showToast(LOC(STR_NO_SUBTITLES_AVAILABLE));
       return;
    }
    showSelectedSubtitleToast();
@@ -2900,11 +2958,11 @@ static void resolutionSwitchWorker(uint64_t arg)
       state.resolutionSwitchRestored = replacement != NULL;
    }
    if (!replacement && state.resolutionSwitchTeeRecovery) {
-      strCopy(state.message, sizeof state.message, "Video decoder recovery failed");
+      strCopy(state.message, sizeof state.message, LOC(STR_VIDEO_DECODER_RECOVERY_FAILED));
       state.stage = STAGE_FAILED;
    }
    if (!replacement && !state.resolutionSwitchAborting && !state.resolutionSwitchTeeRecovery) {
-      strCopy(state.message, sizeof state.message, "Resolution switch and recovery failed");
+      strCopy(state.message, sizeof state.message, LOC(STR_RESOLUTION_SWITCH_RECOVERY_FAILED));
       state.stage = STAGE_FAILED;
    }
 
@@ -3007,7 +3065,7 @@ static int startResolutionSwitch(int target, int automaticFallback)
       if (!state.resolutionSwitchWasPaused && state.player) setVideoPaused(state.player, 0);
       state.firstFrameSeen = state.resolutionSwitchWasFirstFrameSeen;
       state.resolutionSwitchFpsFallback = 0;
-      if (automaticFallback != 2) showToast("Resolution switch could not start");
+      if (automaticFallback != 2) showToast(LOC(STR_RESOLUTION_SWITCH_COULD_NOT_START));
       return 0;
    }
    if (state.isLive) {
@@ -3022,16 +3080,16 @@ static int startResolutionSwitch(int target, int automaticFallback)
       char notice[96];
       if (state.videoFps[target] > 0) {
          if (automaticFallback)
-            snprintf(notice, sizeof notice, "Audio issue; reducing to %dp @ %d FPS",
+            snprintf(notice, sizeof notice, LOC(STR_REDUCING_RESOLUTION_AUDIO_ISSUE_FPS),
                      state.videoHeights[target], state.videoFps[target]);
          else
-            snprintf(notice, sizeof notice, "Changing to %dp @ %d FPS",
+            snprintf(notice, sizeof notice, LOC(STR_CHANGING_TO_RESOLUTION_FPS),
                      state.videoHeights[target], state.videoFps[target]);
       } else {
          if (automaticFallback)
-            snprintf(notice, sizeof notice, "Audio issue; reducing to %dp", state.videoHeights[target]);
+            snprintf(notice, sizeof notice, LOC(STR_REDUCING_RESOLUTION_AUDIO_ISSUE), state.videoHeights[target]);
          else
-            snprintf(notice, sizeof notice, "Changing to %dp", state.videoHeights[target]);
+            snprintf(notice, sizeof notice, LOC(STR_CHANGING_TO_RESOLUTION), state.videoHeights[target]);
       }
       showToast(notice);
    }
@@ -3097,16 +3155,16 @@ static void startAudioTrackSwitch(int target)
 {
    if (state.seeking) {
       logWarn("[audio-diag] audio selection ignored while a seek transaction is pending\n");
-      showToast("Wait for seek to finish before switching audio");
+      showToast(LOC(STR_WAIT_SEEK_BEFORE_AUDIO));
       return;
    }
    if (target < 0 || target >= state.audioCount) {
-      showToast("Audio track unavailable");
+      showToast(LOC(STR_AUDIO_TRACK_UNAVAILABLE));
       return;
    }
    if (target == state.audioPick) return;
    if (state.isLive || !state.player || state.audioSwitchThreadActive) {
-      showToast("Audio track busy/unavailable");
+      showToast(LOC(STR_AUDIO_TRACK_BUSY_UNAVAILABLE));
       return;
    }
 
@@ -3116,7 +3174,7 @@ static void startAudioTrackSwitch(int target)
    state.audioFallbackAttempted = 0;
    state.audioSwitchFallback = 0;
    setVideoPaused(state.player, 1);
-   snprintf(state.message, sizeof state.message, "Loading audio: %s", state.audioNames[target]);
+   snprintf(state.message, sizeof state.message, LOC(STR_LOADING_AUDIO_FORMAT), state.audioNames[target]);
    refreshPlaybackInfoHud();
    showControls();
    state.audioSwitchDone = 0;
@@ -3125,7 +3183,7 @@ static void startAudioTrackSwitch(int target)
    if (!state.audioSwitchThreadActive) {
       state.message[0] = 0;
       if (!state.audioSwitchWasPaused) setVideoPaused(state.player, 0);
-      showToast("Audio switch failed");
+      showToast(LOC(STR_AUDIO_SWITCH_FAILED));
    }
 }
 
@@ -3271,7 +3329,7 @@ static void liveReopenWorker(uint64_t arg)
       destroyVideoPlayer(replacement);
       replacement = NULL;
    }
-   if (!replacement && !playbackCancelRequested()) fail("LIVE seek/reconnect failed");
+   if (!replacement && !playbackCancelRequested()) fail(LOC(STR_LIVE_SEEK_RECONNECT_FAILED));
    state.pendingPlayer = replacement;
    __sync_synchronize();
    state.workerDone = 1;
@@ -3345,7 +3403,7 @@ static int reopenLiveAt(long playSq)
 static void nudgeLiveSeek(float deltaSeconds, uint64_t nowUs)
 {
    if (!state.liveDvr) {
-      showToast("This live stream has rewind turned off");
+      showToast(LOC(STR_LIVE_REWIND_DISABLED));
       return;
    }
    if (!state.seeking) {
@@ -3365,7 +3423,7 @@ static void handleLiveSeekInput(uint64_t nowUs)
    static ButtonRepeat seekRepeat;
    if (!state.liveDvr) {
       if (isPadButtonPressed(PAD_BTN_LEFT) || isPadButtonPressed(PAD_BTN_RIGHT))
-         showToast("This live stream has rewind turned off");
+         showToast(LOC(STR_LIVE_REWIND_DISABLED));
       return;
    }
 
@@ -3390,7 +3448,7 @@ static void handleLiveSeekInput(uint64_t nowUs)
 static void cycleRemoteAudioTrack(void)
 {
    if (state.audioCount <= 1) {
-      showToast(state.audioCount == 1 ? "Only one audio track" : "No alternate audio tracks");
+      showToast(state.audioCount == 1 ? LOC(STR_ONLY_ONE_AUDIO_TRACK) : LOC(STR_NO_ALTERNATE_AUDIO_TRACKS));
       return;
    }
    int target = state.audioPick < 0 ? 0 : (state.audioPick + 1) % state.audioCount;
@@ -3400,7 +3458,7 @@ static void cycleRemoteAudioTrack(void)
 static void cycleRemoteSubtitleTrack(void)
 {
    if (state.isLive || state.captionCount <= 0) {
-      showToast("No subtitles");
+      showToast(LOC(STR_NO_SUBTITLES));
       return;
    }
 
@@ -3419,13 +3477,13 @@ static void cycleRemoteSubtitleTrack(void)
 
    subtitlesEnabled = 0;
    setSubtitleTrack(-1);
-   showToast("Subtitles: OFF");
+   showToast(LOC(STR_SUBTITLES_OFF));
 }
 
 static void navigatePlaybackChapter(int direction)
 {
    if (state.chapters.count == 0) {
-      showToast("No chapters");
+      showToast(LOC(STR_NO_CHAPTERS));
       return;
    }
 
@@ -3436,7 +3494,7 @@ static void navigatePlaybackChapter(int direction)
    int current = chapterNavIndexValid ? chapterNavIndex : actual;
    int target = current + direction;
    if (target < 0 || target >= state.chapters.count) {
-      showToast(direction < 0 ? "No previous chapter" : "No next chapter");
+      showToast(direction < 0 ? LOC(STR_NO_PREVIOUS_CHAPTER) : LOC(STR_NO_NEXT_CHAPTER));
       return;
    }
    chapterNavIndex = target;
@@ -3535,7 +3593,7 @@ static void handlePlaybackInput(void)
          state.askPromptStartedUs = 0;
          seekVideoPlayerPast(state.player, segment->end);
          char notice[64];
-         snprintf(notice, sizeof notice, "Skipped %s", getSponsorCategoryName(segment->category));
+         snprintf(notice, sizeof notice, LOC(STR_SKIPPED_FORMAT), getSponsorCategoryName(segment->category));
          showToast(notice);
       }
    }
@@ -3579,7 +3637,7 @@ static void handlePlaybackInput(void)
       l1HoldTriggered = 1;
       if (requestedIsLocal) {
          if (downloadedQueueCount > 0 && downloadedQueueCursor > 0) { launchDownloadedQueueIndex(downloadedQueueCursor - 1); return; }
-         else showToast("No previous download");
+         else showToast(LOC(STR_NO_PREVIOUS_DOWNLOAD));
       } else if (playlistQueueCount > 0 && playlistQueueCursor > 0) {
          launchPlaylistQueueIndex(playlistQueueCursor - 1);
          return;
@@ -3590,20 +3648,20 @@ static void handlePlaybackInput(void)
          }
          char previousId[12];
          if (previousPlaybackId(previousId)) { requestPlaybackCancel(); popScreen(); launchVideo(previousId, 0); return; }
-         showToast("No previous video");
+         showToast(LOC(STR_NO_PREVIOUS_VIDEO));
       }
    }
    if (r1State == PAD_BUTTON_STATE_HELD && r1HoldStartUs && !r1HoldTriggered && nowUs - r1HoldStartUs >= PLAYBACK_NAV_HOLD_US) {
       r1HoldTriggered = 1;
       if (requestedIsLocal) {
          if (downloadedQueueCount > 0 && downloadedQueueCursor + 1 < downloadedQueueCount) { launchDownloadedQueueIndex(downloadedQueueCursor + 1); return; }
-         else showToast("No next download");
+         else showToast(LOC(STR_NO_NEXT_DOWNLOAD));
       } else if (playlistQueueCount > 0 && playlistQueueCursor + 1 < playlistQueueCount) {
          launchPlaylistQueueIndex(playlistQueueCursor + 1);
          return;
       } else {
          char nextId[12];
-         if (state.nextThreadActive || state.nextNoticeVisible) showToast("Next video is already loading");
+         if (state.nextThreadActive || state.nextNoticeVisible) showToast(LOC(STR_NEXT_VIDEO_ALREADY_LOADING));
          else if (playlistQueueCount == 0 && nextPlaybackId(nextId)) { requestPlaybackCancel(); popScreen(); launchVideo(nextId, 0); return; }
          else {
             state.nextAttempted = 1;
@@ -3612,15 +3670,15 @@ static void handlePlaybackInput(void)
             state.nextVideoTitle[0] = 0;
             state.nextThreadActive = (spawnJoinableThread(&state.nextWorkerTid, autoplayWorker, 0,
                                       THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-next") == 0);
-            if (!state.nextThreadActive) showToast("Next video unavailable");
-            else showToast("Loading next recommendation...");
+            if (!state.nextThreadActive) showToast(LOC(STR_NEXT_VIDEO_UNAVAILABLE));
+            else showToast(LOC(STR_LOADING_NEXT_RECOMMENDATION));
          }
       }
    }
 
    if (l1State == PAD_BUTTON_STATE_RELEASED) {
       if (!l1HoldTriggered) {
-         if (state.chapters.count == 0) showToast("No chapters");
+         if (state.chapters.count == 0) showToast(LOC(STR_NO_CHAPTERS));
          else {
             float position = getVideoPositionSeconds(state.player);
             int actual = 0;
@@ -3632,7 +3690,7 @@ static void handlePlaybackInput(void)
                chapterNavQueued = 1;
                state.seeking = 0;
                showControls();
-            } else showToast("No previous chapter");
+            } else showToast(LOC(STR_NO_PREVIOUS_CHAPTER));
          }
       }
       l1HoldStartUs = 0; l1HoldTriggered = 0;
@@ -3646,7 +3704,7 @@ static void handlePlaybackInput(void)
             float behind = liveTimelineLength() - liveTimelinePosition();
             if (!isLiveBehindAtEdge(behind)) reopenLiveAt(-1);
             else showControls();
-         } else if (state.chapters.count == 0) showToast("No chapters");
+         } else if (state.chapters.count == 0) showToast(LOC(STR_NO_CHAPTERS));
          else {
             float position = getVideoPositionSeconds(state.player);
             int actual = 0;
@@ -3658,7 +3716,7 @@ static void handlePlaybackInput(void)
                chapterNavQueued = 1;
                state.seeking = 0;
                showControls();
-            } else showToast("No next chapter");
+            } else showToast(LOC(STR_NO_NEXT_CHAPTER));
          }
       }
       r1HoldStartUs = 0; r1HoldTriggered = 0;
@@ -3754,7 +3812,7 @@ static void autoSkipSponsor(void)
       segment->skipped = 1;
       seekVideoPlayerPast(state.player, segment->end);   // land on the next keyframe after the segment, not before it
       char notice[64];
-      snprintf(notice, sizeof notice, "Skipped %s", getSponsorCategoryName(segment->category));
+      snprintf(notice, sizeof notice, LOC(STR_SKIPPED_FORMAT), getSponsorCategoryName(segment->category));
       showToast(notice);
       return;
    }
@@ -3905,7 +3963,7 @@ static void renderDescriptionPage(int page)
       freeTextTexture(&descriptionTexture);
       renderFontRaw(&descriptionTexture, &uiFont,
                     (int)(playbackFontSize(DESCRIPTION_TEXT_SIZE) * playbackFontScale + 0.5f),
-                    "Description page unavailable (not enough memory).",
+                    LOC(STR_DESCRIPTION_PAGE_UNAVAILABLE),
                     activeTheme->textPrimary,
                     state.screenW - 2 * DESCRIPTION_MARGIN_X, TEXT_WRAP);
       return;
@@ -3962,7 +4020,7 @@ static void renderDescriptionPage(int page)
                page + 1, descriptionPageCount, (unsigned)pageLength);
       renderFontRaw(&descriptionTexture, &uiFont,
                     (int)(playbackFontSize(DESCRIPTION_TEXT_SIZE) * playbackFontScale + 0.5f),
-                    "This description page could not be rendered.",
+                    LOC(STR_DESCRIPTION_PAGE_RENDER_FAILED),
                     activeTheme->textPrimary,
                     state.screenW - 2 * DESCRIPTION_MARGIN_X, TEXT_WRAP);
    }
@@ -3988,7 +4046,7 @@ static void recountDescriptionPages(void)
 static void renderDescription(void)
 {
    char views[48];
-   const char *rawViews = state.viewCount[0] ? state.viewCount : "Unavailable";
+   const char *rawViews = state.viewCount[0] ? state.viewCount : LOC(STR_UNAVAILABLE);
    // Add thousands separators to the numeric view count without changing the source value.
    int digits = (int)strlen(rawViews), commas = digits > 3 ? (digits - 1) / 3 : 0;
    int out = 0;
@@ -4003,14 +4061,14 @@ static void renderDescription(void)
    views[out] = 0;
 
    const char *description = state.description && state.description[0]
-                           ? state.description : "No description.";
+                           ? state.description : LOC(STR_NO_DESCRIPTION);
    clearDescriptionPages();
+   const char *likesText = state.likeCount[0] ? state.likeCount : LOC(STR_LOADING_ELLIPSIS);
+   if (strcmp(likesText, "Offline") == 0) likesText = LOC(STR_OFFLINE);
    int headerLength = snprintf(descriptionMetadata, sizeof descriptionMetadata,
-                               "METADATA\nViews: %s\nPublished: %s\nLikes: %s\n"
-                               "----------------------------------------\n"
-                               "DESCRIPTION\n\n",
-                               views, state.publishedDate[0] ? state.publishedDate : "Unavailable",
-                               state.likeCount[0] ? state.likeCount : "Loading...");
+                               LOC(STR_DESCRIPTION_METADATA_FORMAT),
+                               views, state.publishedDate[0] ? state.publishedDate : LOC(STR_UNAVAILABLE),
+                               likesText);
    if (headerLength < 0) headerLength = 0;
    if (headerLength >= (int)sizeof descriptionMetadata)
       headerLength = (int)sizeof descriptionMetadata - 1;
@@ -4054,14 +4112,14 @@ static void openDescription(void)
    if (!state.metadataFetchTried) {
       state.metadataFetchTried = 1;
       if (requestedIsLocal) {
-         strCopy(state.likeCount, sizeof state.likeCount, "Offline");
+         strCopy(state.likeCount, sizeof state.likeCount, LOC(STR_OFFLINE));
       } else {
       state.likeCount[0] = 0;
       state.metadataWorkerDone = 0;
       state.metadataThreadActive = (spawnJoinableThread(&state.metadataWorkerTid, metadataWorker, 0,
                                      THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-metadata") == 0);
       if (!state.metadataThreadActive)
-         strCopy(state.likeCount, sizeof state.likeCount, "Unavailable");
+         strCopy(state.likeCount, sizeof state.likeCount, LOC(STR_UNAVAILABLE));
       }
    }
    if (!state.descriptionRendered) {
@@ -4102,7 +4160,7 @@ static void openChapters(void)
 {
    // Avoid fetching YouTube's large /next response on every playback. Fetch only when the user asks
    // for chapters; the request stays off the draw path and can be cancelled cleanly on exit.
-   if (state.isLive) { showToast("No chapters"); return; }
+   if (state.isLive) { showToast(LOC(STR_NO_CHAPTERS)); return; }
    if (state.chapters.count == 0) {
       if (!state.chFetchTried && isBareVideoId(requestedInput)) {
          state.chFetchTried = 1;
@@ -4110,7 +4168,7 @@ static void openChapters(void)
          state.chThreadActive = (spawnJoinableThread(&state.chWorkerTid, chapterWorker, 0,
                                   THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-chapters") == 0);
       }
-      showToast(state.chThreadActive ? "Loading chapters..." : "No chapters");
+      showToast(state.chThreadActive ? LOC(STR_LOADING_CHAPTERS) : LOC(STR_NO_CHAPTERS));
       return;
    }
 
@@ -4270,18 +4328,22 @@ static void updatePlaybackAutoTranslateSettings(void)
    const char *previousLanguage = getAutoTranslateLanguagePreference();
    int languageChanged = !previousLanguage || strcmp(previousLanguage, languageCode ? languageCode : "") != 0;
    if (!languageCode || setAutoTranslateLanguage(languageCode) != 0) {
-      showToast("Could not save auto-translate language");
+      showToast(LOC(STR_COULD_NOT_SAVE_AUTO_TRANSLATE));
    } else {
       if (languageChanged) {
          autoTranslateRefreshPending = 1;
          refreshAutoTranslatedCaptionTrack();
       }
-      if (strcmp(languageCode, "off") == 0) showToast("Auto-translate: Off");
-      else if (strcmp(languageCode, "auto") == 0) showToast("Auto-translate: Content Region");
+      if (strcmp(languageCode, "off") == 0 || strcmp(languageCode, "auto") == 0) {
+         char notice[128];
+         snprintf(notice, sizeof notice, LOC(STR_AUTO_TRANSLATE_FORMAT),
+                  strcmp(languageCode, "off") == 0 ? LOC(STR_OFF) : LOC(STR_AUTO_CONTENT_REGION));
+         showToast(notice);
+      }
       else {
          const char *name = getAutoTranslateLanguageName(languageCode);
          char notice[96];
-         snprintf(notice, sizeof notice, "Auto-translate: %s", name ? name : languageCode);
+         snprintf(notice, sizeof notice, LOC(STR_AUTO_TRANSLATE_FORMAT), name ? name : languageCode);
          showToast(notice);
       }
    }
@@ -4322,7 +4384,7 @@ static void updatePlaybackSponsorSettings(void)
    else return;
    action = option == 0 ? SPONSOR_ACTION_SKIP : option == 1 ? SPONSOR_ACTION_ASK : SPONSOR_ACTION_KEEP;
    if (setSponsorAction(playbackSponsorSelected, action) != 0) {
-      showToast("Could not save SponsorBlock setting");
+      showToast(LOC(STR_COULD_NOT_SAVE_SPONSORBLOCK));
       return;
    }
    // If every category was Keep when playback began, no SponsorBlock request was
@@ -4359,7 +4421,7 @@ static void updatePlaybackSubtitleStyle(void)
       static const int limits[5] = { 6, 5, 5, 3, 6 };
       int setting = playbackSubtitleStyleSelected;
       int value = (getSubtitleStyle(setting) + delta + limits[setting]) % limits[setting];
-      if (setSubtitleStyle(setting, value) != 0) showToast("Could not save subtitle style");
+      if (setSubtitleStyle(setting, value) != 0) showToast(LOC(STR_COULD_NOT_SAVE_SUBTITLE_STYLE));
    }
 }
 
@@ -4397,7 +4459,7 @@ static void updatePlaybackSettings(void)
                         isRepeatDue(&playbackSubtitleOffsetRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
       if (offsetDelta) {
          int offset = getSubtitleOffset() + offsetDelta;
-         if (setSubtitleOffset(offset) != 0) showToast("Could not save subtitle offset");
+         if (setSubtitleOffset(offset) != 0) showToast(LOC(STR_COULD_NOT_SAVE_SUBTITLE_OFFSET));
       }
       return;
    }
@@ -4412,7 +4474,7 @@ static void updatePlaybackSettings(void)
          selected += delta;
          if (selected < 0) selected = 0;
          if (selected > 6) selected = 6;
-         if (setOsdTimeout(timeouts[selected]) != 0) showToast("Could not save OSD timeout");
+         if (setOsdTimeout(timeouts[selected]) != 0) showToast(LOC(STR_COULD_NOT_SAVE_OSD_TIMEOUT));
       }
       return;
    }
@@ -4424,7 +4486,7 @@ static void updatePlaybackSettings(void)
       if (left) enabled = 0;
       else if (right) enabled = 1;
       else enabled = !enabled;
-      if (setEnable1080p60(enabled) != 0) showToast("Could not save 1080p setting");
+      if (setEnable1080p60(enabled) != 0) showToast(LOC(STR_COULD_NOT_SAVE_1080P_SETTING));
    } else if (playbackSettingsSelected == 1) {
       float current = playbackFontScale;
       setPlaybackUiScale(current >= 1.25f ? 1.0f : 1.5f);
@@ -4433,7 +4495,7 @@ static void updatePlaybackSettings(void)
                           isRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
       if (overscanDelta) {
          int overscan = getOverscanPercent() + overscanDelta;
-         if (setOverscanPercent(overscan) != 0) showToast("Could not save overscan setting");
+         if (setOverscanPercent(overscan) != 0) showToast(LOC(STR_COULD_NOT_SAVE_OVERSCAN));
       }
    } else if (playbackSettingsSelected == 3) {
       int cropOverscanDelta = isRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
@@ -4441,7 +4503,7 @@ static void updatePlaybackSettings(void)
       if (cropOverscanDelta) {
          int cropOverscan = getCropToFillOverscanPercent() + cropOverscanDelta;
          if (setCropToFillOverscanPercent(cropOverscan) != 0)
-            showToast("Could not save crop overscan setting");
+            showToast(LOC(STR_COULD_NOT_SAVE_CROP_OVERSCAN));
       }
    } else if (playbackSettingsSelected == 4 && (cross || right)) {
       playbackSubtitleStyleOpen = 1;
@@ -4482,18 +4544,18 @@ static void handlePlaybackOptionsInput(void)
             }
             if (target >= 0 && target != state.resolutionIndex) {
                state.audioFallbackAttempted = 0;
-               if (!startResolutionSwitch(target, 0)) showToast("Could not start quality change");
+               if (!startResolutionSwitch(target, 0)) showToast(LOC(STR_COULD_NOT_START_QUALITY_CHANGE));
             } else if (target >= 0) {
-               showToast(preferredQualityHeight ? "Quality preference saved" : "Quality: Auto");
+               showToast(preferredQualityHeight ? LOC(STR_QUALITY_PREFERENCE_SAVED) : LOC(STR_QUALITY_AUTO));
             }
          } else if (optionsSelected == 1) {
             if (state.audioCount > 0)
                startAudioTrackSwitch(optionsDropdownSelected);
             else if (state.resolutionIndex >= 0 && state.resolutionIndex < state.videoCount &&
                      state.videoHasAudio[state.resolutionIndex])
-               showToast("Original upload already active");
+               showToast(LOC(STR_ORIGINAL_UPLOAD_ALREADY_ACTIVE));
             else
-               showToast("No audio tracks available");
+               showToast(LOC(STR_NO_AUDIO_TRACKS_AVAILABLE));
          } else if (optionsSelected == 3) {
             int trackIndex = subtitleTrackAtMenuIndex(optionsDropdownSelected);
             if (!state.isLive && trackIndex >= 0 && trackIndex < state.captionCount) {
@@ -4502,13 +4564,13 @@ static void handlePlaybackOptionsInput(void)
                   lastSubtitlePick = trackIndex;
                   if (subtitlesEnabled) setSubtitleTrack(trackIndex);
                   char notice[112];
-                  snprintf(notice, sizeof notice, "Subtitle: %s", track->name);
+                  snprintf(notice, sizeof notice, LOC(STR_SUBTITLE_FORMAT), track->name);
                   showToast(notice);
                } else {
-                  showToast("Could not save subtitle language");
+                  showToast(LOC(STR_COULD_NOT_SAVE_SUBTITLE_LANGUAGE));
                }
             } else {
-               showToast("No subtitle languages available");
+               showToast(LOC(STR_NO_SUBTITLE_LANGUAGES_AVAILABLE));
             }
          }
          optionsDropdownOpen = 0;
@@ -4545,7 +4607,7 @@ static void handlePlaybackOptionsInput(void)
             showSelectedSubtitleToast();
          } else {
             setSubtitleTrack(-1);
-            showToast("Subtitles: OFF");
+            showToast(LOC(STR_SUBTITLES_OFF));
          }
       }
       return;
@@ -4556,7 +4618,7 @@ static void handlePlaybackOptionsInput(void)
       if (enabled != cropToFillEnabled) {
          cropToFillEnabled = enabled;
          cropPanX = cropPanY = 0.0f;
-         showToast(cropToFillEnabled ? "Crop to fill: ON" : "Crop to fill: OFF");
+         showToast(cropToFillEnabled ? LOC(STR_CROP_TO_FILL_ON) : LOC(STR_CROP_TO_FILL_OFF));
       }
       return;
    }
@@ -4565,7 +4627,7 @@ static void handlePlaybackOptionsInput(void)
       int enabled = left ? 0 : right ? 1 : !getAutoplayEnabled();
       if (enabled != getAutoplayEnabled()) {
          setAutoplayEnabled(enabled);
-         showToast(getAutoplayEnabled() ? "Autoplay: ON" : "Autoplay: OFF");
+         showToast(getAutoplayEnabled() ? LOC(STR_AUTOPLAY_ON) : LOC(STR_AUTOPLAY_OFF));
       }
       return;
    }
@@ -4574,7 +4636,7 @@ static void handlePlaybackOptionsInput(void)
       if (state.isLive || requestedIsLocal) return;
       char videoId[12];
       if (!extractPlaybackId(requestedInput, videoId)) {
-         showToast("This video cannot be downloaded");
+         showToast(LOC(STR_VIDEO_CANNOT_BE_DOWNLOADED));
          return;
       }
       SearchResult item;
@@ -4620,8 +4682,16 @@ static void handlePlaybackOptionsInput(void)
 
 static int playbackSettingsPanelWidth(void)
 {
-   int width = state.screenW - 48;
-   return width < PLAYBACK_SETTINGS_PANEL_W ? width : PLAYBACK_SETTINGS_PANEL_W;
+   int widest = 0;
+   int renderSize = (int)(playbackFontSize(20) * playbackFontScale + 0.5f);
+   for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
+      int measured = (int)(measureFontText(&uiFont, renderSize, playbackSettingsLabels[i].text) + 0.5f);
+      if (measured > widest) widest = measured;
+   }
+   int preferred = widest + 40 + 250 + 80;
+   if (preferred < PLAYBACK_SETTINGS_PANEL_W) preferred = PLAYBACK_SETTINGS_PANEL_W;
+   int maxWidth = state.screenW - 48;
+   return preferred < maxWidth ? preferred : maxWidth;
 }
 
 static int playbackSponsorPanelWidth(void)
@@ -4633,10 +4703,21 @@ static int playbackSponsorPanelWidth(void)
 static void drawPlaybackSettings(void)
 {
    int panelW = playbackSettingsPanelWidth();
-   int panelH = PLAYBACK_SETTINGS_PANEL_H;
+   int panelH = 72 + PLAYBACK_SETTINGS_COUNT * PLAYBACK_SETTINGS_ROW_H + 24;
    if (panelH > state.screenH - 48) panelH = state.screenH - 48;
    int x = (state.screenW - panelW) / 2;
    int y = (state.screenH - panelH) / 2;
+   int settingsLabelWidth = panelW - 40 - 250 - 56;
+   if (settingsLabelWidth < 120) settingsLabelWidth = 120;
+   const char *localizedSettingsNames[PLAYBACK_SETTINGS_COUNT] = {
+      LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING), LOC(STR_OVERSCAN), LOC(STR_OVERSCAN_CROP),
+      LOC(STR_SUBTITLE_STYLE), LOC(STR_SUBTITLE_OFFSET), LOC(STR_AUTO_TRANSLATE_SUBTITLES), LOC(STR_SPONSORBLOCK), LOC(STR_OSD_TIMEOUT)
+   };
+   for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
+      if (playbackSettingsLabels[i].width != settingsLabelWidth)
+         playbackSettingsLabels[i].width = settingsLabelWidth;
+      setLabelText(&playbackSettingsLabels[i], localizedSettingsNames[i]);
+   }
    fillGfxRectangleFixed(0, 0, state.screenW, state.screenH, 0x78000000);
    fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
@@ -4660,21 +4741,21 @@ static void drawPlaybackSettings(void)
    char subtitleOffsetValue[16];
    int subtitleOffset = getSubtitleOffset();
    snprintf(subtitleOffsetValue, sizeof subtitleOffsetValue, "%d", subtitleOffset);
-   setLabelText(&playbackSettingsValues[4], "Configure");
+   setLabelText(&playbackSettingsValues[4], LOC(STR_CONFIGURE));
    setLabelText(&playbackSettingsValues[5], subtitleOffsetValue);
    const char *autoPreference = getAutoTranslateLanguagePreference();
    char autoTranslateValue[64];
    if (strcmp(autoPreference, "off") == 0) {
-      strCopy(autoTranslateValue, sizeof autoTranslateValue, "Off");
+      strCopy(autoTranslateValue, sizeof autoTranslateValue, LOC(STR_OFF));
    } else if (strcmp(autoPreference, "auto") == 0) {
-      snprintf(autoTranslateValue, sizeof autoTranslateValue, "Auto (%s)",
+      snprintf(autoTranslateValue, sizeof autoTranslateValue, LOC(STR_AUTO_TRANSLATE_VALUE_FORMAT),
                getAutoTranslateLanguage());
    } else {
       const char *languageName = getAutoTranslateLanguageName(autoPreference);
       strCopy(autoTranslateValue, sizeof autoTranslateValue, languageName ? languageName : autoPreference);
    }
    setLabelText(&playbackSettingsValues[6], autoTranslateValue);
-   setLabelText(&playbackSettingsValues[7], "Configure");
+   setLabelText(&playbackSettingsValues[7], LOC(STR_CONFIGURE));
    char osdTimeoutValue[16];
    snprintf(osdTimeoutValue, sizeof osdTimeoutValue, "%ds", getOsdTimeout());
    setLabelText(&playbackSettingsValues[8], osdTimeoutValue);
@@ -4752,11 +4833,11 @@ static void drawPlaybackAutoTranslateSettings(void)
    for (int row = 0; row < visible; row++) {
       int index = first + row;
       const char *name;
-      if (index == 0) name = "Off";
-      else if (index == 1) name = "Auto (Content Region)";
+      if (index == 0) name = LOC(STR_OFF);
+      else if (index == 1) name = LOC(STR_AUTO_CONTENT_REGION);
       else {
          const AutoTranslateLanguage *language = getAutoTranslateLanguageAt(index - 2);
-         name = language ? language->name : "Unknown";
+         name = language ? language->name : LOC(STR_UNKNOWN);
       }
       Label *label = &playbackAutoTranslateRows[row];
       setLabelText(label, name);
@@ -4805,13 +4886,13 @@ static void drawSubtitleLabelWithHighlight(Label *label, int x, int y)
 
 static void drawPlaybackSubtitleStyle(void)
 {
-   static const char *const textNames[] = { "White", "Yellow", "Cyan", "Green", "Blue", "Red" };
+   const char *textNames[] = { LOC(STR_WHITE), LOC(STR_YELLOW), LOC(STR_CYAN), LOC(STR_GREEN), LOC(STR_BLUE), LOC(STR_RED) };
    static const uint32_t textColors[] = { 0xFFFFFFFF, 0xFFFFFF00, 0xFF00FFFF, 0xFF00FF00, 0xFF4488FF, 0xFFFF4444 };
-   static const char *const bgNames[] = { "Black", "Dark Gray", "Gray", "Blue", "Transparent" };
+   const char *bgNames[] = { LOC(STR_BLACK), LOC(STR_DARK_GRAY), LOC(STR_GRAY), LOC(STR_BLUE), LOC(STR_TRANSPARENT) };
    static const uint32_t bgColors[] = { 0xFF000000, 0xFF303030, 0xFF777777, 0xFF102040, 0x00000000 };
    static const char *const opacityNames[] = { "0%", "25%", "50%", "80%", "100%" };
-   static const char *const highlightNames[] = { "None", "Shadow", "Outline" };
-   static const char *const fontSizeNames[] = { "Small", "Medium", "Default", "Large", "Extra Large", "Huge" };
+   const char *highlightNames[] = { LOC(STR_NONE), LOC(STR_SHADOW), LOC(STR_OUTLINE) };
+   const char *fontSizeNames[] = { LOC(STR_SMALL), LOC(STR_MEDIUM), LOC(STR_DEFAULT), LOC(STR_LARGE), LOC(STR_EXTRA_LARGE), LOC(STR_HUGE) };
    const char *values[] = { textNames[getSubtitleStyle(0)], bgNames[getSubtitleStyle(1)],
                             opacityNames[getSubtitleStyle(2)], highlightNames[getSubtitleStyle(3)],
                             fontSizeNames[getSubtitleStyle(4)] };
@@ -4869,7 +4950,7 @@ static void drawPlaybackSponsorSettings(void)
 
    static const int actionValues[3] = { SPONSOR_ACTION_SKIP, SPONSOR_ACTION_ASK, SPONSOR_ACTION_KEEP };
    int optionW = PLAYBACK_SPONSOR_OPTION_W;
-   int optionH = 32;
+   int optionH = 40;
    int optionGroupW = 3 * optionW + 2 * PLAYBACK_SPONSOR_OPTION_GAP;
    int optionX = x + panelW - 32 - optionGroupW;
    int rowTop = y + 86;
@@ -4879,9 +4960,10 @@ static void drawPlaybackSponsorSettings(void)
       if (focused)
          fillGfxRoundedRectangleFixed(x + 18, rowY, panelW - 36, PLAYBACK_SPONSOR_ROW_H - 2,
                                       7, activeTheme->rowHighlight);
-      fillGfxCircle(x + 34, rowY + PLAYBACK_SPONSOR_ROW_H / 2, 5,
+      fillGfxCircle(x + 36, rowY + PLAYBACK_SPONSOR_ROW_H / 2, 7,
                     getSponsorCategoryColor((SponsorCategory)row));
       Label *name = &playbackSponsorCategoryLabels[row];
+      setLabelText(name, getSponsorCategoryName((SponsorCategory)row));
       refreshLabelScale(name);
       setLabelColor(name, focused ? activeTheme->textPrimary : activeTheme->textSecondary);
       moveLabel(name, x + 52, getCenteredLabelY(name, rowY, PLAYBACK_SPONSOR_ROW_H));
@@ -4895,6 +4977,7 @@ static void drawPlaybackSponsorSettings(void)
          uint32_t bg = selected ? (focused ? activeTheme->accent : activeTheme->surface) : activeTheme->surface;
          fillGfxRoundedRectangleFixed(ox, optionY, optionW, optionH, 7, bg);
          Label *word = &playbackSponsorActionLabels[option];
+         setLabelText(word, option == 0 ? LOC(STR_SKIP) : option == 1 ? LOC(STR_ASK) : LOC(STR_KEEP));
          refreshLabelScale(word);
          setLabelColor(word, selected ? (focused ? activeTheme->appBg : activeTheme->textPrimary) : 0xFF888888);
          moveLabel(word, ox + (optionW - word->tt.tex.w) / 2,
@@ -4910,7 +4993,7 @@ static void setOptionsCurrentValue(Label *label, const char *value, int width)
       label->width = width;
       label->text[0] = '\0'; // force a reraster with the new available width
    }
-   setLabelText(label, value ? value : "Unavailable");
+   setLabelText(label, value ? value : LOC(STR_UNAVAILABLE));
    refreshLabelScale(label);
 }
 
@@ -4935,15 +5018,15 @@ static void updateOptionsCurrentValues(int valueWidth)
    setOptionsCurrentValue(&optionsCurrentValueLabels[0], optionsQualityLabels[qualityIndex], 0);
 
    prepareAudioOptions();
-   const char *audioValue = "Unavailable";
+   const char *audioValue = LOC(STR_UNAVAILABLE);
    if (state.audioPick >= 0 && state.audioPick < state.audioCount &&
        state.audioPick < optionsValueCounts[1]) {
       audioValue = optionsAudioLabels[state.audioPick];
    } else if (state.resolutionIndex >= 0 && state.resolutionIndex < state.videoCount &&
               state.videoHasAudio[state.resolutionIndex]) {
-      audioValue = "Original upload";
+      audioValue = LOC(STR_ORIGINAL_UPLOAD_PLAYBACK);
    } else if (state.fallbackAudioUrl[0]) {
-      audioValue = "Original upload";
+      audioValue = LOC(STR_ORIGINAL_UPLOAD_PLAYBACK);
    } else if (optionsValueCounts[1] > 0 && state.audioCount > 0) {
       audioValue = optionsAudioLabels[0];
    }
@@ -4954,13 +5037,29 @@ static void updateOptionsCurrentValues(int valueWidth)
    if (subtitleIndex < 0 || subtitleIndex >= state.captionCount)
       subtitleIndex = findPreferredSubtitleTrack(getPlaybackSubtitleLanguage());
    const char *subtitleValue = (subtitleIndex >= 0 && subtitleIndex < state.captionCount) ?
-                               state.captionTracks[subtitleIndex].name : "Unavailable";
+                               state.captionTracks[subtitleIndex].name : LOC(STR_UNAVAILABLE);
    setOptionsCurrentValue(&optionsCurrentValueLabels[2], subtitleValue, valueWidth);
 }
 
 static void drawPlaybackOptions(void)
 {
    int panelW = 680;
+   int widestLabel = 0;
+   for (int i = 0; i < OPTIONS_COUNT; i++) {
+      refreshLabelScale(&optionsLabels[i]);
+      if (optionsLabels[i].tt.tex.w > widestLabel) widestLabel = optionsLabels[i].tt.tex.w;
+   }
+   int widestAudioValue = 0;
+   int audioRenderSize = (int)(playbackFontSize(27) * playbackFontScale + 0.5f);
+   for (int i = 0; i < optionsValueCounts[1]; i++) {
+      int measured = (int)(measureFontText(&uiFont, audioRenderSize, optionsAudioLabels[i]) + 0.5f);
+      if (measured > widestAudioValue) widestAudioValue = measured;
+   }
+   int requiredW = widestLabel + 38 + 240;
+   int audioRequiredW = 38 + widestAudioValue + 38 + 44 + 80;
+   if (audioRequiredW > requiredW) requiredW = audioRequiredW;
+   if (requiredW > panelW) panelW = requiredW;
+   if (panelW > state.screenW - 32) panelW = state.screenW - 32;
    int rowH = state.screenH < 560 ? 44 : 54;
    int panelH = 70 + OPTIONS_COUNT * rowH;
    int x = (state.screenW - panelW) / 2;
@@ -4973,6 +5072,26 @@ static void drawPlaybackOptions(void)
    int valueWidth = valueRight - valueX;
    if (valueWidth < 8) valueWidth = 8;
    updateOptionsCurrentValues(valueWidth);
+
+   // Audio and subtitle names must use the available value area before being
+   // shortened. At 1.5x, Portuguese labels otherwise get ellipsized too early.
+   for (int valueIndex = 1; valueIndex <= 2; valueIndex++) {
+      Label *value = &optionsCurrentValueLabels[valueIndex];
+      refreshLabelScale(value);
+      int baseSize = playbackFontSize(27);
+      int renderSize = (int)(baseSize * playbackFontScale + 0.5f);
+      int measured = (int)(measureFontText(&uiFont, renderSize, value->text) + 0.5f);
+      int fitSize = baseSize;
+      if (measured > valueWidth && measured > 0) {
+         fitSize = (int)(baseSize * ((float)valueWidth / (float)measured));
+         if (fitSize < 12) fitSize = 12;
+      }
+      if (value->size != fitSize) {
+         value->size = fitSize;
+         value->fixedRenderScale = 0.0f;
+         setLabelFixedRenderScale(value, playbackFontScale, 0);
+      }
+   }
 
    // Quality is never ellipsized: right-align it immediately before the arrow.
    // If a future quality label is unusually long, reduce only that value's font
@@ -5078,7 +5197,21 @@ static void drawPlaybackOptions(void)
          if (firstItem < 0) firstItem = 0;
          if (firstItem + visibleCount > count) firstItem = count - visibleCount;
       }
-      int dropW = 420;
+      int dropW = panelW - 48;
+      int widestItem = 0;
+      int itemRenderSize = (int)(playbackFontSize(24) * playbackFontScale + 0.5f);
+      for (int item = 0; item < count; item++) {
+         int trackIndex = optionsSelected == 3 ? subtitleTrackAtMenuIndex(item) : -1;
+         const char *candidate = optionsSelected == 0 ? optionsQualityLabels[item] :
+                                optionsSelected == 1 ? optionsAudioLabels[item] :
+                                optionsSelected == 3 ? (trackIndex >= 0 ? state.captionTracks[trackIndex].name : LOC(STR_UNAVAILABLE)) :
+                                LOC(optionsValueIds[optionsSelected][item]);
+         int measured = (int)(measureFontText(&uiFont, itemRenderSize, candidate) + 0.5f);
+         if (measured > widestItem) widestItem = measured;
+      }
+      int requiredDropW = widestItem + 64;
+      if (requiredDropW > dropW) dropW = requiredDropW;
+      if (dropW > state.screenW - 32) dropW = state.screenW - 32;
       int dropH = visibleCount * 44 + 20;
       int dx = x + panelW - dropW - 18;
       if (dx < x + 12) dx = x + 12;
@@ -5101,12 +5234,18 @@ static void drawPlaybackOptions(void)
          const char *itemText = optionsSelected == 0 ? optionsQualityLabels[i] :
                                 optionsSelected == 1 ? optionsAudioLabels[i] :
                                 optionsSelected == 3 ? (subtitleTrackIndex >= 0 ?
-                                   state.captionTracks[subtitleTrackIndex].name : "Unavailable") :
-                                optionsValues[optionsSelected][i];
+                                   state.captionTracks[subtitleTrackIndex].name : LOC(STR_UNAVAILABLE)) :
+                                LOC(optionsValueIds[optionsSelected][i]);
          if (optionsSelected == 3 && subtitleTrackIndex >= 0 &&
              subtitleIsAutoTranslated(&state.captionTracks[subtitleTrackIndex])) {
             snprintf(subtitleItemText, sizeof subtitleItemText, "* %s", itemText);
             itemText = subtitleItemText;
+         }
+         int itemWidth = dropW - (count > visibleCount ? 76 : 52);
+         if (itemWidth < 80) itemWidth = 80;
+         if (value->width != itemWidth) {
+            value->width = itemWidth;
+            value->text[0] = '\0';
          }
          setLabelText(value, itemText);
          int itemY = dy + 8 + row * 44;
@@ -5116,6 +5255,17 @@ static void drawPlaybackOptions(void)
                                          dropW - 20, value->tt.tex.h + 12,
                                          6, 0xA05A7898);
          drawLabelAt(value, dx + 26, labelY);
+      }
+      if (count > visibleCount) {
+         int trackX = dx + dropW - 16;
+         int trackY = dy + 10;
+         int trackH = dropH - 20;
+         int thumbH = trackH * visibleCount / count;
+         if (thumbH < 22) thumbH = 22;
+         int maxFirst = count - visibleCount;
+         int thumbY = trackY + (trackH - thumbH) * firstItem / maxFirst;
+         fillGfxRoundedRectangleFixed(trackX, trackY, 5, trackH, 3, activeTheme->surface);
+         fillGfxRoundedRectangleFixed(trackX, thumbY, 5, thumbH, 3, activeTheme->accent);
       }
    }
 }
@@ -5133,7 +5283,7 @@ static void updatePlay(void)
 
    updateDownloadOverlay();
    if (isDownloadSpacePromptOpen()) return;
-   if (consumeDownloadCompletion()) showToastFor("Download Complete", 3000000ULL);
+   if (consumeDownloadCompletion()) showToastFor(LOC(STR_DOWNLOAD_COMPLETE), 3000000ULL);
 
    if (state.liveFailureVisible) {
       if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_CIRCLE)) {
@@ -5160,7 +5310,7 @@ static void updatePlay(void)
    if (state.stage == STAGE_PLAYING && state.player && isPadButtonPressed(PAD_BTN_R2)) {
       cropToFillEnabled = !cropToFillEnabled;
       cropPanX = cropPanY = 0.0f;
-      showToast(cropToFillEnabled ? "Crop to fill: ON" : "Crop to fill: OFF");
+      showToast(cropToFillEnabled ? LOC(STR_CROP_TO_FILL_ON) : LOC(STR_CROP_TO_FILL_OFF));
    }
 
    // an overlay owns the pad for the whole frame it was (or just became) visible, so the button that
@@ -5244,9 +5394,22 @@ static void updatePlay(void)
          scheduleLiveBaseRefresh(0);
    }
 
+   if (state.liveEndCheckActive && state.liveEndCheckDone) {
+      joinThread(state.liveEndCheckTid);
+      state.liveEndCheckActive = 0;
+      if (state.liveEndCheckResult == 1) {
+         state.liveEndDetected = 1;
+         logInfo("[yt-live-end] YouTube confirms broadcast ended; handing off to autoplay\n");
+      } else {
+         logInfo("[yt-live-end] status still LIVE or inconclusive (status=%d); resuming normal renewal\n",
+                 state.liveEndCheckResult);
+         scheduleLiveRefresh();
+      }
+   }
+
    // Any HTTP error from a LIVE segment source is a session/transport failure.
    // Do not treat it as EOF: renew the extractor response and rebuild the complete player.
-   if (state.stage == STAGE_PLAYING && state.isLive && state.player &&
+   if (state.stage == STAGE_PLAYING && state.isLive && !state.liveEndDetected && state.player &&
        isVideoPlayerFailed(state.player) && getVideoPlayerLiveError(state.player) != 0) {
       int error = getVideoPlayerLiveError(state.player);
 #if BUILD_DIAG_LIVE_RECOVERY
@@ -5262,11 +5425,20 @@ static void updatePlay(void)
               (unsigned long long)(liveBuffer.aheadBytes/1024ull), liveBuffer.segmentsAhead,
               liveBuffer.fetchInFlight);
 #endif
-      if (error >= 400)
-         logWarn("[yt-live-refresh] LIVE HTTP %d; renewing playback session\n", error);
-      else
-         logWarn("[yt-live-refresh] LIVE transport failed; renewing playback session\n");
-      scheduleLiveRefresh();
+      if (error == 404 && state.firstFrameSeen && state.liveLastFrameUs) {
+         if (sys_time_get_system_time() - state.liveLastFrameUs >= LIVE_STALL_TIMEOUT_US) {
+            logWarn("[yt-live-end] LIVE segment HTTP 404 persisted without new frames; verifying broadcast status\n");
+            scheduleLiveEndCheck();
+         }
+         // A 404 for one numbered segment can be a transient edge condition. Wait for
+         // the existing no-frame timeout before deciding between LIVE end and renewal.
+      } else {
+         if (error >= 400)
+            logWarn("[yt-live-refresh] LIVE HTTP %d; renewing playback session\n", error);
+         else
+            logWarn("[yt-live-refresh] LIVE transport failed; renewing playback session\n");
+         scheduleLiveRefresh();
+      }
    }
 
    // VOD transport and HTTP failures use the same bounded full-session replacement strategy.
@@ -5283,15 +5455,16 @@ static void updatePlay(void)
 
    // A LIVE source can stop delivering frames without transitioning the player to failed.
    // Detect that separately from HTTP errors, while respecting pause and user seek operations.
-   if (state.stage == STAGE_PLAYING && state.isLive && state.player && state.firstFrameSeen) {
+   if (state.stage == STAGE_PLAYING && state.isLive && !state.liveEnded &&
+       !state.liveEndDetected && !state.liveEndCheckActive && state.player && state.firstFrameSeen) {
       uint64_t liveNow = sys_time_get_system_time();
       if (isVideoPaused(state.player) || state.seeking) {
          state.liveLastFrameUs = liveNow;
       } else if (state.liveLastFrameUs &&
                  liveNow - state.liveLastFrameUs >= LIVE_STALL_TIMEOUT_US) {
-         logWarn("[yt-live-refresh] no new LIVE frame for %llu ms; renewing playback session\n",
+         logWarn("[yt-live-end] no new LIVE frame for %llu ms; verifying broadcast status\n",
                  (unsigned long long)(LIVE_STALL_TIMEOUT_US / 1000ULL));
-         scheduleLiveRefresh();
+         scheduleLiveEndCheck();
       }
    }
 
@@ -5307,7 +5480,7 @@ static void updatePlay(void)
          showControls();
          setVideoPlayerAudioVolume(state.player, getVolumeMeterFraction(&volumeMeter));
       } else {
-         showToast("Audio switch failed; video continues");
+         showToast(LOC(STR_AUDIO_SWITCH_FAILED_VIDEO_CONTINUES));
       }
       if (!state.audioSwitchWasPaused && state.player) setVideoPaused(state.player, 0);
       if (!state.audioSwitchFallback && !state.audioFallbackAttempted) {
@@ -5321,7 +5494,7 @@ static void updatePlay(void)
    // because the player may be destroyed during the subsequent quality fallback.
    if (state.stage == STAGE_PLAYING && state.player && !state.decoderStopWarningShown &&
        isVideoPlayerDecoderStopUnsafe(state.player)) {
-      showToastFor("Decoder failed to stop safely. Please restart the application.", 5000000ULL);
+      showToastFor(LOC(STR_DECODER_FAILED_RESTART), 5000000ULL);
       state.decoderStopWarningShown = 1;
    }
 
@@ -5350,7 +5523,7 @@ static void updatePlay(void)
    }
 
    // A fatal TEE decode error triggers an invisible handoff to a lower rendition.
-   // Keep the status label on "Loading..." and never retry the failed TEE URL.
+   // Keep the status label on LOC(STR_LOADING_ELLIPSIS) and never retry the failed TEE URL.
    if (state.stage == STAGE_PLAYING && state.player &&
        !state.teeRecoveryAttempted && !state.resolutionSwitchThreadActive &&
        !state.audioSwitchThreadActive && !state.seeking &&
@@ -5359,11 +5532,11 @@ static void updatePlay(void)
       int lowerProfile = findLowerResolutionProfile();
       if (lowerProfile >= 0) {
          if (!startResolutionSwitch(lowerProfile, 2)) {
-            strCopy(state.message, sizeof state.message, "Video decoder recovery could not start");
+            strCopy(state.message, sizeof state.message, LOC(STR_VIDEO_DECODER_RECOVERY_COULD_NOT_START));
             state.stage = STAGE_FAILED;
          }
       } else {
-         strCopy(state.message, sizeof state.message, "No compatible fallback video quality");
+         strCopy(state.message, sizeof state.message, LOC(STR_NO_COMPATIBLE_FALLBACK_QUALITY));
          state.stage = STAGE_FAILED;
       }
    }
@@ -5412,16 +5585,16 @@ static void updatePlay(void)
             if (fpsFallback) {
                if (state.resolutionSwitchRestored) state.fpsAdaptiveSwitches = 3;
                showToast(state.resolutionSwitchRestored
-                         ? "Quality fallback failed; original restored"
-                         : "Playback quality reduced automatically");
+                         ? LOC(STR_QUALITY_FALLBACK_FAILED_RESTORED)
+                         : LOC(STR_PLAYBACK_QUALITY_REDUCED));
             } else if (state.resolutionSwitchRestored) {
-               showToast("Resolution unavailable; previous stream restored");
+               showToast(LOC(STR_RESOLUTION_PREVIOUS_STREAM_RESTORED));
             } else {
                char notice[64];
                if (state.vidFps > 0)
-                  snprintf(notice, sizeof notice, "Video: %dp @ %d FPS", state.vidH, state.vidFps);
+                  snprintf(notice, sizeof notice, LOC(STR_VIDEO_FORMAT), state.vidH, state.vidFps);
                else
-                  snprintf(notice, sizeof notice, "Video: %dp", state.vidH);
+                  snprintf(notice, sizeof notice, LOC(STR_VIDEO_FORMAT_SIMPLE), state.vidH);
                showToast(notice);
             }
          }
@@ -5429,9 +5602,9 @@ static void updatePlay(void)
          state.resolutionSwitchFpsFallback = 0;
       } else {
          if (state.resolutionSwitchFpsFallback)
-            showToast("Automatic quality fallback unavailable");
+            showToast(LOC(STR_AUTOMATIC_QUALITY_FALLBACK_UNAVAILABLE));
          else if (!state.resolutionSwitchTeeRecovery)
-            showToast("Resolution switch and recovery failed");
+            showToast(LOC(STR_RESOLUTION_SWITCH_RECOVERY_FAILED));
          state.resolutionSwitchTeeRecovery = 0;
          state.resolutionSwitchFpsFallback = 0;
       }
@@ -5458,7 +5631,7 @@ static void updatePlay(void)
       state.nextThreadActive = 0;
       if (state.nextVideoId[0]) {
          if (!state.nextVideoTitle[0])
-            snprintf(state.nextVideoTitle, sizeof state.nextVideoTitle, "Video %s", state.nextVideoId);
+            snprintf(state.nextVideoTitle, sizeof state.nextVideoTitle, LOC(STR_VIDEO_ID_FORMAT), state.nextVideoId);
          setLabelText(&nextNoticeTitleLabel, state.nextVideoTitle);
          state.nextNoticeVisible = 1;
          state.nextNoticeStartedUs = sys_time_get_system_time();
@@ -5470,7 +5643,7 @@ static void updatePlay(void)
             state.nextThumbJpegLen = 0;
          }
       } else {
-         showToast("No next recommendation");
+         showToast(LOC(STR_NO_NEXT_RECOMMENDATION));
       }
    }
 
@@ -5537,7 +5710,7 @@ static void updatePlay(void)
    if (state.subtitlesReady && state.subtitleTranslation.stopped &&
        !state.subtitleTranslationStoppedShown && state.subtitleFetched == state.subtitlePick) {
       state.subtitleTranslationStoppedShown = 1;
-      showToast("Translation stopped; remaining subtitles stay in the source language");
+      showToast(LOC(STR_TRANSLATION_STOPPED));
    }
    if (state.subWorkerDone && state.subThreadActive) {
       joinThread(state.subWorkerTid);
@@ -5556,11 +5729,11 @@ static void updatePlay(void)
          state.subtitlesReady = 0;
          refreshPlaybackInfoHud();
          if (translated && fetchResult == -429)
-            showToast("Google Translate rate-limited; try again later");
+            showToast(LOC(STR_GOOGLE_TRANSLATE_RATE_LIMITED));
          else if (translated)
-            showToast("Automatic translation unavailable");
+            showToast(LOC(STR_AUTOMATIC_TRANSLATION_UNAVAILABLE));
          else
-            showToast("Subtitles unavailable");
+            showToast(LOC(STR_SUBTITLES_UNAVAILABLE));
       }
    }
    if (autoTranslateRefreshPending && !state.subThreadActive)
@@ -5651,8 +5824,8 @@ static void updatePlay(void)
    if (state.stage == STAGE_PLAYING && state.player && !requestedIsLocal &&
        playlistQueueCount > 0 && playlistQueueCursor >= 0 &&
        playlistQueueCursor + 1 < playlistQueueCount &&
-       (!state.isLive || state.liveEnded) && isVideoEnded(state.player) &&
-       !state.nextAttempted) {
+       (!state.isLive || state.liveEnded || state.liveEndDetected) &&
+       (isVideoEnded(state.player) || state.liveEndDetected) && !state.nextAttempted) {
       state.nextAttempted = 1;
       launchPlaylistQueueIndex(playlistQueueCursor + 1);
       return;
@@ -5660,39 +5833,43 @@ static void updatePlay(void)
 
    // With autoplay disabled, ending a VOD behaves like pressing Circle:
    // return to the screen that launched this video instead of requesting /next.
-   if (state.stage == STAGE_PLAYING && state.player && (!state.isLive || state.liveEnded) &&
-       isVideoEnded(state.player) && !getAutoplayEnabled() && !state.nextAttempted) {
+   if (state.stage == STAGE_PLAYING && state.player &&
+       (!state.isLive || state.liveEnded || state.liveEndDetected) &&
+       (isVideoEnded(state.player) || state.liveEndDetected) &&
+       !getAutoplayEnabled() && !state.nextAttempted) {
       requestPlaybackCancel();
       popScreen();
       return;
    }
 
    // Automatic playback: ask /next once after a VOD reaches its end. Network failure is non-fatal.
-   if (state.stage == STAGE_PLAYING && state.player && (!state.isLive || state.liveEnded) &&
-       isVideoEnded(state.player) && !state.nextAttempted && !state.nextThreadActive) {
+   if (state.stage == STAGE_PLAYING && state.player &&
+       (!state.isLive || state.liveEnded || state.liveEndDetected) &&
+       (isVideoEnded(state.player) || state.liveEndDetected) &&
+       !state.nextAttempted && !state.nextThreadActive) {
       state.nextAttempted = 1;
       state.nextWorkerDone = 0;
       state.nextVideoId[0] = 0;
       state.nextThreadActive = (spawnJoinableThread(&state.nextWorkerTid, autoplayWorker, 0,
                                 THREAD_PRIORITY_DEFAULT, THREAD_STACK_SIZE_64KB, "yt-autoplay") == 0);
-      if (!state.nextThreadActive) showToast("Autoplay unavailable");
+      if (!state.nextThreadActive) showToast(LOC(STR_AUTOPLAY_UNAVAILABLE));
    }
 
-   // status text: the failure reason, or "Loading..." until playback. setLabelText skips unchanged
+   // status text: the failure reason, or LOC(STR_LOADING_ELLIPSIS) until playback. setLabelText skips unchanged
    // text, so calling it each frame only rasterises on a real change.
-   if (state.audioSwitchThreadActive) setLabelText(&statusLabel, state.message[0] ? state.message : "Loading audio...");
+   if (state.audioSwitchThreadActive) setLabelText(&statusLabel, state.message[0] ? state.message : LOC(STR_LOADING_AUDIO));
    else if (state.resolutionSwitchThreadActive) {
       if (state.resolutionSwitchTeeRecovery) {
-         setLabelText(&statusLabel, "Loading");
+         setLabelText(&statusLabel, LOC(STR_LOADING));
       } else {
-         setLabelText(&statusLabel, "Changing resolution...");
+         setLabelText(&statusLabel, LOC(STR_CHANGING_RESOLUTION));
       }
    } else if (state.stage == STAGE_FAILED) setLabelText(&statusLabel, state.message);
    else if (state.stage != STAGE_PLAYING) {
-      if (state.message[0] && strcmp(state.message, "Loading...") != 0) {
+      if (state.message[0] && strcmp(state.message, LOC(STR_LOADING_ELLIPSIS)) != 0) {
          setLabelText(&statusLabel, state.message);
       } else {
-         setLabelText(&statusLabel, "Loading");
+         setLabelText(&statusLabel, LOC(STR_LOADING));
       }
    }
 }
@@ -5835,22 +6012,22 @@ static void updateStatLabels(void)
    if (state.audioPick >= 0 && state.audioPick < state.audioCount)
       audioName = state.audioNames[state.audioPick];
 
-   snprintf(line, sizeof line, "Video  itag %d   %dx%d   H.264", state.vidItag, state.vidW, state.vidH);
+   snprintf(line, sizeof line, LOC(STR_VIDEO_STATS_FORMAT), state.vidItag, state.vidW, state.vidH);
    setLabelText(&statLabels[0], line);
-   snprintf(line, sizeof line, "FPS  %d   (target %d)", state.measuredFps, state.vidFps);
+   snprintf(line, sizeof line, LOC(STR_FPS_STATS_FORMAT), state.measuredFps, state.vidFps);
    setLabelText(&statLabels[1], line);
    if (state.audItag) {
       if (audioName && audioName[0])
-         snprintf(line, sizeof line, "Audio  itag %d   %s\nAAC %d Hz   %d ch",
+         snprintf(line, sizeof line, LOC(STR_AUDIO_STATS_WITH_NAME_FORMAT),
                   state.audItag, audioName, rate, channels);
       else
-         snprintf(line, sizeof line, "Audio  itag %d\nAAC %d Hz   %d ch",
+         snprintf(line, sizeof line, LOC(STR_AUDIO_STATS_FORMAT),
                   state.audItag, rate, channels);
    } else {
-      strCopy(line, sizeof line, "Audio  none");
+      strCopy(line, sizeof line, LOC(STR_AUDIO_NONE_STATS));
    }
    setLabelText(&statLabels[2], line);
-   snprintf(line, sizeof line, "Time  %d:%02d / %d:%02d", (int)pos / 60, (int)pos % 60, (int)duration / 60, (int)duration % 60);
+   snprintf(line, sizeof line, LOC(STR_TIME_STATS_FORMAT), (int)pos / 60, (int)pos % 60, (int)duration / 60, (int)duration % 60);
    setLabelText(&statLabels[3], line);
 }
 
@@ -6568,6 +6745,7 @@ static void termPlay(void)
    if (state.chThreadActive) { joinPlaybackWorker("chapters", state.chWorkerTid); state.chThreadActive = 0; }
    if (state.metadataThreadActive) { joinPlaybackWorker("metadata", state.metadataWorkerTid); state.metadataThreadActive = 0; }
    if (state.liveBaseRefreshActive) { joinPlaybackWorker("live-base-refresh", state.liveBaseRefreshTid); state.liveBaseRefreshActive = 0; }
+   if (state.liveEndCheckActive) { joinPlaybackWorker("live-end-check", state.liveEndCheckTid); state.liveEndCheckActive = 0; }
    if (state.liveBaseRefreshInfo) { freeStreamInfo(state.liveBaseRefreshInfo); state.liveBaseRefreshInfo = NULL; }
    if (state.nextThreadActive) { joinPlaybackWorker("autoplay", state.nextWorkerTid); state.nextThreadActive = 0; }
    free(state.description);
