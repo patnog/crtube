@@ -45,6 +45,7 @@ void  setGfxSdUiScale(float scale);
 // Range: -15..+15 percent; zero leaves the original output unchanged. Offscreen targets are unaffected.
 int   getGfxOverscan(void);
 void  setGfxOverscan(int percent);
+void  setGfxServiceTransform(int verticalAmp, int verticalShift, int horizontalAmp, int horizontalShift);
 
 // changes how a finished frame reaches the screen, at any time. GFX_VSYNC_ON waits for the display's
 // next refresh (smooth, but holds the frame back by up to one refresh); GFX_VSYNC_OFF shows it at the

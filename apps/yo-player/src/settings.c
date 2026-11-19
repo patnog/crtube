@@ -54,6 +54,14 @@ static const char *DEFAULT_SETTINGS =
    "\n"
    "overscan=0\n"
    "overscan-crop-to-fill=0\n"
+   "vertical-amp=0\n"
+   "vertical-shift=0.0\n"
+   "horizontal-amp=0\n"
+   "horizontal-shift=0.0\n"
+   "crop-vertical-amp=0\n"
+   "crop-vertical-shift=0.0\n"
+   "crop-horizontal-amp=0\n"
+   "crop-horizontal-shift=0.0\n"
    "screensaver-timeout=30\n"
    "osd-timeout=2\n"
    "# playback OSD inactivity timeout in seconds: 2, 3, 5, 10, 15, 30 or 60\n"
@@ -103,6 +111,11 @@ static char playbackSubtitleLanguage[12] = "auto";
 static char autoTranslateLanguage[12] = "auto";
 static int overscanPercent = 0;
 static int cropToFillOverscanPercent = 0;
+static int serviceAdjustments[2][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+static const char *SERVICE_ADJUSTMENT_KEYS[2][4] = {
+   {"vertical-amp", "vertical-shift", "horizontal-amp", "horizontal-shift"},
+   {"crop-vertical-amp", "crop-vertical-shift", "crop-horizontal-amp", "crop-horizontal-shift"}
+};
 static int screensaverTimeout = 30;
 static int osdTimeoutSeconds = 2;
 static int subtitleOffsetPixels = 0;
@@ -567,6 +580,37 @@ void loadSettings(void)
       }
    }
 
+   for (int mode = 0; mode < 2; mode++) {
+      for (int item = 0; item < 4; item++) {
+         const char *key = SERVICE_ADJUSTMENT_KEYS[mode][item];
+         const char *raw = findSettingValue(text, key);
+         if (!raw) {
+            if (rewriteSettingKey(SETTINGS_PATH, key, "0") != 0)
+               logWarn("[settings] could not add default %s key\n", key);
+            serviceAdjustments[mode][item] = 0;
+         } else {
+            char *end = NULL;
+            double parsed = strtod(raw, &end);
+            if (end != raw && (*end == 0 || *end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) {
+               int isShift = (item == 1 || item == 3);
+               /* Shift values are stored in half-percent units. Legacy integer
+                * settings are whole percentages and are converted on load. */
+               int fixedValue = (int)(parsed * (isShift ? 2.0 : 1.0) + (parsed >= 0 ? 0.5 : -0.5));
+               int limit = isShift ? 30 : 15;
+               if (fixedValue < -limit) fixedValue = -limit;
+               if (fixedValue > limit) fixedValue = limit;
+               serviceAdjustments[mode][item] = fixedValue;
+            } else {
+               serviceAdjustments[mode][item] = 0;
+               logWarn("[settings] invalid %s value, using 0\n", key);
+            }
+         }
+      }
+   }
+
+   setGfxServiceTransform(serviceAdjustments[0][0], serviceAdjustments[0][1],
+                          serviceAdjustments[0][2], serviceAdjustments[0][3]);
+
    const char *screensaverTimeoutValue = findSettingValue(text, "screensaver-timeout");
    if (!screensaverTimeoutValue) {
       if (rewriteSettingKey(SETTINGS_PATH, "screensaver-timeout", "30") != 0)
@@ -857,6 +901,43 @@ int setOverscanPercent(int percent)
    overscanPercent = percent;
    setGfxOverscan(overscanPercent);
    logInfo("[settings] overscan set to %d%%\n", overscanPercent);
+   return 0;
+}
+
+int getServiceAdjustment(int cropToFill, int item)
+{
+   if (cropToFill < 0 || cropToFill > 1 || item < 0 || item > 3) return 0;
+   return serviceAdjustments[cropToFill][item];
+}
+
+int setServiceAdjustment(int cropToFill, int item, int percent)
+{
+   if (cropToFill < 0 || cropToFill > 1 || item < 0 || item > 3) return -1;
+   int isShift = (item == 1 || item == 3);
+   int limit = isShift ? 30 : 15;
+   if (percent < -limit) percent = -limit;
+   if (percent > limit) percent = limit;
+   if (percent == serviceAdjustments[cropToFill][item]) return 0;
+   char value[8];
+   int magnitude = percent < 0 ? -percent : percent;
+   int length = isShift ? snprintf(value, sizeof value, "%s%d.%d", percent < 0 ? "-" : "",
+                                   magnitude / 2, magnitude % 2 ? 5 : 0)
+                        : snprintf(value, sizeof value, "%d", percent);
+   const char *key = SERVICE_ADJUSTMENT_KEYS[cropToFill][item];
+   if (length <= 0 || length >= (int)sizeof value || rewriteSettingKey(SETTINGS_PATH, key, value) != 0) {
+      logWarn("[settings] could not persist %s=%d\n", key, percent);
+      return -1;
+   }
+   serviceAdjustments[cropToFill][item] = percent;
+   if (!cropToFill)
+      setGfxServiceTransform(serviceAdjustments[0][0], serviceAdjustments[0][1],
+                             serviceAdjustments[0][2], serviceAdjustments[0][3]);
+   if (isShift) {
+      int magnitude = percent < 0 ? -percent : percent;
+      logInfo("[settings] %s set to %s%d.%d%%\n", key, percent < 0 ? "-" : "",
+              magnitude / 2, magnitude % 2 ? 5 : 0);
+   } else
+      logInfo("[settings] %s set to %d%%\n", key, percent);
    return 0;
 }
 

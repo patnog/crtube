@@ -81,6 +81,9 @@ int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails
 // Independent overscan used only while Crop to Fill is enabled.
 int getCropToFillOverscanPercent(void);
 int setCropToFillOverscanPercent(int percent);
+// Service Menu output adjustments: item 0=vertical amp, 1=vertical shift, 2=horizontal amp, 3=horizontal shift. cropToFill selects the independent Crop to Fill set. Values are -15..+15 percent.
+int getServiceAdjustment(int cropToFill, int item);
+int setServiceAdjustment(int cropToFill, int item, int percent);
 
 // Playback OSD inactivity timeout in seconds: 2, 3, 5, 10, 15, 30 or 60.
 int getOsdTimeout(void);

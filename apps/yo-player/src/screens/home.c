@@ -27,6 +27,7 @@ extern void sysProcessExit(int status);
 #include "ui/loading-indicator.h"
 
 #include "gfx.h"
+#include "colors.h"
 #include "theme.h"
 #include "pad.h"
 #include "thread.h"             // getTimeUs
@@ -129,6 +130,9 @@ static struct {
    int       accountOpen;   // the sign-in / account panel is showing
    int       settingsOpen;  // the settings window is showing
    int       settingsSelected;
+   int       serviceMenuOpen;
+   int       serviceMenuSelected;
+   int       serviceMenuEditing;
    int       themeOpen;
    int       themeSelected;
    int       themeCustomOpen;
@@ -300,9 +304,11 @@ static int         panelConfirmHint, panelBackHint;
 #define SETTINGS_ROW_HEIGHT 44
 #define SETTINGS_ROW_TOP 62
 #define SETTINGS_ROW_STEP 50
-#define SETTINGS_ROW_COUNT 12
+#define SETTINGS_ROW_COUNT 11
 static Label settingsTitle, settingsLabels[SETTINGS_ROW_COUNT], settingsValues[SETTINGS_ROW_COUNT];
-static ButtonHints settingsHints;
+static Label serviceMenuEditLabel, homeServiceTitle, homeServiceSectionLabel;
+static Label homeServiceLabels[10], homeServiceValues[10];
+static ButtonHints settingsHints, serviceMenuHints;
 #define UPDATE_PANEL_W 680
 #define UPDATE_PANEL_H 430
 #define UPDATE_DIALOG_W 640
@@ -479,6 +485,7 @@ static void refreshHomeThemeColors(void)
    setLabelColor(&panelCode, activeTheme->textPrimary);
    setLabelColor(&panelFooter, activeTheme->textSecondary);
    setLabelColor(&settingsTitle, activeTheme->textPrimary);
+   setLabelColor(&serviceMenuEditLabel, activeTheme->textPrimary);
    setLabelColor(&updatePanelTitle, activeTheme->textPrimary);
    for (int i = 0; i < 3; i++) setLabelColor(&updatePanelInfo[i], activeTheme->textSecondary);
    for (int i = 0; i < 5; i++) setLabelColor(&updatePanelRows[i], activeTheme->textPrimary);
@@ -533,6 +540,7 @@ static void refreshHomeThemeColors(void)
    setHintsThemeColor(&hints, activeTheme->textSecondary);
    setHintsThemeColor(&panelHints, activeTheme->textSecondary);
    setHintsThemeColor(&settingsHints, activeTheme->textSecondary);
+   setHintsThemeColor(&serviceMenuHints, activeTheme->textSecondary);
    setHintsThemeColor(&downloadSettingsHints, activeTheme->textSecondary);
    setHintsThemeColor(&themeHints, activeTheme->textSecondary);
    setHintsThemeColor(&exitConfirmHints, activeTheme->textSecondary);
@@ -2181,6 +2189,25 @@ static void drawThemePanel(void)
    if (home.themeConfirmOpen) drawThemeConfirmPanel();
 }
 
+static int isServiceValueRepeatDue(ButtonRepeat *repeat, PadButtonState state)
+{
+   if (state == PAD_BUTTON_STATE_PRESSED) {
+      repeat->timer = sys_time_get_system_time();
+      repeat->repeats = 0;
+      return 1;
+   }
+   if (state == PAD_BUTTON_STATE_HELD) {
+      uint64_t now = sys_time_get_system_time();
+      uint64_t delay = repeat->repeats == 0 ? 500000 : 140000;
+      if (now - repeat->timer >= delay) {
+         repeat->timer = now;
+         repeat->repeats++;
+         return 1;
+      }
+   }
+   return 0;
+}
+
 static void updateSettingsPanel(void)
 {
    if (updateOverwritePromptOpen) {
@@ -2262,6 +2289,46 @@ static void updateSettingsPanel(void)
    if (home.languageConfirmOpen) { updateLanguageConfirm(); return; }
    if (home.regionOpen) { updateRegionPicker(); return; }
    if (home.sponsorblockOpen) { updateSponsorBlockPanel(); return; }
+   if (home.serviceMenuOpen) {
+      static ButtonRepeat serviceValueRepeat;
+      if (home.serviceMenuEditing) {
+         if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_CIRCLE) ||
+             isPadButtonPressed(PAD_BTN_START)) {
+            home.serviceMenuEditing = 0;
+            serviceValueRepeat.timer = serviceValueRepeat.repeats = 0;
+            return;
+         }
+         static const int displayToSetting[10] = { 0, 2, 3, 4, 5, 1, 6, 7, 8, 9 };
+         int setting = displayToSetting[home.serviceMenuSelected];
+         int verticalAdjustment = (setting == 2 || setting == 3 || setting == 6 || setting == 7);
+         int delta = verticalAdjustment && isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_UP)) ? 1 :
+                     verticalAdjustment && isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_DOWN)) ? -1 :
+                     isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
+                     isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
+         if (delta) {
+            int rc;
+            if (setting == 0) rc = setOverscanPercent(getOverscanPercent() + delta);
+            else if (setting == 1) rc = setCropToFillOverscanPercent(getCropToFillOverscanPercent() + delta);
+            else { int crop = setting >= 6; int item = crop ? setting - 6 : setting - 2;
+               rc = setServiceAdjustment(crop, item, getServiceAdjustment(crop, item) + delta); }
+            if (rc != 0) { setLabelText(&playlistToastLabel, LOC(STR_COULD_NOT_SAVE_OVERSCAN)); playlistToastShownAt = getTimeUs(); }
+         }
+         return;
+      }
+      if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
+         home.serviceMenuOpen = 0;
+         return;
+      }
+      if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_DOWN)))
+         home.serviceMenuSelected = (home.serviceMenuSelected + 1) % 10;
+      else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
+         home.serviceMenuSelected = (home.serviceMenuSelected + 9) % 10;
+      if (isPadButtonPressed(PAD_BTN_CROSS)) {
+         home.serviceMenuEditing = 1;
+         serviceValueRepeat.timer = serviceValueRepeat.repeats = 0;
+      }
+      return;
+   }
    if (isPadButtonPressed(PAD_BTN_CIRCLE) || isPadButtonPressed(PAD_BTN_START)) {
       home.settingsOpen = 0;
       return;
@@ -2270,28 +2337,8 @@ static void updateSettingsPanel(void)
       home.settingsSelected = (home.settingsSelected + 1) % SETTINGS_ROW_COUNT;
    else if (isRepeatDue(&settingsNavigateRepeat, getPadButtonState(PAD_BTN_UP)))
       home.settingsSelected = (home.settingsSelected + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
-   int overscanDelta = 0;
    int screensaverDelta = 0;
-   if (home.settingsSelected == 3) {
-      if (settingsOverscanRepeat.timer == 0)
-         settingsOverscanRepeat.timer = sys_time_get_system_time();
-      if (isRepeatDue(&settingsOverscanRepeat, getPadButtonState(PAD_BTN_LEFT))) overscanDelta = -1;
-      else if (isRepeatDue(&settingsOverscanRepeat, getPadButtonState(PAD_BTN_RIGHT))) overscanDelta = 1;
-   } else {
-      settingsOverscanRepeat.timer = 0;
-      settingsOverscanRepeat.repeats = 0;
-   }
-   int cropOverscanDelta = 0;
-   if (home.settingsSelected == 4) {
-      if (settingsCropOverscanRepeat.timer == 0)
-         settingsCropOverscanRepeat.timer = sys_time_get_system_time();
-      if (isRepeatDue(&settingsCropOverscanRepeat, getPadButtonState(PAD_BTN_LEFT))) cropOverscanDelta = -1;
-      else if (isRepeatDue(&settingsCropOverscanRepeat, getPadButtonState(PAD_BTN_RIGHT))) cropOverscanDelta = 1;
-   } else {
-      settingsCropOverscanRepeat.timer = 0;
-      settingsCropOverscanRepeat.repeats = 0;
-   }
-   if (home.settingsSelected == 10) {
+   if (home.settingsSelected == 9) {
       if (settingsScreensaverRepeat.timer == 0)
          settingsScreensaverRepeat.timer = sys_time_get_system_time();
       if (isRepeatDue(&settingsScreensaverRepeat, getPadButtonState(PAD_BTN_LEFT))) screensaverDelta = -1;
@@ -2300,11 +2347,11 @@ static void updateSettingsPanel(void)
       settingsScreensaverRepeat.timer = 0;
       settingsScreensaverRepeat.repeats = 0;
    }
-   if (home.settingsSelected == 10 && isPadButtonPressed(PAD_BTN_CROSS))
+   if (home.settingsSelected == 9 && isPadButtonPressed(PAD_BTN_CROSS))
       screensaverDelta = 1;
 
    if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_LEFT) ||
-       isPadButtonPressed(PAD_BTN_RIGHT) || overscanDelta || cropOverscanDelta || screensaverDelta) {
+       isPadButtonPressed(PAD_BTN_RIGHT) || screensaverDelta) {
       if (home.settingsSelected == 0 || home.settingsSelected == 1) {
          int enabled = home.settingsSelected == 0 ? getAutoplayEnabled() : getEnable1080p60();
          if (isPadButtonPressed(PAD_BTN_LEFT)) enabled = 0;
@@ -2314,34 +2361,33 @@ static void updateSettingsPanel(void)
          else setEnable1080p60(enabled);
       } else if (home.settingsSelected == 2) {
          cycleSdScale();
-      } else if (home.settingsSelected == 3) {
-         if (overscanDelta)
-            setOverscanPercent(getOverscanPercent() + overscanDelta);
-      } else if (home.settingsSelected == 4) {
-         if (cropOverscanDelta)
-            setCropToFillOverscanPercent(getCropToFillOverscanPercent() + cropOverscanDelta);
-      } else if (home.settingsSelected == 5 && isPadButtonPressed(PAD_BTN_CROSS)) {
+      } else if (home.settingsSelected == 3 && isPadButtonPressed(PAD_BTN_CROSS)) {
+         home.serviceMenuOpen = 1;
+         home.serviceMenuSelected = 0;
+         home.serviceMenuEditing = 0;
+         settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
+      } else if (home.settingsSelected == 4 && isPadButtonPressed(PAD_BTN_CROSS)) {
          openRegionPicker();
-      } else if (home.settingsSelected == 6 && isPadButtonPressed(PAD_BTN_CROSS)) {
+      } else if (home.settingsSelected == 5 && isPadButtonPressed(PAD_BTN_CROSS)) {
          openAppLanguagePicker();
-      } else if (home.settingsSelected == 7 && isPadButtonPressed(PAD_BTN_CROSS)) {
+      } else if (home.settingsSelected == 6 && isPadButtonPressed(PAD_BTN_CROSS)) {
          openSponsorBlockPanel();
-      } else if (home.settingsSelected == 8 && isPadButtonPressed(PAD_BTN_CROSS)) {
+      } else if (home.settingsSelected == 7 && isPadButtonPressed(PAD_BTN_CROSS)) {
          home.downloadSettingsOpen = 1;
          home.downloadSettingsSelected = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
-      } else if (home.settingsSelected == 9 && isPadButtonPressed(PAD_BTN_CROSS)) {
+      } else if (home.settingsSelected == 8 && isPadButtonPressed(PAD_BTN_CROSS)) {
          home.themeOpen = 1;
          home.themeSelected = getActiveThemePreset();
          if (home.themeSelected < 0 || home.themeSelected >= THEME_ROW_COUNT) home.themeSelected = 0;
          home.themeCustomOpen = 0;
          home.themeConfirmOpen = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
-      } else if (home.settingsSelected == 11 && isPadButtonPressed(PAD_BTN_CROSS)) {
+      } else if (home.settingsSelected == 10 && isPadButtonPressed(PAD_BTN_CROSS)) {
          updateSettingsOpen = 1;
          updateSettingsSelected = 0;
          settingsNavigateRepeat.timer = settingsNavigateRepeat.repeats = 0;
-      } else if (home.settingsSelected == 10 && screensaverDelta) {
+      } else if (home.settingsSelected == 9 && screensaverDelta) {
          int timeout = getScreensaverTimeout();
          int option = timeout == 0 ? 0 : timeout / 30;
          option = (option + (screensaverDelta > 0 ? 1 : 10)) % 11;
@@ -2699,7 +2745,7 @@ static void drawSettingsPanel(void)
 {
    const char *settingNames[SETTINGS_ROW_COUNT] = {
       LOC(STR_AUTOPLAY), LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING),
-      LOC(STR_OVERSCAN), LOC(STR_OVERSCAN_CROP), LOC(STR_CONTENT_REGION), LOC(STR_APP_LANGUAGE),
+      "Service Menu", LOC(STR_CONTENT_REGION), LOC(STR_APP_LANGUAGE),
       LOC(STR_SPONSORBLOCK), LOC(STR_DOWNLOAD_SETTINGS), LOC(STR_THEMES),
       LOC(STR_SCREENSAVER_TIMEOUT), LOC(STR_UPDATES_ABOUT)
    };
@@ -2710,28 +2756,20 @@ static void drawSettingsPanel(void)
    // Avoid printf floating-point formatting here: the PS3 runtime may be built
    // without float printf support, which can leave only the trailing "x".
    const char *scaleValue = getGfxUiScaleFactor() >= 1.25f ? "1.5x" : "1.0x";
-   char overscanValue[16], cropOverscanValue[16];
-   int overscan = getOverscanPercent();
-   int cropOverscan = getCropToFillOverscanPercent();
-   if (overscan > 0) snprintf(overscanValue, sizeof overscanValue, "+%d%%", overscan);
-   else              snprintf(overscanValue, sizeof overscanValue, "%d%%", overscan);
-   if (cropOverscan > 0) snprintf(cropOverscanValue, sizeof cropOverscanValue, "+%d%%", cropOverscan);
-   else                  snprintf(cropOverscanValue, sizeof cropOverscanValue, "%d%%", cropOverscan);
    setLabelIfChanged(&settingsValues[2], scaleValue);
-   setLabelIfChanged(&settingsValues[3], overscanValue);
-   setLabelIfChanged(&settingsValues[4], cropOverscanValue);
+   setLabelIfChanged(&settingsValues[3], LOC(STR_CONFIGURE));
    const ContentRegion *region = getContentRegionAt(getContentRegionIndex());
-   setLabelIfChanged(&settingsValues[5], region ? region->name : getContentRegionCode());
-   setLabelIfChanged(&settingsValues[6], getAppLanguageName(getApplicationLanguage()));
+   setLabelIfChanged(&settingsValues[4], region ? region->name : getContentRegionCode());
+   setLabelIfChanged(&settingsValues[5], getAppLanguageName(getApplicationLanguage()));
+   setLabelIfChanged(&settingsValues[6], LOC(STR_CONFIGURE));
    setLabelIfChanged(&settingsValues[7], LOC(STR_CONFIGURE));
    setLabelIfChanged(&settingsValues[8], LOC(STR_CONFIGURE));
-   setLabelIfChanged(&settingsValues[9], LOC(STR_CONFIGURE));
    char screensaverValue[16];
    int screensaverSeconds = getScreensaverTimeout();
    if (screensaverSeconds == 0) strCopy(screensaverValue, sizeof screensaverValue, LOC(STR_OFF));
    else snprintf(screensaverValue, sizeof screensaverValue, "%ds", screensaverSeconds);
-   setLabelIfChanged(&settingsValues[10], screensaverValue);
-   setLabelIfChanged(&settingsValues[11], "");
+   setLabelIfChanged(&settingsValues[9], screensaverValue);
+   setLabelIfChanged(&settingsValues[10], "");
 
    int panelW = getSettingsPanelWidth(), panelH = getSettingsPanelHeight();
    int x = (home.screenW - panelW) / 2;
@@ -2749,14 +2787,14 @@ static void drawSettingsPanel(void)
       Label *name = &settingsLabels[i];
       int rowY = y + SETTINGS_ROW_TOP + i * SETTINGS_ROW_STEP;
       refreshLabelScale(name);
-      if (i == 11 && i == home.settingsSelected)
+      if ((i == 10 || i == 3) && i == home.settingsSelected)
          fillGfxRoundedRectangleFixed(x + 24, rowY - 2, panelW - 48,
                                  SETTINGS_ROW_HEIGHT + 4, 7, activeTheme->rowHighlight);
-      setLabelColor(name, (i == 11 && i == home.settingsSelected) ?
+      setLabelColor(name, ((i == 10 || i == 3) && i == home.settingsSelected) ?
                           activeTheme->accent : activeTheme->textPrimary);
       moveLabel(name, x + 40, getCenteredLabelY(name, rowY, SETTINGS_ROW_HEIGHT));
       drawLabel(name);
-      if (i == 11) continue;
+      if (i == 10) continue;
 
       if (i == 0 || i == 1) {
          // Both boolean settings use the same compact OFF/ON switch.
@@ -2800,6 +2838,197 @@ static void drawSettingsPanel(void)
    }
    settingsHints.y = y + panelH - 42;
    drawButtonHints(&settingsHints, home.screenW);
+}
+
+
+static void drawHomeServiceMenu(void)
+{
+   static const int displayToSetting[10] = { 0, 2, 3, 4, 5, 1, 6, 7, 8, 9 };
+   static const char *adjustmentNames[8] = {
+      "Vertical amp", "Vertical shift", "Horizontal amp", "Horizontal shift",
+      "Vertical amp", "Vertical shift", "Horizontal amp", "Horizontal shift"
+   };
+   const char *names[10];
+   char values[10][16];
+   int widest = 0, valueWidest = 0;
+
+   for (int i = 0; i < 10; i++) {
+      int setting = displayToSetting[i];
+      names[i] = setting == 0 ? LOC(STR_OVERSCAN) :
+         setting == 1 ? "Overscan" : adjustmentNames[setting - 2];
+      int value = setting == 0 ? getOverscanPercent() :
+         setting == 1 ? getCropToFillOverscanPercent() :
+         getServiceAdjustment(setting >= 6, setting >= 6 ? setting - 6 : setting - 2);
+      if (setting == 3 || setting == 5 || setting == 7 || setting == 9) {
+         int magnitude = value < 0 ? -value : value;
+         snprintf(values[i], sizeof values[i], "%s%d%s", value < 0 ? "-" : "+",
+                  magnitude / 2, magnitude % 2 ? ".5" : "");
+      } else {
+         snprintf(values[i], sizeof values[i], "%+d", value);
+      }
+      setLabelIfChanged(&homeServiceLabels[i], names[i]);
+      setLabelIfChanged(&homeServiceValues[i], values[i]);
+      refreshLabelScale(&homeServiceLabels[i]);
+      refreshLabelScale(&homeServiceValues[i]);
+      if (homeServiceLabels[i].tt.tex.w > widest) widest = homeServiceLabels[i].tt.tex.w;
+      if (homeServiceValues[i].tt.tex.w > valueWidest) valueWidest = homeServiceValues[i].tt.tex.w;
+   }
+
+   /* Keep the navigation window geometry identical to Playback Service Menu. */
+   int rowStep = 44;
+   int compactStep = (home.screenH - 220) / 12;
+   if (compactStep < rowStep) rowStep = compactStep;
+   if (rowStep < 24) rowStep = 24;
+   int sidePad = 40;
+   int valueGap = 24;
+   int panelW = widest + valueWidest + sidePad + valueGap + sidePad + 64;
+   int minW = 760;
+   int maxW = home.screenW - 48;
+   if (panelW < minW) panelW = minW;
+   if (panelW > maxW) panelW = maxW;
+   int panelH = 104 + 10 * rowStep + 137;
+   if (panelH > home.screenH - 24) panelH = home.screenH - 24;
+   int x = (home.screenW - panelW) / 2;
+   int y = (home.screenH - panelH) / 2;
+
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+   refreshLabelScale(&homeServiceTitle);
+   drawLabelAt(&homeServiceTitle,
+               home.screenW / 2 - homeServiceTitle.tt.tex.w / 2, y + 20);
+
+   int rowY = y + 64;
+   for (int i = 0; i < 10; i++) {
+      if (i == 5) {
+         refreshLabelScale(&homeServiceSectionLabel);
+         setLabelColor(&homeServiceSectionLabel, activeTheme->textSecondary);
+         drawLabelAt(&homeServiceSectionLabel, x + sidePad, rowY + 7);
+         rowY += 58;
+      }
+
+      Label *name = &homeServiceLabels[i];
+      Label *value = &homeServiceValues[i];
+      int nameY = getCenteredLabelY(name, rowY, rowStep);
+      int valueY = getCenteredLabelY(value, rowY, rowStep);
+      int valueX = x + sidePad + name->tt.tex.w + valueGap;
+
+      if (i == home.serviceMenuSelected)
+         fillGfxRoundedRectangleFixed(valueX - 8, valueY - 5,
+            value->tt.tex.w + 16, value->tt.tex.h + 10,
+            7, activeTheme->rowHighlight);
+      setLabelColor(name, i == home.serviceMenuSelected ? activeTheme->accent : activeTheme->textPrimary);
+      moveLabel(name, x + sidePad, nameY);
+      drawLabel(name);
+      setLabelColor(value, i == home.serviceMenuSelected ? activeTheme->accent : activeTheme->textPrimary);
+      moveLabel(value, valueX, valueY);
+      drawLabel(value);
+      rowY += rowStep;
+   }
+
+   setButtonHintCaption(&serviceMenuHints, 0, home.serviceMenuEditing ? LOC(STR_CHANGE) : LOC(STR_OPEN_SELECT));
+   setButtonHintCaption(&serviceMenuHints, 1, "");
+   setButtonHintCaption(&serviceMenuHints, 2, home.serviceMenuEditing ? LOC(STR_CHANGE) : "");
+   setButtonHintCaption(&serviceMenuHints, 3, LOC(STR_CLOSE));
+   serviceMenuHints.y = y + panelH - 50;
+
+   /* Keep only this window's hints inside its panel. Playback's service menu
+    * uses a centered single row; fit that same row to the navigation panel's
+    * inner width without changing any other navigation hint bars. */
+   serviceMenuHints.fitScale = 1.0f;
+   serviceMenuHints.renderedFitScale = 0.0f;
+   serviceMenuHints.renderedUiScale = 0.0f;
+   getButtonHintsFitRows(&serviceMenuHints, panelW - sidePad * 2, 1);
+
+   float uiScale = getGfxUiScaleFactor();
+   if (uiScale < 1.0f) uiScale = 1.0f;
+   float glyphScale = serviceMenuHints.fitScale;
+   if (isGfxSdVideoOutput()) glyphScale *= 1.5f / uiScale;
+   int hintsWidth = 0;
+   for (int i = 0; i < serviceMenuHints.count; i++) {
+      ButtonHint *hint = &serviceMenuHints.hints[i];
+      if (hint->hidden) continue;
+      hintsWidth += (int)(hint->drawWidth * glyphScale + 0.5f);
+      if (!hint->pairNext)
+         hintsWidth += (int)(8 * serviceMenuHints.fitScale + 0.5f) + hint->caption.tt.tex.w;
+      if (i < serviceMenuHints.count - 1)
+         hintsWidth += (int)((hint->pairNext ? 8 : 30) * serviceMenuHints.fitScale + 0.5f);
+   }
+   drawButtonHintsAt(&serviceMenuHints, x + (panelW - hintsWidth) / 2);
+}
+
+static void drawHomeServiceCalibrationOverlay(void)
+{
+   /* Calibration guides are drawn only while editing the navigation Service Menu.
+    * Dimensions are proportional to the virtual canvas height, so the guides keep
+    * the same physical proportions in both 4:3 and 16:9 modes. */
+   int thickness = (home.screenH * 8 + 174) / 348;
+   int corner = (home.screenH * 48 + 174) / 348;
+   if (thickness < 4) thickness = 4;
+   if (corner < thickness * 3) corner = thickness * 3;
+   if (corner > home.screenW / 3) corner = home.screenW / 3;
+
+   const uint32_t color = 0xFFFFFFFF;
+   int centerX = (home.screenW - thickness) / 2;
+   int centerY = (home.screenH - thickness) / 2;
+
+   /* Center crosshair: full-width and full-height, with transparent surroundings. */
+   fillGfxRectangleFixed(0, centerY, home.screenW, thickness, color);
+   fillGfxRectangleFixed(centerX, 0, thickness, home.screenH, color);
+
+   /* Equal-length L markers at all four application-window corners. */
+   fillGfxRectangleFixed(0, 0, corner, thickness, color);
+   fillGfxRectangleFixed(0, 0, thickness, corner, color);
+
+   fillGfxRectangleFixed(home.screenW - corner, 0, corner, thickness, color);
+   fillGfxRectangleFixed(home.screenW - thickness, 0, thickness, corner, color);
+
+   fillGfxRectangleFixed(0, home.screenH - thickness, corner, thickness, color);
+   fillGfxRectangleFixed(0, home.screenH - corner, thickness, corner, color);
+
+   fillGfxRectangleFixed(home.screenW - corner, home.screenH - thickness, corner, thickness, color);
+   fillGfxRectangleFixed(home.screenW - thickness, home.screenH - corner, thickness, corner, color);
+}
+
+static void formatHomeServiceValue(char *out, size_t outSize, int setting, int value)
+{
+   if (setting == 3 || setting == 5 || setting == 7 || setting == 9) {
+      int magnitude = value < 0 ? -value : value;
+      snprintf(out, outSize, "%s%d%s", value < 0 ? "-" : "+", magnitude / 2,
+               magnitude % 2 ? ".5" : "");
+   } else {
+      snprintf(out, outSize, "%+d", value);
+   }
+}
+
+static void drawHomeServiceEditHud(void)
+{
+   drawHomeServiceCalibrationOverlay();
+   static const int displayToSetting[10] = { 0, 2, 3, 4, 5, 1, 6, 7, 8, 9 };
+   static const char *adjustmentNames[8] = { "Vertical amp", "Vertical shift", "Horizontal amp", "Horizontal shift",
+      "Vertical amp", "Vertical shift", "Horizontal amp", "Horizontal shift" };
+   int setting = displayToSetting[home.serviceMenuSelected];
+   const char *name = setting == 0 ? LOC(STR_OVERSCAN) : setting == 1 ? LOC(STR_OVERSCAN_CROP) :
+      adjustmentNames[setting - 2];
+   int value = setting == 0 ? getOverscanPercent() : setting == 1 ? getCropToFillOverscanPercent() :
+      getServiceAdjustment(setting >= 6, setting >= 6 ? setting - 6 : setting - 2);
+   char text[96];
+   char formattedValue[16];
+   formatHomeServiceValue(formattedValue, sizeof formattedValue, setting, value);
+   snprintf(text, sizeof text, "%s: %s", name, formattedValue);
+   setLabelIfChanged(&serviceMenuEditLabel, text);
+   refreshLabelScale(&serviceMenuEditLabel);
+   int padX = 28, padY = 18;
+   int boxW = serviceMenuEditLabel.tt.tex.w + padX * 2;
+   int boxH = serviceMenuEditLabel.tt.tex.h + padY * 2;
+   int maxW = home.screenW - 24;
+   if (boxW > maxW) boxW = maxW;
+   int x = (home.screenW - boxW) / 2;
+   int y = home.screenH - boxH - 24 - serviceMenuEditLabel.tt.tex.h;
+   fillGfxRoundedRectangleFixed(x, y, boxW, boxH, 8, COLOR_BLACK);
+   int textX = x + (boxW - serviceMenuEditLabel.tt.tex.w) / 2;
+   if (textX < x + padX) textX = x + padX;
+   moveLabel(&serviceMenuEditLabel, textX, y + padY);
+   drawLabel(&serviceMenuEditLabel);
 }
 
 // Settings opened from Search is a real stacked overlay, not a pop to Home.
@@ -2869,7 +3098,10 @@ static void drawSearchSettingsOverlay(void)
       if (updateSettingsOpen) drawUpdateSettingsPanel();
       else if (home.themeOpen) drawThemePanel();
       else if (home.downloadSettingsOpen) drawDownloadSettingsPanel();
-      else {
+      else if (home.serviceMenuOpen) {
+         if (home.serviceMenuEditing) drawHomeServiceEditHud();
+         else drawHomeServiceMenu();
+      } else {
          drawSettingsPanel();
          if (home.regionOpen) drawRegionPicker();
          else if (home.sponsorblockOpen) drawSponsorBlockPanel();
@@ -3709,6 +3941,9 @@ static void initHome(void)
    initLabel(&panelCode,   &uiFont, 0, 0, accountTextW, AUTO, 56, activeTheme->textPrimary,   TEXT_NOWRAP, "");
    initLabel(&panelFooter, &uiFont, 0, 0, accountTextW, AUTO, 20, activeTheme->textSecondary, TEXT_NOWRAP_ELLIPSIS, "");
    initLabel(&settingsTitle, &uiFont, 0, 0, settingsTextW - 48, AUTO, 27, activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_SETTINGS));
+   initLabel(&serviceMenuEditLabel, &uiFont, 0, 0, home.screenW - 64, AUTO, 38,
+             activeTheme->textPrimary, TEXT_NOWRAP, "");
+   setLabelScaleWithUi(&serviceMenuEditLabel, 1);
    initLabel(&themeTitle, &uiFont, 0, 0, THEME_PANEL_W - 48, AUTO, 28,
              activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_THEMES));
    for (int i = 0; i < THEME_ROW_COUNT; i++) {
@@ -3773,7 +4008,7 @@ static void initHome(void)
    addButtonHint(&themeHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_BACK));
    const char *settingNames[SETTINGS_ROW_COUNT] = {
       LOC(STR_AUTOPLAY), LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING),
-      LOC(STR_OVERSCAN), LOC(STR_OVERSCAN_CROP), LOC(STR_CONTENT_REGION), LOC(STR_APP_LANGUAGE),
+      "Service Menu", LOC(STR_CONTENT_REGION), LOC(STR_APP_LANGUAGE),
       LOC(STR_SPONSORBLOCK), LOC(STR_DOWNLOAD_SETTINGS), LOC(STR_THEMES),
       LOC(STR_SCREENSAVER_TIMEOUT), LOC(STR_UPDATES_ABOUT)
    };
@@ -3785,6 +4020,20 @@ static void initHome(void)
                 activeTheme->textPrimary, TEXT_NOWRAP, "");
       setLabelScaleWithUi(&settingsLabels[i], 1);
       setLabelScaleWithUi(&settingsValues[i], 1);
+   }
+   initLabel(&homeServiceTitle, &uiFont, 0, 0, SETTINGS_PANEL_W - 48, AUTO, 27,
+             activeTheme->textPrimary, TEXT_NOWRAP, "Service Menu");
+   initLabel(&homeServiceSectionLabel, &uiFont, 0, 0, SETTINGS_PANEL_W - 80, AUTO, 30,
+             activeTheme->textSecondary, TEXT_NOWRAP, "Crop to fill");
+   setLabelScaleWithUi(&homeServiceTitle, 1);
+   setLabelScaleWithUi(&homeServiceSectionLabel, 1);
+   for (int i = 0; i < 10; i++) {
+      initLabel(&homeServiceLabels[i], &uiFont, 0, 0, SETTINGS_PANEL_W - 290, AUTO, 27,
+                activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
+      initLabel(&homeServiceValues[i], &uiFont, 0, 0, 210, AUTO, 27,
+                activeTheme->textPrimary, TEXT_NOWRAP, "");
+      setLabelScaleWithUi(&homeServiceLabels[i], 1);
+      setLabelScaleWithUi(&homeServiceValues[i], 1);
    }
    initLabel(&updatePanelTitle, &uiFont, 0, 0, UPDATE_PANEL_W - 48, AUTO, 24,
              activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_UPDATES_ABOUT));
@@ -3901,6 +4150,11 @@ static void initHome(void)
    addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_DPAD_LEFT), "");
    addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), LOC(STR_CHANGE));
    addButtonHint(&settingsHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_CLOSE));
+   initButtonHints(&serviceMenuHints, &uiFont, 0, 34, 19, activeTheme->textSecondary);
+   addButtonHint(&serviceMenuHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_OPEN_SELECT));
+   addButtonHint(&serviceMenuHints, getConsoleGlyph(GLYPH_DPAD_LEFT), "");
+   addButtonHint(&serviceMenuHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), LOC(STR_MOVE));
+   addButtonHint(&serviceMenuHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_CLOSE));
 
    initLabel(&exitConfirmTitle, &uiFont, 0, 0, EXIT_CONFIRM_PANEL_W - 48, AUTO, 28,
              activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_EXIT_CRTUBE));
@@ -5243,7 +5497,8 @@ static void drawHome(void)
    drawPlaylistShuffleBadge();
    if (home.category == HOME_DOWNLOADS) drawDownloadSpaceStatus();
    refreshHomeHintCaptions();
-   drawButtonHintsFitted(&hints, home.screenW, homeFooterBottomY, HINT_ROW_GAP, MAX_HINT_ROWS);
+   if (!home.serviceMenuOpen)
+      drawButtonHintsFitted(&hints, home.screenW, homeFooterBottomY, HINT_ROW_GAP, MAX_HINT_ROWS);
    if (!home.accountOpen && !home.settingsOpen && !home.exitConfirmOpen) drawSidebar();
    if (home.downloadPlaylistConfirmOpen) {
       int panelW = home.screenW * 90 / 100;
@@ -5265,7 +5520,10 @@ static void drawHome(void)
       if (updateSettingsOpen) drawUpdateSettingsPanel();
       else if (home.themeOpen) drawThemePanel();
       else if (home.downloadSettingsOpen) drawDownloadSettingsPanel();
-      else {
+      else if (home.serviceMenuOpen) {
+         if (home.serviceMenuEditing) drawHomeServiceEditHud();
+         else drawHomeServiceMenu();
+      } else {
          drawSettingsPanel();
          if (home.regionOpen) drawRegionPicker();
          else if (home.sponsorblockOpen) drawSponsorBlockPanel();
@@ -5459,6 +5717,13 @@ static void termHome(void)
    freeLabel(&panelCode);
    freeLabel(&panelFooter);
    freeLabel(&settingsTitle);
+   freeLabel(&serviceMenuEditLabel);
+   freeLabel(&homeServiceTitle);
+   freeLabel(&homeServiceSectionLabel);
+   for (int i = 0; i < 10; i++) {
+      freeLabel(&homeServiceLabels[i]);
+      freeLabel(&homeServiceValues[i]);
+   }
    freeLabel(&updatePanelTitle);
    for (int i = 0; i < 3; i++) freeLabel(&updatePanelInfo[i]);
    for (int i = 0; i < 6; i++) freeLabel(&updatePanelRows[i]);
@@ -5494,6 +5759,7 @@ static void termHome(void)
    freeLabel(&settingsAutoplayOptions[0]);
    freeLabel(&settingsAutoplayOptions[1]);
    termButtonHints(&settingsHints);
+   termButtonHints(&serviceMenuHints);
    freeLabel(&exitConfirmTitle);
    freeLabel(&exitConfirmMessage);
    freeLabel(&exitConfirmChoices[0]);

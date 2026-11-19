@@ -179,7 +179,8 @@ static Label optionsCurrentValueLabels[3]; // Quality, Audio, Subs language
 
 // Playback-owned settings panel. It deliberately shares the persisted settings APIs
 // with navigation, but owns its input state, labels, layout and SponsorBlock submenu.
-#define PLAYBACK_SETTINGS_COUNT 9
+#define PLAYBACK_SETTINGS_COUNT 8
+#define PLAYBACK_SERVICE_SETTINGS_COUNT 10
 #define PLAYBACK_SETTINGS_ROW_H 44
 #define PLAYBACK_SETTINGS_PANEL_W 760
 #define PLAYBACK_SETTINGS_PANEL_H 450
@@ -195,6 +196,7 @@ static Label optionsCurrentValueLabels[3]; // Quality, Audio, Subs language
 #define PLAYBACK_SPONSOR_OPTION_GAP 8
 #define PLAYBACK_SD_SCALE_PATH CRTUBE_DATA_DIR "/sd-ui-scale.txt"
 static int playbackSettingsOpen, playbackSettingsSelected;
+static int playbackServiceOpen, playbackServiceSelected, playbackServiceEditing;
 static int playbackAutoTranslateOpen, playbackAutoTranslateSelected;
 static int autoTranslateRefreshPending;
 static ButtonRepeat playbackAutoTranslateRepeat;
@@ -206,6 +208,8 @@ static int playbackSponsorOpen, playbackSponsorSelected;
 static ButtonRepeat playbackSettingsRepeat, playbackSponsorRepeat, playbackSubtitleOffsetRepeat;
 static ButtonRepeat playbackOverscanRepeat, playbackOsdTimeoutRepeat;
 static Label playbackSettingsTitle, playbackSettingsLabels[PLAYBACK_SETTINGS_COUNT];
+static Label playbackServiceTitle, playbackServiceLabels[PLAYBACK_SERVICE_SETTINGS_COUNT], playbackServiceValues[PLAYBACK_SERVICE_SETTINGS_COUNT];
+static Label playbackServiceEditLabel, playbackServiceSectionLabel;
 static Label playbackSettingsValues[PLAYBACK_SETTINGS_COUNT];
 static Label playbackSettingsToggleLabels[2];
 static Label playbackSponsorTitle, playbackSponsorCategoryLabels[SPONSOR_CATEGORY_COUNT];
@@ -554,7 +558,7 @@ static Label timeLeftLabel, timeRightLabel;   // seek bar: current time (left) /
 static Label liveBadgeLabel, backToLabel;
 static int liveBadgeLanguage = -1;
 static Label liveFailureTitleLabel, liveFailureBodyLabel;
-static ButtonHints liveFailureHints, playbackHints;
+static ButtonHints liveFailureHints, playbackHints, playbackServiceHints;
 static Label toastLabel;                      // brief centred toast ("Skipped ...", "Subtitles: ...")
 static Label askPromptPrefixLabel, askPromptSuffixLabel;
 static Label titleLabel;                      // video title, top-left while the HUD is visible
@@ -2454,6 +2458,13 @@ static void applyPlaybackUiLabelScale(float scale)
       SCALE_PLAYBACK_LABEL(playbackSettingsLabels[i]);
       SCALE_PLAYBACK_LABEL(playbackSettingsValues[i]);
    }
+   SCALE_PLAYBACK_LABEL(playbackServiceTitle);
+   SCALE_PLAYBACK_LABEL(playbackServiceEditLabel);
+   SCALE_PLAYBACK_LABEL(playbackServiceSectionLabel);
+   for (int i = 0; i < PLAYBACK_SERVICE_SETTINGS_COUNT; i++) {
+      SCALE_PLAYBACK_LABEL(playbackServiceLabels[i]);
+      SCALE_PLAYBACK_LABEL(playbackServiceValues[i]);
+   }
    for (int i = 0; i < 2; i++) SCALE_PLAYBACK_LABEL(playbackSettingsToggleLabels[i]);
    SCALE_PLAYBACK_LABEL(playbackSponsorTitle);
    for (int i = 0; i < SPONSOR_CATEGORY_COUNT; i++) SCALE_PLAYBACK_LABEL(playbackSponsorCategoryLabels[i]);
@@ -2514,6 +2525,11 @@ static void initPlay(void)
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_HIDE_OSD));
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_START), LOC(STR_OPTIONS));
    addButtonHint(&playbackHints, getConsoleGlyph(GLYPH_SELECT), LOC(STR_DESCRIPTION));
+   initButtonHints(&playbackServiceHints, &uiFont, 0, 34, 19, activeTheme->textSecondary);
+   addButtonHint(&playbackServiceHints, getConsoleGlyph(GLYPH_CROSS), LOC(STR_OPEN_SELECT));
+   addButtonHint(&playbackServiceHints, getConsoleGlyph(GLYPH_DPAD_LEFT), "");
+   addButtonHint(&playbackServiceHints, getConsoleGlyph(GLYPH_DPAD_RIGHT), LOC(STR_MOVE));
+   addButtonHint(&playbackServiceHints, getConsoleGlyph(GLYPH_CIRCLE), LOC(STR_CLOSE));
    initLabelRaw(&toastLabel, &uiFont, 0, 0, state.screenW / 2 - 80, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_WRAP, "");   // raw: shows track names
    initLabelRaw(&askPromptPrefixLabel, &uiFont, 0, 0, 180, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_PRESS));
    initLabelRaw(&askPromptSuffixLabel, &uiFont, 0, 0, 260, AUTO, playbackFontSize(22), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_TO_SKIP_SPONSOR));
@@ -2544,21 +2560,33 @@ static void initPlay(void)
    initLabelRaw(&optionsCurrentValueLabels[2], &uiFont, 0, 0, 400, AUTO,
                 playbackFontSize(27), activeTheme->textSecondary, TEXT_NOWRAP, "");
 
-   playbackSettingsOpen = playbackSponsorOpen = playbackSubtitleStyleOpen = playbackAutoTranslateOpen = 0;
+   playbackSettingsOpen = playbackSponsorOpen = playbackSubtitleStyleOpen = playbackAutoTranslateOpen = playbackServiceOpen = playbackServiceEditing = 0;
    playbackSettingsSelected = playbackSponsorSelected = playbackAutoTranslateSelected = 0;
    autoTranslateRefreshPending = 0;
    initLabelRaw(&playbackSettingsTitle, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 48, AUTO,
                 playbackFontSize(24), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_PLAYBACK_SETTINGS));
    const char *playbackSettingNames[PLAYBACK_SETTINGS_COUNT] = {
-      LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING), LOC(STR_OVERSCAN), LOC(STR_OVERSCAN_CROP),
+      LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING), "Service Menu",
       LOC(STR_SUBTITLE_STYLE), LOC(STR_SUBTITLE_OFFSET), LOC(STR_AUTO_TRANSLATE_SUBTITLES), LOC(STR_SPONSORBLOCK), LOC(STR_OSD_TIMEOUT)
    };
    for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
       initLabelRaw(&playbackSettingsLabels[i], &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 290, AUTO,
-                   playbackFontSize(20), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS,
+                   playbackFontSize(27), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS,
                    playbackSettingNames[i]);
       initLabelRaw(&playbackSettingsValues[i], &uiFont, 0, 0, 210, AUTO,
-                   playbackFontSize(20), activeTheme->textPrimary, TEXT_NOWRAP, "");
+                   playbackFontSize(27), activeTheme->textPrimary, TEXT_NOWRAP, "");
+   }
+   initLabelRaw(&playbackServiceTitle, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 48, AUTO,
+                playbackFontSize(27), activeTheme->textPrimary, TEXT_NOWRAP, "Service Menu");
+   initLabelRaw(&playbackServiceEditLabel, &uiFont, 0, 0, state.screenW - 64, AUTO,
+                playbackFontSize(38), activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabelRaw(&playbackServiceSectionLabel, &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 80, AUTO,
+                playbackFontSize(30), activeTheme->textSecondary, TEXT_NOWRAP, "");
+   for (int i = 0; i < PLAYBACK_SERVICE_SETTINGS_COUNT; i++) {
+      initLabelRaw(&playbackServiceLabels[i], &uiFont, 0, 0, PLAYBACK_SETTINGS_PANEL_W - 290, AUTO,
+                   playbackFontSize(27), activeTheme->textPrimary, TEXT_NOWRAP_ELLIPSIS, "");
+      initLabelRaw(&playbackServiceValues[i], &uiFont, 0, 0, 210, AUTO,
+                   playbackFontSize(27), activeTheme->textPrimary, TEXT_NOWRAP, "");
    }
    initLabelRaw(&playbackSettingsToggleLabels[0], &uiFont, 0, 0, 60, AUTO,
                 playbackFontSize(18), activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_OFF_UPPER));
@@ -4373,6 +4401,7 @@ static void openPlaybackSettings(void)
 {
    playbackSettingsOpen = 1;
    playbackSponsorOpen = 0;
+   playbackServiceOpen = 0;
    playbackSubtitleStyleOpen = 0;
    playbackAutoTranslateOpen = 0;
    playbackSettingsSelected = 0;
@@ -4444,22 +4473,113 @@ static void updatePlaybackSubtitleStyle(void)
    }
 }
 
+static int isPlaybackServiceRepeatDue(ButtonRepeat *repeat, PadButtonState state)
+{
+   if (state == PAD_BUTTON_STATE_PRESSED) {
+      repeat->timer = sys_time_get_system_time(); repeat->repeats = 0; return 1;
+   }
+   if (state == PAD_BUTTON_STATE_HELD) {
+      uint64_t now = sys_time_get_system_time();
+      uint64_t delay = repeat->repeats == 0 ? 500000 : 140000;
+      if (now - repeat->timer >= delay) { repeat->timer = now; repeat->repeats++; return 1; }
+   }
+   return 0;
+}
+
+static int playbackServiceDisplayToSetting(int selected)
+{
+   static const int map[PLAYBACK_SERVICE_SETTINGS_COUNT] = { 0, 2, 3, 4, 5, 1, 6, 7, 8, 9 };
+   return map[selected];
+}
+
+static const char *playbackServiceAdjustmentNames[8] = {
+   "Vertical amp", "Vertical shift", "Horizontal amp", "Horizontal shift",
+   "Vertical amp", "Vertical shift", "Horizontal amp", "Horizontal shift"
+};
+
+static void formatPlaybackServiceValue(char *out, size_t outSize, int selected, int value)
+{
+   int setting = playbackServiceDisplayToSetting(selected);
+   if (setting == 3 || setting == 5 || setting == 7 || setting == 9) {
+      int magnitude = value < 0 ? -value : value;
+      snprintf(out, outSize, "%s%d%s", value < 0 ? "-" : "+", magnitude / 2,
+               magnitude % 2 ? ".5" : "");
+   } else {
+      snprintf(out, outSize, "%+d", value);
+   }
+}
+
+static int getPlaybackServiceValue(int selected)
+{
+   selected = playbackServiceDisplayToSetting(selected);
+   if (selected == 0) return getOverscanPercent();
+   if (selected == 1) return getCropToFillOverscanPercent();
+   return getServiceAdjustment(selected >= 6, selected >= 6 ? selected - 6 : selected - 2);
+}
+
+static int setPlaybackServiceValue(int selected, int value)
+{
+   selected = playbackServiceDisplayToSetting(selected);
+   if (selected == 0) return setOverscanPercent(value);
+   if (selected == 1) return setCropToFillOverscanPercent(value);
+   return setServiceAdjustment(selected >= 6, selected >= 6 ? selected - 6 : selected - 2, value);
+}
+
+static const char *getPlaybackServiceName(int selected)
+{
+   selected = playbackServiceDisplayToSetting(selected);
+   if (selected == 0) return LOC(STR_OVERSCAN);
+   if (selected == 1) return "Overscan";
+   return playbackServiceAdjustmentNames[selected - 2];
+}
+
 static void updatePlaybackSettings(void)
 {
    if (playbackSubtitleStyleOpen) { updatePlaybackSubtitleStyle(); return; }
    if (playbackAutoTranslateOpen) { updatePlaybackAutoTranslateSettings(); return; }
    if (playbackSponsorOpen) { updatePlaybackSponsorSettings(); return; }
+   if (playbackServiceOpen) {
+      if (playbackServiceEditing) {
+         if (isPadButtonPressed(PAD_BTN_CROSS) || isPadButtonPressed(PAD_BTN_CIRCLE)) {
+            playbackServiceEditing = 0;
+            playbackOverscanRepeat.timer = playbackOverscanRepeat.repeats = 0;
+            return;
+         }
+         int selectedSetting = playbackServiceDisplayToSetting(playbackServiceSelected);
+         int verticalAdjustment = (selectedSetting == 2 || selectedSetting == 3 ||
+                                   selectedSetting == 6 || selectedSetting == 7);
+         int delta = verticalAdjustment && isPlaybackServiceRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_UP)) ? 1 :
+                     verticalAdjustment && isPlaybackServiceRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_DOWN)) ? -1 :
+                     isPlaybackServiceRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
+                     isPlaybackServiceRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
+         if (delta) {
+            if (setPlaybackServiceValue(playbackServiceSelected, getPlaybackServiceValue(playbackServiceSelected) + delta) != 0)
+               showToast(LOC(STR_COULD_NOT_SAVE_OVERSCAN));
+         }
+         return;
+      }
+      if (isPadButtonPressed(PAD_BTN_CIRCLE)) { playbackServiceOpen = 0; return; }
+      if (isRepeatDue(&playbackSettingsRepeat, getPadButtonState(PAD_BTN_DOWN)))
+         playbackServiceSelected = (playbackServiceSelected + 1) % PLAYBACK_SERVICE_SETTINGS_COUNT;
+      else if (isRepeatDue(&playbackSettingsRepeat, getPadButtonState(PAD_BTN_UP)))
+         playbackServiceSelected = (playbackServiceSelected + PLAYBACK_SERVICE_SETTINGS_COUNT - 1) % PLAYBACK_SERVICE_SETTINGS_COUNT;
+      if (isPadButtonPressed(PAD_BTN_CROSS)) {
+         playbackServiceEditing = 1;
+         playbackOverscanRepeat.timer = playbackOverscanRepeat.repeats = 0;
+      }
+      return;
+   }
    if (isPadButtonPressed(PAD_BTN_CIRCLE)) { playbackSettingsOpen = 0; return; }
    if (isRepeatDue(&playbackSettingsRepeat, getPadButtonState(PAD_BTN_DOWN)))
       playbackSettingsSelected = (playbackSettingsSelected + 1) % PLAYBACK_SETTINGS_COUNT;
    else if (isRepeatDue(&playbackSettingsRepeat, getPadButtonState(PAD_BTN_UP)))
       playbackSettingsSelected = (playbackSettingsSelected + PLAYBACK_SETTINGS_COUNT - 1) % PLAYBACK_SETTINGS_COUNT;
 
-   if (playbackSettingsSelected != 2 && playbackSettingsSelected != 3) {
+   if (playbackSettingsSelected != 2) {
       playbackOverscanRepeat.timer = 0;
       playbackOverscanRepeat.repeats = 0;
    }
-   if (playbackSettingsSelected != 8) {
+   if (playbackSettingsSelected != 7) {
       playbackOsdTimeoutRepeat.timer = 0;
       playbackOsdTimeoutRepeat.repeats = 0;
    }
@@ -4468,11 +4588,10 @@ static void updatePlaybackSettings(void)
    int cross = isPadButtonPressed(PAD_BTN_CROSS);
 
    // Cross is not an adjustment control for these numeric/display settings.
-   if (playbackSettingsSelected == 2 || playbackSettingsSelected == 3 ||
-       playbackSettingsSelected == 5 || playbackSettingsSelected == 8)
+   if (playbackSettingsSelected == 4 || playbackSettingsSelected == 7)
       cross = 0;
 
-   if (playbackSettingsSelected == 5) {
+   if (playbackSettingsSelected == 4) {
       int offsetDelta = isRepeatDue(&playbackSubtitleOffsetRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
                         isRepeatDue(&playbackSubtitleOffsetRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
       if (offsetDelta) {
@@ -4482,7 +4601,7 @@ static void updatePlaybackSettings(void)
       return;
    }
 
-   if (playbackSettingsSelected == 8) {
+   if (playbackSettingsSelected == 7) {
       static const int timeouts[] = { 2, 3, 5, 10, 15, 30, 60 };
       int current = getOsdTimeout(), selected = 0;
       for (int i = 0; i < 7; i++) if (timeouts[i] == current) selected = i;
@@ -4508,28 +4627,17 @@ static void updatePlaybackSettings(void)
    } else if (playbackSettingsSelected == 1) {
       float current = playbackFontScale;
       setPlaybackUiScale(current >= 1.25f ? 1.0f : 1.5f);
-   } else if (playbackSettingsSelected == 2) {
-      int overscanDelta = isRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
-                          isRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
-      if (overscanDelta) {
-         int overscan = getOverscanPercent() + overscanDelta;
-         if (setOverscanPercent(overscan) != 0) showToast(LOC(STR_COULD_NOT_SAVE_OVERSCAN));
-      }
-   } else if (playbackSettingsSelected == 3) {
-      int cropOverscanDelta = isRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
-                              isRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
-      if (cropOverscanDelta) {
-         int cropOverscan = getCropToFillOverscanPercent() + cropOverscanDelta;
-         if (setCropToFillOverscanPercent(cropOverscan) != 0)
-            showToast(LOC(STR_COULD_NOT_SAVE_CROP_OVERSCAN));
-      }
-   } else if (playbackSettingsSelected == 4 && (cross || right)) {
+   } else if (playbackSettingsSelected == 2 && (cross || right)) {
+      playbackServiceOpen = 1;
+      playbackServiceSelected = 0;
+      playbackOverscanRepeat.timer = playbackOverscanRepeat.repeats = 0;
+   } else if (playbackSettingsSelected == 3 && (cross || right)) {
       playbackSubtitleStyleOpen = 1;
       playbackSubtitleStyleSelected = 0;
       playbackSubtitleStyleRepeat.timer = playbackSubtitleStyleRepeat.repeats = 0;
-   } else if (playbackSettingsSelected == 6 && (cross || right)) {
+   } else if (playbackSettingsSelected == 5 && (cross || right)) {
       openPlaybackAutoTranslateSettings();
-   } else if (playbackSettingsSelected == 7 && (cross || right)) {
+   } else if (playbackSettingsSelected == 6 && (cross || right)) {
       openPlaybackSponsorSettings();
    }
 }
@@ -4705,15 +4813,29 @@ static int playbackSettingsPanelWidth(void)
    // language change, so measuring their cached textures can underestimate
    // the width required by Portuguese.
    const char *localizedSettingsNames[PLAYBACK_SETTINGS_COUNT] = {
-      LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING), LOC(STR_OVERSCAN), LOC(STR_OVERSCAN_CROP),
+      LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING), "Service Menu",
       LOC(STR_SUBTITLE_STYLE), LOC(STR_SUBTITLE_OFFSET), LOC(STR_AUTO_TRANSLATE_SUBTITLES),
       LOC(STR_SPONSORBLOCK), LOC(STR_OSD_TIMEOUT)
    };
-   int widest = 0;
+   static int cachedScreenW, cachedRenderSize, cachedWidest = -1;
+   static char cachedNames[PLAYBACK_SETTINGS_COUNT][96];
    int renderSize = (int)(playbackFontSize(20) * playbackFontScale + 0.5f);
-   for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
-      int measured = (int)(measureFontText(&uiFont, renderSize, localizedSettingsNames[i]) + 0.5f);
-      if (measured > widest) widest = measured;
+   int cacheValid = cachedWidest >= 0 && cachedScreenW == state.screenW &&
+                    cachedRenderSize == renderSize;
+   for (int i = 0; i < PLAYBACK_SETTINGS_COUNT && cacheValid; i++)
+      if (strncmp(cachedNames[i], localizedSettingsNames[i], sizeof cachedNames[i]) != 0)
+         cacheValid = 0;
+   int widest = cachedWidest;
+   if (!cacheValid) {
+      widest = 0;
+      for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
+         int measured = (int)(measureFontText(&uiFont, renderSize, localizedSettingsNames[i]) + 0.5f);
+         if (measured > widest) widest = measured;
+         strCopy(cachedNames[i], sizeof cachedNames[i], localizedSettingsNames[i]);
+      }
+      cachedScreenW = state.screenW;
+      cachedRenderSize = renderSize;
+      cachedWidest = widest;
    }
 
    // Keep the right-hand value/control column and both horizontal margins.
@@ -4740,7 +4862,7 @@ static void drawPlaybackSettings(void)
    int settingsLabelWidth = panelW - 40 - 250 - 56;
    if (settingsLabelWidth < 120) settingsLabelWidth = 120;
    const char *localizedSettingsNames[PLAYBACK_SETTINGS_COUNT] = {
-      LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING), LOC(STR_OVERSCAN), LOC(STR_OVERSCAN_CROP),
+      LOC(STR_ENABLE_1080P60), LOC(STR_UI_SCALING), "Service Menu",
       LOC(STR_SUBTITLE_STYLE), LOC(STR_SUBTITLE_OFFSET), LOC(STR_AUTO_TRANSLATE_SUBTITLES), LOC(STR_SPONSORBLOCK), LOC(STR_OSD_TIMEOUT)
    };
    for (int i = 0; i < PLAYBACK_SETTINGS_COUNT; i++) {
@@ -4748,31 +4870,22 @@ static void drawPlaybackSettings(void)
          playbackSettingsLabels[i].width = settingsLabelWidth;
       setLabelText(&playbackSettingsLabels[i], localizedSettingsNames[i]);
    }
-   fillGfxRectangleFixed(0, 0, state.screenW, state.screenH, 0x78000000);
    fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
    refreshLabelScale(&playbackSettingsTitle);
    drawLabelAt(&playbackSettingsTitle,
                state.screenW / 2 - playbackSettingsTitle.tt.tex.w / 2, y + 28);
 
-   char overscanValue[16], cropOverscanValue[16];
-   int overscan = getOverscanPercent();
-   int cropOverscan = getCropToFillOverscanPercent();
-   if (overscan > 0) snprintf(overscanValue, sizeof overscanValue, "+%d%%", overscan);
-   else snprintf(overscanValue, sizeof overscanValue, "%d%%", overscan);
-   if (cropOverscan > 0) snprintf(cropOverscanValue, sizeof cropOverscanValue, "+%d%%", cropOverscan);
-   else snprintf(cropOverscanValue, sizeof cropOverscanValue, "%d%%", cropOverscan);
    static const char *const playbackScaleNames[] = { "1.0x", "1.5x" };
    const char *scaleValue = playbackScaleNames[playbackFontScale >= 1.25f ? 1 : 0];
    if (strcmp(playbackSettingsValues[1].text, scaleValue) != 0)
       setLabelText(&playbackSettingsValues[1], scaleValue);
-   setLabelText(&playbackSettingsValues[2], overscanValue);
-   setLabelText(&playbackSettingsValues[3], cropOverscanValue);
    char subtitleOffsetValue[16];
    int subtitleOffset = getSubtitleOffset();
    snprintf(subtitleOffsetValue, sizeof subtitleOffsetValue, "%d", subtitleOffset);
-   setLabelText(&playbackSettingsValues[4], LOC(STR_CONFIGURE));
-   setLabelText(&playbackSettingsValues[5], subtitleOffsetValue);
+   setLabelText(&playbackSettingsValues[2], LOC(STR_CONFIGURE));
+   setLabelText(&playbackSettingsValues[3], LOC(STR_CONFIGURE));
+   setLabelText(&playbackSettingsValues[4], subtitleOffsetValue);
    const char *autoPreference = getAutoTranslateLanguagePreference();
    char autoTranslateValue[64];
    if (strcmp(autoPreference, "off") == 0) {
@@ -4784,11 +4897,11 @@ static void drawPlaybackSettings(void)
       const char *languageName = getAutoTranslateLanguageName(autoPreference);
       strCopy(autoTranslateValue, sizeof autoTranslateValue, languageName ? languageName : autoPreference);
    }
-   setLabelText(&playbackSettingsValues[6], autoTranslateValue);
-   setLabelText(&playbackSettingsValues[7], LOC(STR_CONFIGURE));
+   setLabelText(&playbackSettingsValues[5], autoTranslateValue);
+   setLabelText(&playbackSettingsValues[6], LOC(STR_CONFIGURE));
    char osdTimeoutValue[16];
    snprintf(osdTimeoutValue, sizeof osdTimeoutValue, "%ds", getOsdTimeout());
-   setLabelText(&playbackSettingsValues[8], osdTimeoutValue);
+   setLabelText(&playbackSettingsValues[7], osdTimeoutValue);
 
    int toggleW = 132;
    int toggleX = x + panelW - 40 - toggleW;
@@ -4824,7 +4937,7 @@ static void drawPlaybackSettings(void)
          }
       } else {
          Label *value = &playbackSettingsValues[i];
-         if (i == 6) {
+         if (i == 5) {
             int labelRight = x + 40 + playbackSettingsLabels[i].tt.tex.w;
             int valueRight = x + panelW - 52;
             int available = valueRight - labelRight - 24;
@@ -4838,7 +4951,7 @@ static void drawPlaybackSettings(void)
          int valueW = value->tt.tex.w + 24;
          if (valueW < 100) valueW = 100;
          int valueX = x + panelW - 40 - valueW;
-         if (i == 6) {
+         if (i == 5) {
             int labelRight = x + 40 + playbackSettingsLabels[i].tt.tex.w;
             int minX = labelRight + 24;
             if (valueX < minX) valueX = minX;
@@ -4850,7 +4963,7 @@ static void drawPlaybackSettings(void)
          setLabelColor(value, i == playbackSettingsSelected ? activeTheme->accent : activeTheme->textPrimary);
          moveLabel(value, valueX + (valueW - value->tt.tex.w) / 2, valueY);
          drawLabel(value);
-         if (i == 4 || i == 6 || i == 7) {
+         if (i == 2 || i == 3 || i == 5 || i == 6) {
             int tx = x + panelW - 24;
             int ty = rowY + PLAYBACK_SETTINGS_ROW_H / 2;
             drawGfxTriangle(tx - 7, ty - 4, activeTheme->textSecondary,
@@ -4859,6 +4972,92 @@ static void drawPlaybackSettings(void)
          }
       }
    }
+}
+
+
+static void drawPlaybackServiceEditHud(void)
+{
+   const char *name = getPlaybackServiceName(playbackServiceSelected);
+   int value = getPlaybackServiceValue(playbackServiceSelected);
+   char text[96];
+   char formattedValue[16];
+   formatPlaybackServiceValue(formattedValue, sizeof formattedValue, playbackServiceSelected, value);
+   snprintf(text, sizeof text, "%s: %s", name, formattedValue);
+   setLabelText(&playbackServiceEditLabel, text);
+   refreshLabelScale(&playbackServiceEditLabel);
+   int padX = 28, padY = 18;
+   int boxW = playbackServiceEditLabel.tt.tex.w + padX * 2;
+   int boxH = playbackServiceEditLabel.tt.tex.h + padY * 2;
+   if (boxW > state.screenW - 24) boxW = state.screenW - 24;
+   int x = (state.screenW - boxW) / 2;
+   int y = state.screenH - boxH - 24 - playbackServiceEditLabel.tt.tex.h;
+   fillGfxRoundedRectangleFixed(x, y, boxW, boxH, 8, COLOR_BLACK);
+   int textX = x + (boxW - playbackServiceEditLabel.tt.tex.w) / 2;
+   drawLabelAt(&playbackServiceEditLabel, textX, y + padY);
+}
+
+static void drawPlaybackServiceSettings(void)
+{
+   const char *names[PLAYBACK_SERVICE_SETTINGS_COUNT];
+   char values[PLAYBACK_SERVICE_SETTINGS_COUNT][16];
+   int widest = 0;
+   int renderSize = (int)(playbackFontSize(20) * playbackFontScale + 0.5f);
+   for (int i = 0; i < PLAYBACK_SERVICE_SETTINGS_COUNT; i++) {
+      names[i] = getPlaybackServiceName(i);
+      formatPlaybackServiceValue(values[i], sizeof values[i], i, getPlaybackServiceValue(i));
+      int measured = (int)(measureFontText(&uiFont, renderSize, names[i]) + 0.5f);
+      if (measured > widest) widest = measured;
+   }
+   int valueWidest = 0;
+   for (int i = 0; i < PLAYBACK_SERVICE_SETTINGS_COUNT; i++) {
+      int measured = (int)(measureFontText(&uiFont, renderSize, values[i]) + 0.5f);
+      if (measured > valueWidest) valueWidest = measured;
+   }
+   int panelW = widest + valueWidest + 40 + 24 + 40 + 64;
+   if (panelW < PLAYBACK_SETTINGS_PANEL_W) panelW = PLAYBACK_SETTINGS_PANEL_W;
+   if (panelW > state.screenW - 48) panelW = state.screenW - 48;
+   int rowStep = PLAYBACK_SETTINGS_ROW_H;
+   int compactStep = (state.screenH - 220) / 12;
+   if (compactStep < rowStep) rowStep = compactStep;
+   if (rowStep < 24) rowStep = 24;
+   int panelH = 104 + PLAYBACK_SERVICE_SETTINGS_COUNT * rowStep + 137;
+   if (panelH > state.screenH - 24) panelH = state.screenH - 24;
+   int x = (state.screenW - panelW) / 2, y = (state.screenH - panelH) / 2;
+   fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
+   fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
+   refreshLabelScale(&playbackServiceTitle);
+   drawLabelAt(&playbackServiceTitle, state.screenW / 2 - playbackServiceTitle.tt.tex.w / 2, y + 20);
+   int rowY = y + 64;
+   for (int i = 0; i < PLAYBACK_SERVICE_SETTINGS_COUNT; i++) {
+      if (i == 5) {
+         const char *section = "Crop to fill";
+         setLabelText(&playbackServiceSectionLabel, section);
+         refreshLabelScale(&playbackServiceSectionLabel);
+         setLabelColor(&playbackServiceSectionLabel, activeTheme->textSecondary);
+         drawLabelAt(&playbackServiceSectionLabel, x + 40, rowY + 7);
+         rowY += 58;
+      }
+      Label *name = &playbackServiceLabels[i], *value = &playbackServiceValues[i];
+      setLabelText(name, names[i]);
+      setLabelText(value, values[i]);
+      refreshLabelScale(name); refreshLabelScale(value);
+      moveLabel(name, x + 40, getCenteredLabelY(name, rowY, PLAYBACK_SETTINGS_ROW_H));
+      drawLabel(name);
+      int valueX = x + 40 + name->tt.tex.w + 24;
+      int valueY = getCenteredLabelY(value, rowY, PLAYBACK_SETTINGS_ROW_H);
+      if (i == playbackServiceSelected)
+         fillGfxRoundedRectangleFixed(valueX - 8, valueY - 5, value->tt.tex.w + 16, value->tt.tex.h + 10, 7, activeTheme->rowHighlight);
+      setLabelColor(value, i == playbackServiceSelected ? activeTheme->accent : activeTheme->textPrimary);
+      moveLabel(value, valueX, valueY);
+      drawLabel(value);
+      rowY += rowStep;
+   }
+   setButtonHintCaption(&playbackServiceHints, 0, playbackServiceEditing ? LOC(STR_CHANGE) : LOC(STR_OPEN_SELECT));
+   setButtonHintCaption(&playbackServiceHints, 1, "");
+   setButtonHintCaption(&playbackServiceHints, 2, playbackServiceEditing ? LOC(STR_CHANGE) : "");
+   setButtonHintCaption(&playbackServiceHints, 3, LOC(STR_CLOSE));
+   playbackServiceHints.y = y + panelH - 50;
+   drawButtonHints(&playbackServiceHints, state.screenW);
 }
 
 static void drawPlaybackAutoTranslateSettings(void)
@@ -4874,7 +5073,6 @@ static void drawPlaybackAutoTranslateSettings(void)
    if (first < 0) first = 0;
    if (first + visible > count) first = count - visible;
 
-   fillGfxRectangleFixed(0, 0, state.screenW, state.screenH, 0x78000000);
    fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
    refreshLabelScale(&playbackAutoTranslateTitle);
@@ -4951,7 +5149,6 @@ static void drawPlaybackSubtitleStyle(void)
    int panelW = playbackSettingsPanelWidth(), panelH = PLAYBACK_SUBTITLE_STYLE_PANEL_H;
    if (panelH > state.screenH - 48) panelH = state.screenH - 48;
    int x = (state.screenW - panelW) / 2, y = (state.screenH - panelH) / 2;
-   fillGfxRectangleFixed(0, 0, state.screenW, state.screenH, 0x78000000);
    fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
    refreshLabelScale(&playbackSubtitleStyleTitle);
@@ -4993,7 +5190,6 @@ static void drawPlaybackSponsorSettings(void)
    if (panelH > state.screenH - 48) panelH = state.screenH - 48;
    int x = (state.screenW - panelW) / 2;
    int y = (state.screenH - panelH) / 2;
-   fillGfxRectangleFixed(0, 0, state.screenW, state.screenH, 0x78000000);
    fillGfxRoundedRectangleFixed(x, y, panelW, panelH, 12, activeTheme->appBg);
    fillGfxRoundedRectangleFixed(x, y, panelW, 4, 2, activeTheme->accent);
    refreshLabelScale(&playbackSponsorTitle);
@@ -5562,6 +5758,8 @@ static void updatePlay(void)
    // complete measurement window; successful switches are monotonic (never up)
    // and separated by a cooldown to avoid oscillation.
    if (state.fpsFallbackRequested && state.stage == STAGE_PLAYING && state.player &&
+       !optionsVisible && !optionsDropdownOpen && !playbackSettingsOpen &&
+       !playbackAutoTranslateOpen && !playbackSponsorOpen && !playbackSubtitleStyleOpen &&
        !state.resolutionSwitchThreadActive && !state.audioSwitchThreadActive &&
        !state.seeking && !isVideoPaused(state.player)) {
       int profile = state.fpsAdaptiveSwitches < 3 ? findAdaptiveFallbackProfile() : -1;
@@ -5973,6 +6171,19 @@ static void measureFps(const uint8_t *frame)
               state.player ? isVideoPaused(state.player) : 0, state.seeking);
       diagWindowUs = now;
       diagCalls = diagPointerChanges = diagMaxFrameGapUs = 0;
+   }
+
+   // Do not use presentation timing while playback-owned menus are visible.
+   // Their panel rendering competes with the video quad on the PPU/RSX and can
+   // lower the observed presentation rate without indicating decoder pressure.
+   // Reset the window so a menu-open interval cannot contribute to a later fallback.
+   if (optionsVisible || optionsDropdownOpen || playbackSettingsOpen ||
+       playbackAutoTranslateOpen || playbackSponsorOpen || playbackSubtitleStyleOpen) {
+      state.fpsWindowStartUs = state.fpsWindowFrames = state.fpsWindowMaxGapUs = 0;
+      state.fpsAdaptiveBadWindows = 0;
+      state.fpsAdaptiveLowBufferWindows = 0;
+      state.fpsFallbackRequested = 0;
+      return;
    }
 
    if (state.vidFps < 24 || state.stage != STAGE_PLAYING || !state.player ||
@@ -6524,6 +6735,11 @@ static void drawAutoplayNotice(void)
 
 static void drawPlay(void)
 {
+   int transformMode = cropToFillEnabled ? 1 : 0;
+   setGfxServiceTransform(getServiceAdjustment(transformMode, 0),
+                          getServiceAdjustment(transformMode, 1),
+                          getServiceAdjustment(transformMode, 2),
+                          getServiceAdjustment(transformMode, 3));
    // Playback render-loop diagnostics: aggregate only, never log per frame.
    static uint64_t renderDiagWindowUs, renderDiagLastStartUs;
    static uint64_t renderDiagCalls, renderDiagIntervalsUs, renderDiagIntervalMaxUs;
@@ -6632,7 +6848,8 @@ static void drawPlay(void)
          }
       }
       measureFps(frame);
-      if (state.showStats && frame) { updateStatLabels(); drawStatsOverlay(); }
+      if (!playbackServiceEditing && state.showStats && frame) { updateStatLabels(); drawStatsOverlay(); }
+      if (!playbackServiceEditing) {
       int overlayUp = state.chaptersVisible || state.descriptionVisible || optionsVisible;   // a full-screen overlay hides the HUD noise
       if (state.stage == STAGE_PLAYING && controlsVisible() && !overlayUp) {
          if (!state.isLive || state.liveDvr) {
@@ -6663,10 +6880,14 @@ static void drawPlay(void)
       if (state.nextNoticeVisible) drawAutoplayNotice();
       // Draw Options and its playback-owned settings submenus above captions and every HUD layer.
       if (optionsVisible) drawPlaybackOptions();
-      if (playbackSettingsOpen) drawPlaybackSettings();
+      if (playbackSettingsOpen && !playbackServiceOpen) drawPlaybackSettings();
+      if (playbackServiceOpen) drawPlaybackServiceSettings();
       if (playbackAutoTranslateOpen) drawPlaybackAutoTranslateSettings();
       if (playbackSponsorOpen) drawPlaybackSponsorSettings();
       if (playbackSubtitleStyleOpen) drawPlaybackSubtitleStyle();
+      } else {
+         drawPlaybackServiceEditHud();
+      }
    }
 
    // until the first frame is presented (open, then the async resume seek's reload) keep the loading
@@ -6859,6 +7080,7 @@ static void termPlay(void)
    freeLabel(&liveFailureBodyLabel);
    termButtonHints(&liveFailureHints);
    termButtonHints(&playbackHints);
+   termButtonHints(&playbackServiceHints);
    freeLabel(&toastLabel);
    freeLabel(&askPromptPrefixLabel);
    freeLabel(&askPromptSuffixLabel);

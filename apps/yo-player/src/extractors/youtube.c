@@ -1307,10 +1307,25 @@ static int youtubeGetLiveEndedStatus(const char *videoId)
    int liveNow = strstr(resp, "\"isLive\":true") != NULL ||
                  strstr(resp, "\"isLiveNow\":true") != NULL;
    int postLive = strstr(resp, "\"isPostLiveDvr\":true") != NULL;
+
+   // Some WEB player responses omit isPostLiveDvr after the broadcast ends.
+   // The archived LIVE is then exposed as a playable recording while
+   // isLive/isLiveNow are false and videoDetails has a non-zero duration.
+   int liveContent = strstr(resp, "\"isLiveContent\":true") != NULL;
+   int playable = strstr(resp, "\"status\":\"OK\"") != NULL;
+   int hasDuration = 0;
+   const char *detailsEnd = NULL;
+   const char *details = jsonObjectForKey(resp, resp + respLen,
+                                          "videoDetails", &detailsEnd);
+   if (details) {
+      char duration[32] = "";
+      jsonString(details, detailsEnd, "lengthSeconds", duration, sizeof duration);
+      hasDuration = duration[0] && atoi(duration) > 0;
+   }
    free(resp);
 
    if (liveNow) return 0;
-   if (postLive) return 1;
+   if (postLive || (liveContent && playable && hasDuration)) return 1;
    return -1;
 }
 
