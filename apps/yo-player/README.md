@@ -164,7 +164,7 @@ The app boots into the home feed. The sidebar switches between account feeds, PS
   publication date and like count. Metadata is fetched only when the panel is opened,
   so it does not delay playback startup.
 - **Triangle** — toggle **subtitles**.
-- **Start** — open playback Options. Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay are selected there. Playback Settings provides UI Scaling, Overscan, Subtitle Style, Subtitle Offset and SponsorBlock preferences.
+- **Start** — open playback Options. Quality, Audio, Subtitles, Chapters, Crop to Fill and Autoplay are selected there. Playback Settings provides playback UI Scaling, Service Menu picture adjustments, Subtitle Style, Subtitle Offset and SponsorBlock preferences.
 - In **Playback Settings → Subtitle Offset**, use **Left / Right** to move subtitles down / up one virtual screen pixel. Hold a direction to repeat the adjustment; positive values move subtitles upward.
 - **Circle** — back to the list.
 
@@ -186,6 +186,48 @@ placement remain unchanged. A separate **Playback Settings → UI Scaling** row 
 the playback text scale between 1.0x and 1.5x. Video frames are not enlarged by either
 setting. Developer details are in
 [UI-SCALING.md](UI-SCALING.md).
+
+## Service Menu: display geometry calibration
+
+The **Service Menu** provides per-mode picture geometry controls for televisions that
+crop, stretch or position the output differently. Open it from **Home → Settings →
+Service Menu**. It is separate from the general UI Scaling setting.
+
+The menu has two independent groups:
+
+- **Normal image** — adjustments used during ordinary video display.
+- **Crop to fill** — adjustments used only while the player is in Crop-to-Fill mode.
+
+Each group contains:
+
+| Control | Effect | Range / step |
+|---|---|---|
+| Overscan | Adjusts the overall zoom for that display mode | -15 to +15, 1-point steps |
+| Vertical amp | Changes vertical image size | -15 to +15, 1-point steps |
+| Vertical shift | Moves the image vertically | -15.0 to +15.0, 0.5-point steps |
+| Horizontal amp | Changes horizontal image size | -15 to +15, 1-point steps |
+| Horizontal shift | Moves the image horizontally | -15.0 to +15.0, 0.5-point steps |
+
+All adjustments default to zero. The normal-image and Crop-to-Fill values are stored
+independently and persist in `settings.txt`. Changing the Crop-to-Fill group does not
+change the normal-image geometry, and vice versa. The displayed shift values may include
+a `.5` increment; the other controls use whole-number increments.
+
+Use **Up / Down** to select a row. Press **Cross** to enter value editing; while editing,
+use **Left / Right** to change the value. **Up / Down** also changes Vertical amp and
+Vertical shift when one of those rows is being edited. Hold a direction to repeat the
+adjustment. Press **Cross** or **Circle** to leave editing; press **Circle** or **Start**
+from the menu to close it. The on-screen hints show the active actions.
+
+While editing in the navigation Service Menu, a calibration overlay displays center lines
+and corner guides over the image. It is a visual alignment aid and does not alter the
+picture. The playback Service Menu uses the same adjustment model and controls, but its
+editing presentation is confined to the playback interface.
+
+Service Menu geometry is distinct from **UI Scaling**: UI Scaling changes interface
+presentation, while Service Menu adjustments change the video output framing. Overscan
+and the geometry controls should therefore be calibrated against the television's visible
+image area, not used to compensate for oversized interface text.
 
 ## Downloads
 

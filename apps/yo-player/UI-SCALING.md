@@ -139,7 +139,7 @@ This is intentionally separate from the graphics-layer transform used by the hom
 navigation screens. Do not multiply video coordinates, seek-bar geometry or overlay
 positions by the text scale. Review text wrapping and available space at both settings.
 
-## 7. Application-level examples
+## 8. Application-level examples
 
 Existing opt-in points provide examples of the intended pattern:
 
@@ -155,7 +155,7 @@ Existing opt-in points provide examples of the intended pattern:
 
 These are examples, not a guarantee that every element in every screen scales automatically.
 
-## 8. Developer checklist
+## 9. Developer checklist
 
 Before merging a UI change, test on real hardware or representative output modes at both
 available scales and across the relevant aspect ratios.

@@ -2300,6 +2300,8 @@ static void updateSettingsPanel(void)
          }
          static const int displayToSetting[10] = { 0, 2, 3, 4, 5, 1, 6, 7, 8, 9 };
          int setting = displayToSetting[home.serviceMenuSelected];
+         /* UP/DOWN are also value controls for the two vertical rows; all rows
+          * continue to accept LEFT/RIGHT while editing. */
          int verticalAdjustment = (setting == 2 || setting == 3 || setting == 6 || setting == 7);
          int delta = verticalAdjustment && isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_UP)) ? 1 :
                      verticalAdjustment && isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_DOWN)) ? -1 :
@@ -2843,6 +2845,8 @@ static void drawSettingsPanel(void)
 
 static void drawHomeServiceMenu(void)
 {
+   /* Display order is grouped by mode: normal image first, then Crop to fill.
+    * The settings API indexes each mode as overscan followed by V/H amp and shift. */
    static const int displayToSetting[10] = { 0, 2, 3, 4, 5, 1, 6, 7, 8, 9 };
    static const char *adjustmentNames[8] = {
       "Vertical amp", "Vertical shift", "Horizontal amp", "Horizontal shift",
@@ -2958,6 +2962,8 @@ static void drawHomeServiceMenu(void)
 
 static void drawHomeServiceCalibrationOverlay(void)
 {
+   /* This is a navigation-only alignment aid, not part of the playback HUD.
+    * It is intentionally shown only during value editing in the home Service Menu. */
    /* Calibration guides are drawn only while editing the navigation Service Menu.
     * Dimensions are proportional to the virtual canvas height, so the guides keep
     * the same physical proportions in both 4:3 and 16:9 modes. */
