@@ -312,7 +312,7 @@ static ButtonHints settingsHints, serviceMenuHints;
 #define UPDATE_PANEL_W 680
 #define UPDATE_PANEL_H 430
 #define UPDATE_DIALOG_W 640
-#define UPDATE_DIALOG_H 360
+#define UPDATE_DIALOG_H 420
 #define UPDATE_NOTES_W 760
 #define UPDATE_NOTES_H 600
 #define UPDATE_NOTES_MAX_LINES 256
@@ -2266,6 +2266,10 @@ static void updateSettingsPanel(void)
             if (checkState == UPDATE_CHECK_AVAILABLE || checkState == UPDATE_CHECK_UP_TO_DATE) {
                if (packageReady) {
                   updateOverwriteNewRelease = strcmp(getLastDownloadedUpdateVersion(), getLatestVersion()) != 0;
+                  char downloadedInfo[128];
+                  snprintf(downloadedInfo, sizeof downloadedInfo, LOC(STR_DOWNLOADED_LATEST_FORMAT),
+                           getLastDownloadedUpdateVersion(), getLatestVersion());
+                  setLabelIfChanged(&updateDialogVersion, downloadedInfo);
                   updateOverwritePromptOpen = 1;
                   updateOverwriteChoice = 0;
                   logInfo("[update-ui] settings download confirmation new_release=%d old=%s new=%s\\n",
@@ -2539,7 +2543,7 @@ static void drawUpdateSettingsPanel(void)
    moveLabel(&updatePanelRows[5], x + 40, y + h - 86);
    drawLabel(&updatePanelRows[5]);
    if (updateOverwritePromptOpen) {
-      int pw = 520, ph = 190;
+      int pw = 560, ph = 220;
       int px = (home.screenW - pw) / 2, py = (home.screenH - ph) / 2;
       fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
       fillGfxRoundedRectangle(px, py, pw, ph, 10, activeTheme->appBg);
@@ -2548,13 +2552,20 @@ static void drawUpdateSettingsPanel(void)
       setLabelIfChanged(&updateDialogRows[0], updateOverwriteNewRelease ? LOC(STR_DOWNLOAD_NEW_DELETE_OLD) : LOC(STR_DOWNLOAD_AGAIN_OVERWRITE));
       setLabelIfChanged(&updateDialogRows[1], LOC(STR_YES));
       setLabelIfChanged(&updateDialogRows[2], LOC(STR_NO));
+      char downloadedInfo[128];
+      snprintf(downloadedInfo, sizeof downloadedInfo, LOC(STR_DOWNLOADED_LATEST_FORMAT),
+               getLastDownloadedUpdateVersion(), getLatestVersion());
+      setLabelIfChanged(&updateDialogVersion, downloadedInfo);
       refreshLabelScale(&updateDialogTitle);
-      drawLabelCentered(&updateDialogTitle, home.screenW / 2, py + 28);
+      drawLabelCentered(&updateDialogTitle, home.screenW / 2, py + 24);
+      refreshLabelScale(&updateDialogVersion);
+      setLabelColor(&updateDialogVersion, activeTheme->textSecondary);
+      drawLabelCentered(&updateDialogVersion, home.screenW / 2, py + 58);
       for (int n = 0; n < 3; n++) {
          Label *label = &updateDialogRows[n];
          refreshLabelScale(label);
          setLabelColor(label, n == updateOverwriteChoice + 1 ? activeTheme->accent : activeTheme->textPrimary);
-         moveLabel(label, px + 28, py + 70 + n * 36);
+         moveLabel(label, px + 28, py + 92 + n * 36);
          drawLabel(label);
       }
    }
@@ -2600,11 +2611,16 @@ static void drawUpdateDialog(void)
       moveLabel(label, x + 40, getCenteredLabelY(label, rowY, 34));
       drawLabel(label);
    }
+   setLabelIfChanged(&updateDialogRows[5], LOC(STR_INSTALL_FROM_XMB));
+   refreshLabelScale(&updateDialogRows[5]);
+   setLabelColor(&updateDialogRows[5], activeTheme->textSecondary);
+   moveLabel(&updateDialogRows[5], x + 32, y + h - 82);
+   drawLabel(&updateDialogRows[5]);
    updateHints.y = y + h - 34;
    drawButtonHints(&updateHints, home.screenW);
    if (updateOverwritePromptOpen) {
-      int pw = 520;
-      int ph = 190;
+      int pw = 560;
+      int ph = 220;
       int px = (home.screenW - pw) / 2, py = (home.screenH - ph) / 2;
       fillGfxRectangle(0, 0, home.screenW, home.screenH, activeTheme->scrim);
       fillGfxRoundedRectangle(px, py, pw, ph, 10, activeTheme->appBg);
@@ -2613,14 +2629,21 @@ static void drawUpdateDialog(void)
       setLabelIfChanged(&updateDialogRows[0], updateOverwriteNewRelease ? LOC(STR_DOWNLOAD_NEW_DELETE_OLD) : LOC(STR_DOWNLOAD_AGAIN_OVERWRITE));
       setLabelIfChanged(&updateDialogRows[1], LOC(STR_YES));
       setLabelIfChanged(&updateDialogRows[2], LOC(STR_NO));
+      char downloadedInfo[128];
+      snprintf(downloadedInfo, sizeof downloadedInfo, LOC(STR_DOWNLOADED_LATEST_FORMAT),
+               getLastDownloadedUpdateVersion(), getLatestVersion());
+      setLabelIfChanged(&updateDialogVersion, downloadedInfo);
       refreshLabelScale(&updateDialogTitle);
-      drawLabelCentered(&updateDialogTitle, home.screenW / 2, py + 28);
+      drawLabelCentered(&updateDialogTitle, home.screenW / 2, py + 24);
+      refreshLabelScale(&updateDialogVersion);
+      setLabelColor(&updateDialogVersion, activeTheme->textSecondary);
+      drawLabelCentered(&updateDialogVersion, home.screenW / 2, py + 58);
       for (int n = 0; n < 3; n++) {
          Label *label = &updateDialogRows[n];
          refreshLabelScale(label);
          int selectedChoice = updateOverwriteChoice;
          setLabelColor(label, n == selectedChoice + 1 ? activeTheme->accent : activeTheme->textPrimary);
-         moveLabel(label, px + 28, py + 70 + n * 36);
+         moveLabel(label, px + 28, py + 92 + n * 36);
          drawLabel(label);
       }
    }
@@ -2972,61 +2995,20 @@ static void drawHomeServiceCalibrationOverlay(void)
    if (corner < thickness * 3) corner = thickness * 3;
    if (corner > home.screenW / 3) corner = home.screenW / 3;
 
-   if (!cropGuide) {
-      const uint32_t color = 0xFFFFFFFF;
-      int centerX = (home.screenW - thickness) / 2;
-      int centerY = (home.screenH - thickness) / 2;
-      fillGfxRectangleFixed(0, centerY, home.screenW, thickness, color);
-      fillGfxRectangleFixed(centerX, 0, thickness, home.screenH, color);
-      fillGfxRectangleFixed(0, 0, corner, thickness, color);
-      fillGfxRectangleFixed(0, 0, thickness, corner, color);
-      fillGfxRectangleFixed(home.screenW - corner, 0, corner, thickness, color);
-      fillGfxRectangleFixed(home.screenW - thickness, 0, thickness, corner, color);
-      fillGfxRectangleFixed(0, home.screenH - thickness, corner, thickness, color);
-      fillGfxRectangleFixed(0, home.screenH - corner, thickness, corner, color);
-      fillGfxRectangleFixed(home.screenW - corner, home.screenH - thickness, corner, thickness, color);
-      fillGfxRectangleFixed(home.screenW - thickness, home.screenH - corner, thickness, corner, color);
-      return;
-   }
+   int guideOverscan = cropGuide ? getCropToFillOverscanPercent() : getOverscanPercent();
+   int guideSet = cropGuide ? 1 : 0;
+   int va = getServiceAdjustment(guideSet, 0);
+   int vs = getServiceAdjustment(guideSet, 1);
+   int ha = getServiceAdjustment(guideSet, 2);
+   int hs = getServiceAdjustment(guideSet, 3);
 
-   /* Draw Crop-to-Fill guides in an untransformed viewport. The preview uses
-    * the complete Crop-to-Fill configuration for every crop setting, including
-    * Crop Overscan, so the reference frame never jumps when changing rows. */
-   int va = getServiceAdjustment(1, 0);
-   int vs = getServiceAdjustment(1, 1);
-   int ha = getServiceAdjustment(1, 2);
-   int hs = getServiceAdjustment(1, 3);
-   float base = 1.0f + (float)getCropToFillOverscanPercent() * 0.001f;
-   float sx = base * (1.0f + (float)ha * 0.001f);
-   float sy = base * (1.0f + (float)va * 0.001f);
-   float cx = home.screenW * (0.5f + (float)hs * 0.001f);
-   float cy = home.screenH * (0.5f - (float)vs * 0.001f);
-   int left = (int)(cx - home.screenW * sx * 0.5f + 0.5f);
-   int right = (int)(cx + home.screenW * sx * 0.5f + 0.5f);
-   int top = (int)(cy - home.screenH * sy * 0.5f + 0.5f);
-   int bottom = (int)(cy + home.screenH * sy * 0.5f + 0.5f);
-   int midX = (left + right) / 2, midY = (top + bottom) / 2;
-
-   /* Temporarily remove the normal-image viewport transform. Otherwise the
-    * crop values are applied once to these coordinates and again by the GPU. */
-   setGfxOverscan(0);
-   setGfxServiceTransform(0, 0, 0, 0);
-   const uint32_t color = 0xFFC0C0C0;
-   fillGfxRectangleFixed(left, midY - thickness / 2, right - left, thickness, color);
-   fillGfxRectangleFixed(midX - thickness / 2, top, thickness, bottom - top, color);
-   fillGfxRectangleFixed(left, top, corner, thickness, color);
-   fillGfxRectangleFixed(left, top, thickness, corner, color);
-   fillGfxRectangleFixed(right - corner, top, corner, thickness, color);
-   fillGfxRectangleFixed(right - thickness, top, thickness, corner, color);
-   fillGfxRectangleFixed(left, bottom - thickness, corner, thickness, color);
-   fillGfxRectangleFixed(left, bottom - corner, thickness, corner, color);
-   fillGfxRectangleFixed(right - corner, bottom - thickness, corner, thickness, color);
-   fillGfxRectangleFixed(right - thickness, bottom - corner, thickness, corner, color);
-
-   /* Restore the normal-image transform used by the home screen. */
-   setGfxOverscan(getOverscanPercent());
-   setGfxServiceTransform(getServiceAdjustment(0, 0), getServiceAdjustment(0, 1),
-                          getServiceAdjustment(0, 2), getServiceAdjustment(0, 3));
+   /* Home historically restores the normal image transform after the guide. */
+   drawGfxServiceCalibrationGuide(home.screenW, home.screenH, guideOverscan,
+                                  va, vs, ha, hs,
+                                  getOverscanPercent(),
+                                  getServiceAdjustment(0, 0), getServiceAdjustment(0, 1),
+                                  getServiceAdjustment(0, 2), getServiceAdjustment(0, 3),
+                                  thickness, corner, cropGuide ? 0xFFC0C0C0 : 0xFFFFFFFF);
 }
 
 static void formatHomeServiceValue(char *out, size_t outSize, int value)
@@ -3113,7 +3095,17 @@ static void updateSearchSettingsOverlay(void)
          updateDialogSelected = (updateDialogSelected + 4) % 5;
       } else if (isPadButtonPressed(PAD_BTN_CROSS)) {
          if (updateDialogSelected == 0) { updateNotesOpen = 1; updateNotesScroll = 0; buildUpdateNotesLines(); }
-         else if (updateDialogSelected == 1 && !isUpdateDownloaded()) startUpdateDownload();
+         else if (updateDialogSelected == 1) {
+            if (isUpdateDownloaded()) {
+               updateOverwriteNewRelease = strcmp(getLastDownloadedUpdateVersion(), getLatestVersion()) != 0;
+               char downloadedInfo[128];
+               snprintf(downloadedInfo, sizeof downloadedInfo, LOC(STR_DOWNLOADED_LATEST_FORMAT),
+                        getLastDownloadedUpdateVersion(), getLatestVersion());
+               setLabelIfChanged(&updateDialogVersion, downloadedInfo);
+               updateOverwritePromptOpen = 1;
+               updateOverwriteChoice = 0;
+            } else startUpdateDownload();
+         }
          else if (updateDialogSelected == 2) { disableAutomaticUpdateChecks(); updateDialogOpen = 0; updateDialogDismissed = 1; }
          else if (updateDialogSelected == 3) { ignoreCurrentUpdate(); updateDialogOpen = 0; updateDialogDismissed = 1; }
          else { updateDialogOpen = 0; updateDialogDismissed = 1; }
@@ -4084,9 +4076,11 @@ static void initHome(void)
              activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_NEW_UPDATE_AVAILABLE));
    initLabel(&updateDialogVersion, &uiFont, 0, 0, UPDATE_DIALOG_W - 48, AUTO, 20,
              activeTheme->textSecondary, TEXT_NOWRAP, "");
-   for (int i = 0; i < 6; i++)
+   for (int i = 0; i < 5; i++)
       initLabel(&updateDialogRows[i], &uiFont, 0, 0, UPDATE_DIALOG_W - 80, AUTO, 19,
                 activeTheme->textPrimary, TEXT_NOWRAP, "");
+   initLabel(&updateDialogRows[5], &uiFont, 0, 0, UPDATE_DIALOG_W - 64, AUTO, 16,
+             activeTheme->textSecondary, TEXT_WRAP, "");
    initLabel(&updateNotesTitle, &uiFont, 0, 0, UPDATE_NOTES_W - 120, AUTO, 24,
              activeTheme->textPrimary, TEXT_NOWRAP, LOC(STR_RELEASE_NOTES));
    initLabel(&updateNotesPageLabel, &uiFont, 0, 0, 120, AUTO, 18,
@@ -4598,9 +4592,15 @@ static void updateHome(void)
                playlistToastShownAt = getTimeUs();
                setLabelText(&playlistToastLabel, LOC(STR_UPDATE_DOWNLOAD_ALREADY_RUNNING));
             } else if (isUpdateDownloaded()) {
+               updateOverwriteNewRelease = strcmp(getLastDownloadedUpdateVersion(), getLatestVersion()) != 0;
+               char downloadedInfo[128];
+               snprintf(downloadedInfo, sizeof downloadedInfo, LOC(STR_DOWNLOADED_LATEST_FORMAT),
+                        getLastDownloadedUpdateVersion(), getLatestVersion());
+               setLabelIfChanged(&updateDialogVersion, downloadedInfo);
                updateOverwritePromptOpen = 1;
                updateOverwriteChoice = 0;
-               logInfo("[update-ui] automatic dialog opened overwrite confirmation\n");
+               logInfo("[update-ui] automatic dialog opened overwrite confirmation old=%s new=%s different=%d\n",
+                       getLastDownloadedUpdateVersion(), getLatestVersion(), updateOverwriteNewRelease);
             } else {
                int downloadRc = startUpdateDownload();
                logInfo("[update-ui] automatic dialog download start rc=%d state=%d\n", downloadRc, getUpdateDownloadState());

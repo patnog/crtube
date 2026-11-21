@@ -4974,78 +4974,8 @@ static void drawPlaybackSettings(void)
 }
 
 
-static void drawPlaybackServiceCalibrationOverlay(void)
-{
-   int setting = playbackServiceDisplayToSetting(playbackServiceSelected);
-   int cropGuide = setting == 1 || setting >= 6;
-   int thickness = (state.screenH * 8 + 174) / 348;
-   int corner = (state.screenH * 48 + 174) / 348;
-   if (thickness < 4) thickness = 4;
-   if (corner < thickness * 3) corner = thickness * 3;
-   if (corner > state.screenW / 3) corner = state.screenW / 3;
-   if (!cropGuide) {
-      const uint32_t color = 0xFFFFFFFF;
-      int centerX = (state.screenW - thickness) / 2;
-      int centerY = (state.screenH - thickness) / 2;
-      fillGfxRectangleFixed(0, centerY, state.screenW, thickness, color);
-      fillGfxRectangleFixed(centerX, 0, thickness, state.screenH, color);
-      fillGfxRectangleFixed(0, 0, corner, thickness, color);
-      fillGfxRectangleFixed(0, 0, thickness, corner, color);
-      fillGfxRectangleFixed(state.screenW - corner, 0, corner, thickness, color);
-      fillGfxRectangleFixed(state.screenW - thickness, 0, thickness, corner, color);
-      fillGfxRectangleFixed(0, state.screenH - thickness, corner, thickness, color);
-      fillGfxRectangleFixed(0, state.screenH - corner, thickness, corner, color);
-      fillGfxRectangleFixed(state.screenW - corner, state.screenH - thickness, corner, thickness, color);
-      fillGfxRectangleFixed(state.screenW - thickness, state.screenH - corner, thickness, corner, color);
-      return;
-   }
-   /* Use the full Crop-to-Fill configuration for every crop row. In
-    * particular, Crop Overscan must show the same alignment reference as the
-    * four crop geometry controls. */
-   int va = getServiceAdjustment(1, 0);
-   int vs = getServiceAdjustment(1, 1);
-   int ha = getServiceAdjustment(1, 2);
-   int hs = getServiceAdjustment(1, 3);
-   float base = 1.0f + (float)getCropToFillOverscanPercent() * 0.001f;
-   float sx = base * (1.0f + (float)ha * 0.001f);
-   float sy = base * (1.0f + (float)va * 0.001f);
-   float cx = state.screenW * (0.5f + (float)hs * 0.001f);
-   float cy = state.screenH * (0.5f - (float)vs * 0.001f);
-   int left = (int)(cx - state.screenW * sx * 0.5f + 0.5f);
-   int right = (int)(cx + state.screenW * sx * 0.5f + 0.5f);
-   int top = (int)(cy - state.screenH * sy * 0.5f + 0.5f);
-   int bottom = (int)(cy + state.screenH * sy * 0.5f + 0.5f);
-   int midX = (left + right) / 2, midY = (top + bottom) / 2;
-
-   /* The video viewport already applies the crop transform. Draw this guide
-    * in a neutral viewport to avoid applying the same transform twice. */
-   setGfxOverscan(0);
-   setGfxServiceTransform(0, 0, 0, 0);
-   const uint32_t color = 0xFFC0C0C0;
-   fillGfxRectangleFixed(left, midY - thickness / 2, right - left, thickness, color);
-   fillGfxRectangleFixed(midX - thickness / 2, top, thickness, bottom - top, color);
-   fillGfxRectangleFixed(left, top, corner, thickness, color);
-   fillGfxRectangleFixed(left, top, thickness, corner, color);
-   fillGfxRectangleFixed(right - corner, top, corner, thickness, color);
-   fillGfxRectangleFixed(right - thickness, top, thickness, corner, color);
-   fillGfxRectangleFixed(left, bottom - thickness, corner, thickness, color);
-   fillGfxRectangleFixed(left, bottom - corner, thickness, corner, color);
-   fillGfxRectangleFixed(right - corner, bottom - thickness, corner, thickness, color);
-   fillGfxRectangleFixed(right - thickness, bottom - corner, thickness, corner, color);
-
-   /* Restore the active transform for the currently edited mode. */
-   setGfxOverscan(getOverscanPercent());
-   if (setting >= 6 || setting == 1)
-      setGfxServiceTransform(getServiceAdjustment(1, 0), getServiceAdjustment(1, 1),
-                             getServiceAdjustment(1, 2), getServiceAdjustment(1, 3));
-   else
-      setGfxServiceTransform(getServiceAdjustment(0, 0), getServiceAdjustment(0, 1),
-                             getServiceAdjustment(0, 2), getServiceAdjustment(0, 3));
-}
-
 static void drawPlaybackServiceEditHud(void)
 {
-   drawPlaybackServiceCalibrationOverlay();
    const char *name = getPlaybackServiceName(playbackServiceSelected);
    int value = getPlaybackServiceValue(playbackServiceSelected);
    char text[96];
@@ -6804,8 +6734,9 @@ static void drawAutoplayNotice(void)
 
 static void drawPlay(void)
 {
-   int editingCropSettings = playbackServiceEditing && playbackServiceDisplayToSetting(playbackServiceSelected) != 0;
-   int transformMode = (cropToFillEnabled || editingCropSettings) ? 1 : 0;
+   int editingSetting = playbackServiceDisplayToSetting(playbackServiceSelected);
+   int editingCropSettings = playbackServiceEditing && (editingSetting == 1 || editingSetting >= 6);
+   int transformMode = playbackServiceEditing ? editingCropSettings : cropToFillEnabled;
    setGfxServiceTransform(getServiceAdjustment(transformMode, 0),
                           getServiceAdjustment(transformMode, 1),
                           getServiceAdjustment(transformMode, 2),
@@ -6896,8 +6827,8 @@ static void drawPlay(void)
                     state.liveFirstSq, (unsigned long long)state.liveFirstPtsNs);
          }
          int dx, dy, dw, dh;
-         if (cropToFillEnabled || editingCropSettings) getCropToFillRect(w, h, &dx, &dy, &dw, &dh);
-         else                                        getGfxLetterboxRect(w, h, &dx, &dy, &dw, &dh);
+         if (transformMode) getCropToFillRect(w, h, &dx, &dy, &dw, &dh);
+         else               getGfxLetterboxRect(w, h, &dx, &dy, &dw, &dh);
          if (!state.diagFirstYuvDraw)
             logInfo("[video-diag] first drawGfxYuvFrame begin source=%dx%d target=%dx%d\n",
                     w, h, dw, dh);

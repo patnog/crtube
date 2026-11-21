@@ -772,6 +772,48 @@ void fillGfxRectangleFixed(int x, int y, int w, int h, uint32_t argb)
    fillGfxRectangleInternal(x, y, w, h, argb, 0);
 }
 
+/* Draw the service-menu alignment frame from an explicit adjustment set.
+ * Both normal display calibration and Crop-to-Fill use this exact geometry;
+ * only their input values and guide color differ. The active viewport
+ * transform is restored before returning. */
+void drawGfxServiceCalibrationGuide(int screenW, int screenH, int overscanTenths,
+                                    int verticalAmp, int verticalShift, int horizontalAmp, int horizontalShift,
+                                    int restoreOverscanTenths, int restoreVerticalAmp, int restoreVerticalShift,
+                                    int restoreHorizontalAmp, int restoreHorizontalShift,
+                                    int thickness, int corner, uint32_t color)
+{
+   if (screenW <= 0 || screenH <= 0 || thickness <= 0 || corner <= 0) return;
+
+   float base = 1.0f + (float)overscanTenths * 0.001f;
+   float sx = base * (1.0f + (float)horizontalAmp * 0.001f);
+   float sy = base * (1.0f + (float)verticalAmp * 0.001f);
+   float cx = screenW * (0.5f + (float)horizontalShift * 0.001f);
+   float cy = screenH * (0.5f - (float)verticalShift * 0.001f);
+   int left = (int)(cx - screenW * sx * 0.5f + 0.5f);
+   int right = (int)(cx + screenW * sx * 0.5f + 0.5f);
+   int top = (int)(cy - screenH * sy * 0.5f + 0.5f);
+   int bottom = (int)(cy + screenH * sy * 0.5f + 0.5f);
+   int midX = (left + right) / 2;
+   int midY = (top + bottom) / 2;
+
+   setGfxOverscan(0);
+   setGfxServiceTransform(0, 0, 0, 0);
+   fillGfxRectangleFixed(left, midY - thickness / 2, right - left, thickness, color);
+   fillGfxRectangleFixed(midX - thickness / 2, top, thickness, bottom - top, color);
+   fillGfxRectangleFixed(left, top, corner, thickness, color);
+   fillGfxRectangleFixed(left, top, thickness, corner, color);
+   fillGfxRectangleFixed(right - corner, top, corner, thickness, color);
+   fillGfxRectangleFixed(right - thickness, top, thickness, corner, color);
+   fillGfxRectangleFixed(left, bottom - thickness, corner, thickness, color);
+   fillGfxRectangleFixed(left, bottom - corner, thickness, corner, color);
+   fillGfxRectangleFixed(right - corner, bottom - thickness, corner, thickness, color);
+   fillGfxRectangleFixed(right - thickness, bottom - corner, thickness, corner, color);
+
+   setGfxOverscan(restoreOverscanTenths);
+   setGfxServiceTransform(restoreVerticalAmp, restoreVerticalShift,
+                          restoreHorizontalAmp, restoreHorizontalShift);
+}
+
 // metro-style border: four edges drawn inward, so the outline stays within the w x h bounds.
 void strokeGfxRectangle(int x, int y, int w, int h, int thickness, uint32_t argb)
 {

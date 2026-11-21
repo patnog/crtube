@@ -46,6 +46,11 @@ void  setGfxSdUiScale(float scale);
 int   getGfxOverscan(void);
 void  setGfxOverscan(int tenthsOfPercent);
 void  setGfxServiceTransform(int verticalAmpTenths, int verticalShiftTenths, int horizontalAmpTenths, int horizontalShiftTenths);
+void  drawGfxServiceCalibrationGuide(int screenW, int screenH, int overscanTenths,
+                                    int verticalAmp, int verticalShift, int horizontalAmp, int horizontalShift,
+                                    int restoreOverscanTenths, int restoreVerticalAmp, int restoreVerticalShift,
+                                    int restoreHorizontalAmp, int restoreHorizontalShift,
+                                    int thickness, int corner, uint32_t color);
 
 // changes how a finished frame reaches the screen, at any time. GFX_VSYNC_ON waits for the display's
 // next refresh (smooth, but holds the frame back by up to one refresh); GFX_VSYNC_OFF shows it at the
