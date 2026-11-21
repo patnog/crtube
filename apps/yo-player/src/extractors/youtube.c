@@ -1544,10 +1544,14 @@ static int extract(const char *input, StreamInfo *out, const char *subtitleLangu
       }
    }
 
-   // Active LIVE and the short post-live DVR recording are both numbered DASH segment streams.
-   int liveNow = strstr(resp, "\"isLive\":true") != NULL ||
-                 strstr(resp, "\"isLiveContent\":true") != NULL ||
-                 strstr(input, "/live/") != NULL;
+   // isLiveContent remains true on archived LIVE VODs; it does not mean the broadcast is active.
+   int liveContent = strstr(resp, "\"isLiveContent\":true") != NULL;
+   int liveNowFlag = strstr(resp, "\"isLive\":true") != NULL ||
+                     strstr(resp, "\"isLiveNow\":true") != NULL;
+   int archivedLiveVOD = liveContent && !liveNowFlag && out->durationSeconds > 0;
+   // An explicit /live/ URL is only treated as active when YouTube has not identified
+   // the response as an archived recording.
+   int liveNow = liveNowFlag || (!archivedLiveVOD && strstr(input, "/live/") != NULL);
    int postLive = !liveNow && strstr(resp, "\"isPostLiveDvr\":true") != NULL;
    if ((liveNow || postLive) && !strstr(resp, "\"dashManifestUrl\"")) {
       if (fetchPlayer(LIVE_BODY_FMT, LIVE_UA, "28", LIVE_VERSION, videoId, resp, &respLen) == 0)
@@ -1629,17 +1633,48 @@ static int extract(const char *input, StreamInfo *out, const char *subtitleLangu
       }
       if (visitorFromDisk && strcmp(statusText, "LOGIN_REQUIRED") == 0) dropVisitorData();   // stale session
 
-      // Retry explicit UNPLAYABLE responses. LIVE also retries when its initial
-      // client returns no usable formats, and requires an alternative DASH timeline.
-      int liveRequest = liveNow || postLive || strstr(input, "/live/") != NULL ||
-                        strstr(resp, "\"isLiveContent\":true") != NULL;
-      if (strcmp(statusText, "UNPLAYABLE") == 0 || liveRequest) {
+      // Archived broadcasts keep isLiveContent=true, but their alternate clients must
+      // be queried in VOD mode so progressive muxed formats (for example itag 18) survive.
+      int liveRequest = liveNow || postLive;
+      if (strcmp(statusText, "UNPLAYABLE") == 0 || liveRequest || archivedLiveVOD) {
          logInfo("[yt] player has no usable stream; trying alternate %s clients\n",
                  liveRequest ? "LIVE" : "VOD");
-         if (retryUnplayableWithOtherClients(videoId, resp, &respLen, out, liveRequest, 0, 0, subtitleLanguage) > 0) {
-            logInfo("[yt] resolved videoId=%s with alternate client formats=%d live=%d\n",
-                    videoId, out->formatCount, liveRequest);
-            if (liveRequest) out->isLive = 1;
+         int retrySucceeded = retryUnplayableWithOtherClients(
+            videoId, resp, &respLen, out, liveRequest, 0, 0, subtitleLanguage);
+         int retriedAsVod = 0;
+
+         /*
+          * YouTube can expose an archived broadcast through liveStreamability,
+          * even though the broadcast has ended. LIVE retries intentionally keep
+          * only numbered DASH segments, so a normal progressive recording
+          * (for example itag 18) would otherwise be discarded.
+          *
+          * Confirm the ended state independently before retrying as VOD. This
+          * prevents an active broadcast from being opened as a static file.
+          */
+         if (retrySucceeded <= 0 && liveRequest) {
+            int endedStatus = youtubeGetLiveEndedStatus(videoId);
+            if (endedStatus == 1) {
+               out->isLive = 0;
+               out->isPostLive = 0;
+               out->liveAndroidClient = 0;
+               out->formatCount = 0;
+               logInfo("[yt] LIVE fallback unavailable; confirmed archived broadcast, retrying as VOD video=%s\n",
+                       videoId);
+               retriedAsVod = 1;
+               retrySucceeded = retryUnplayableWithOtherClients(
+                  videoId, resp, &respLen, out, 0, 0, 0, subtitleLanguage);
+            } else {
+               logInfo("[yt] VOD fallback skipped video=%s endedStatus=%d\n",
+                       videoId, endedStatus);
+            }
+         }
+
+         if (retrySucceeded > 0) {
+            logInfo("[yt] resolved videoId=%s with alternate client formats=%d live=%d postLive=%d\n",
+                    videoId, out->formatCount, out->isLive, out->isPostLive);
+            if (liveRequest && !retriedAsVod && !out->isPostLive && out->isLive == 0)
+               out->isLive = 1;
             if (!visitorFromDisk) { saveVisitorData(); visitorFromDisk = 1; }
          }
       }
