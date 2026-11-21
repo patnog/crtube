@@ -202,16 +202,15 @@ Each group contains:
 
 | Control | Effect | Range / step |
 |---|---|---|
-| Overscan | Adjusts the overall zoom for that display mode | -15 to +15, 1-point steps |
-| Vertical amp | Changes vertical image size | -15 to +15, 1-point steps |
-| Vertical shift | Moves the image vertically | -15.0 to +15.0, 0.5-point steps |
-| Horizontal amp | Changes horizontal image size | -15 to +15, 1-point steps |
-| Horizontal shift | Moves the image horizontally | -15.0 to +15.0, 0.5-point steps |
+| Overscan | Adjusts the overall zoom for that display mode | -15.0 to +15.0, 0.1-point steps |
+| Vertical amp | Changes vertical image size | -15.0 to +15.0, 0.1-point steps |
+| Vertical shift | Moves the image vertically | -15.0 to +15.0, 0.1-point steps |
+| Horizontal amp | Changes horizontal image size | -15.0 to +15.0, 0.1-point steps |
+| Horizontal shift | Moves the image horizontally | -15.0 to +15.0, 0.1-point steps |
 
 All adjustments default to zero. The normal-image and Crop-to-Fill values are stored
 independently and persist in `settings.txt`. Changing the Crop-to-Fill group does not
-change the normal-image geometry, and vice versa. The displayed shift values may include
-a `.5` increment; the other controls use whole-number increments.
+change the normal-image geometry, and vice versa. All controls use tenths-of-a-percent precision.
 
 Use **Up / Down** to select a row. Press **Cross** to enter value editing; while editing,
 use **Left / Right** to change the value. **Up / Down** also changes Vertical amp and
@@ -348,8 +347,8 @@ overscan are saved immediately. A bad value quietly falls back to its default.
 - **`download-secondary-subtitle`** — `off` (default) or a supported language code for an optional second subtitle track.
 - **`region`** — two-letter country code for content lists (default `US`); selectable in Home Settings → Content Region.
 - **`screensaver-timeout`** — `0` (off) or `30`–`300` seconds in 30-second steps (default `30`).
-- **`overscan`** — uniform output zoom from `-15` to `+15` percent (default `0`), used in normal video mode.
-- **`overscan-crop-to-fill`** — independent video zoom from `-15` to `+15` percent (default `0`), used only while Crop to Fill is enabled. It is configured separately from `overscan`, so normal video output and Crop-to-Fill framing can be adjusted independently.
+- **`overscan`** — uniform output zoom from `-15.0` to `+15.0` percent (default `0.0`; 0.1-point precision), used in normal video mode.
+- **`overscan-crop-to-fill`** — independent video zoom from `-15.0` to `+15.0` percent (default `0.0`; 0.1-point precision), used only while Crop to Fill is enabled. It is configured separately from `overscan`, so normal video output and Crop-to-Fill framing can be adjusted independently.
 - **`subtitle-offset`** — subtitle vertical offset in virtual screen pixels, `-150` to `+150` (default `0`; positive moves up).
 - **`subtitle-text-color`**, **`subtitle-background-color`**, **`subtitle-background-opacity`**, **`subtitle-highlight`**, **`subtitle-font-size`** — subtitle appearance indexes with ranges `0–5`, `0–4`, `0–4`, `0–2` and `0–5`.
 - **`theme-custom-bg`** and **`theme-custom-accent`** — custom theme background (`dark`/`light`) and accent colour (`#RRGGBB`).

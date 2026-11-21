@@ -4497,16 +4497,10 @@ static const char *playbackServiceAdjustmentNames[8] = {
    "Vertical amp", "Vertical shift", "Horizontal amp", "Horizontal shift"
 };
 
-static void formatPlaybackServiceValue(char *out, size_t outSize, int selected, int value)
+static void formatPlaybackServiceValue(char *out, size_t outSize, int value)
 {
-   int setting = playbackServiceDisplayToSetting(selected);
-   if (setting == 3 || setting == 5 || setting == 7 || setting == 9) {
-      int magnitude = value < 0 ? -value : value;
-      snprintf(out, outSize, "%s%d%s", value < 0 ? "-" : "+", magnitude / 2,
-               magnitude % 2 ? ".5" : "");
-   } else {
-      snprintf(out, outSize, "%+d", value);
-   }
+   int magnitude = value < 0 ? -value : value;
+   snprintf(out, outSize, "%s%d.%d", value < 0 ? "-" : "+", magnitude / 10, magnitude % 10);
 }
 
 static int getPlaybackServiceValue(int selected)
@@ -4545,12 +4539,17 @@ static void updatePlaybackSettings(void)
             playbackOverscanRepeat.timer = playbackOverscanRepeat.repeats = 0;
             return;
          }
-         int selectedSetting = playbackServiceDisplayToSetting(playbackServiceSelected);
-         int verticalAdjustment = (selectedSetting == 2 || selectedSetting == 3 ||
-                                   selectedSetting == 6 || selectedSetting == 7);
-         int delta = verticalAdjustment && isPlaybackServiceRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_UP)) ? 1 :
-                     verticalAdjustment && isPlaybackServiceRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_DOWN)) ? -1 :
-                     isPlaybackServiceRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
+         if (isPlaybackServiceRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_DOWN))) {
+            playbackServiceSelected = (playbackServiceSelected + 1) % PLAYBACK_SERVICE_SETTINGS_COUNT;
+            playbackOverscanRepeat.timer = sys_time_get_system_time(); playbackOverscanRepeat.repeats = 0;
+            return;
+         }
+         if (isPlaybackServiceRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_UP))) {
+            playbackServiceSelected = (playbackServiceSelected + PLAYBACK_SERVICE_SETTINGS_COUNT - 1) % PLAYBACK_SERVICE_SETTINGS_COUNT;
+            playbackOverscanRepeat.timer = sys_time_get_system_time(); playbackOverscanRepeat.repeats = 0;
+            return;
+         }
+         int delta = isPlaybackServiceRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
                      isPlaybackServiceRepeatDue(&playbackOverscanRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
          if (delta) {
             if (setPlaybackServiceValue(playbackServiceSelected, getPlaybackServiceValue(playbackServiceSelected) + delta) != 0)
@@ -4975,13 +4974,83 @@ static void drawPlaybackSettings(void)
 }
 
 
+static void drawPlaybackServiceCalibrationOverlay(void)
+{
+   int setting = playbackServiceDisplayToSetting(playbackServiceSelected);
+   int cropGuide = setting == 1 || setting >= 6;
+   int thickness = (state.screenH * 8 + 174) / 348;
+   int corner = (state.screenH * 48 + 174) / 348;
+   if (thickness < 4) thickness = 4;
+   if (corner < thickness * 3) corner = thickness * 3;
+   if (corner > state.screenW / 3) corner = state.screenW / 3;
+   if (!cropGuide) {
+      const uint32_t color = 0xFFFFFFFF;
+      int centerX = (state.screenW - thickness) / 2;
+      int centerY = (state.screenH - thickness) / 2;
+      fillGfxRectangleFixed(0, centerY, state.screenW, thickness, color);
+      fillGfxRectangleFixed(centerX, 0, thickness, state.screenH, color);
+      fillGfxRectangleFixed(0, 0, corner, thickness, color);
+      fillGfxRectangleFixed(0, 0, thickness, corner, color);
+      fillGfxRectangleFixed(state.screenW - corner, 0, corner, thickness, color);
+      fillGfxRectangleFixed(state.screenW - thickness, 0, thickness, corner, color);
+      fillGfxRectangleFixed(0, state.screenH - thickness, corner, thickness, color);
+      fillGfxRectangleFixed(0, state.screenH - corner, thickness, corner, color);
+      fillGfxRectangleFixed(state.screenW - corner, state.screenH - thickness, corner, thickness, color);
+      fillGfxRectangleFixed(state.screenW - thickness, state.screenH - corner, thickness, corner, color);
+      return;
+   }
+   /* Use the full Crop-to-Fill configuration for every crop row. In
+    * particular, Crop Overscan must show the same alignment reference as the
+    * four crop geometry controls. */
+   int va = getServiceAdjustment(1, 0);
+   int vs = getServiceAdjustment(1, 1);
+   int ha = getServiceAdjustment(1, 2);
+   int hs = getServiceAdjustment(1, 3);
+   float base = 1.0f + (float)getCropToFillOverscanPercent() * 0.001f;
+   float sx = base * (1.0f + (float)ha * 0.001f);
+   float sy = base * (1.0f + (float)va * 0.001f);
+   float cx = state.screenW * (0.5f + (float)hs * 0.001f);
+   float cy = state.screenH * (0.5f - (float)vs * 0.001f);
+   int left = (int)(cx - state.screenW * sx * 0.5f + 0.5f);
+   int right = (int)(cx + state.screenW * sx * 0.5f + 0.5f);
+   int top = (int)(cy - state.screenH * sy * 0.5f + 0.5f);
+   int bottom = (int)(cy + state.screenH * sy * 0.5f + 0.5f);
+   int midX = (left + right) / 2, midY = (top + bottom) / 2;
+
+   /* The video viewport already applies the crop transform. Draw this guide
+    * in a neutral viewport to avoid applying the same transform twice. */
+   setGfxOverscan(0);
+   setGfxServiceTransform(0, 0, 0, 0);
+   const uint32_t color = 0xFFC0C0C0;
+   fillGfxRectangleFixed(left, midY - thickness / 2, right - left, thickness, color);
+   fillGfxRectangleFixed(midX - thickness / 2, top, thickness, bottom - top, color);
+   fillGfxRectangleFixed(left, top, corner, thickness, color);
+   fillGfxRectangleFixed(left, top, thickness, corner, color);
+   fillGfxRectangleFixed(right - corner, top, corner, thickness, color);
+   fillGfxRectangleFixed(right - thickness, top, thickness, corner, color);
+   fillGfxRectangleFixed(left, bottom - thickness, corner, thickness, color);
+   fillGfxRectangleFixed(left, bottom - corner, thickness, corner, color);
+   fillGfxRectangleFixed(right - corner, bottom - thickness, corner, thickness, color);
+   fillGfxRectangleFixed(right - thickness, bottom - corner, thickness, corner, color);
+
+   /* Restore the active transform for the currently edited mode. */
+   setGfxOverscan(getOverscanPercent());
+   if (setting >= 6 || setting == 1)
+      setGfxServiceTransform(getServiceAdjustment(1, 0), getServiceAdjustment(1, 1),
+                             getServiceAdjustment(1, 2), getServiceAdjustment(1, 3));
+   else
+      setGfxServiceTransform(getServiceAdjustment(0, 0), getServiceAdjustment(0, 1),
+                             getServiceAdjustment(0, 2), getServiceAdjustment(0, 3));
+}
+
 static void drawPlaybackServiceEditHud(void)
 {
+   drawPlaybackServiceCalibrationOverlay();
    const char *name = getPlaybackServiceName(playbackServiceSelected);
    int value = getPlaybackServiceValue(playbackServiceSelected);
    char text[96];
    char formattedValue[16];
-   formatPlaybackServiceValue(formattedValue, sizeof formattedValue, playbackServiceSelected, value);
+   formatPlaybackServiceValue(formattedValue, sizeof formattedValue, value);
    snprintf(text, sizeof text, "%s: %s", name, formattedValue);
    setLabelText(&playbackServiceEditLabel, text);
    refreshLabelScale(&playbackServiceEditLabel);
@@ -5004,7 +5073,7 @@ static void drawPlaybackServiceSettings(void)
    int renderSize = (int)(playbackFontSize(20) * playbackFontScale + 0.5f);
    for (int i = 0; i < PLAYBACK_SERVICE_SETTINGS_COUNT; i++) {
       names[i] = getPlaybackServiceName(i);
-      formatPlaybackServiceValue(values[i], sizeof values[i], i, getPlaybackServiceValue(i));
+      formatPlaybackServiceValue(values[i], sizeof values[i], getPlaybackServiceValue(i));
       int measured = (int)(measureFontText(&uiFont, renderSize, names[i]) + 0.5f);
       if (measured > widest) widest = measured;
    }
@@ -6674,8 +6743,8 @@ static void getCropToFillRect(int frameW, int frameH, int *dx, int *dy, int *dw,
    // The regular overscan is applied by the display viewport to the whole HUD.
    // Cancel that transform for the video rectangle only, then apply the independent
    // Crop-to-Fill overscan value. The two settings therefore never add together.
-   float regularScale = 1.0f + (float)getOverscanPercent() * 0.01f;
-   float cropScale = 1.0f + (float)getCropToFillOverscanPercent() * 0.01f;
+   float regularScale = 1.0f + (float)getOverscanPercent() * 0.001f;
+   float cropScale = 1.0f + (float)getCropToFillOverscanPercent() * 0.001f;
    float scale = cropScale / regularScale;
    float centerX = (float)state.screenW * 0.5f;
    float centerY = (float)state.screenH * 0.5f;
@@ -6735,7 +6804,8 @@ static void drawAutoplayNotice(void)
 
 static void drawPlay(void)
 {
-   int transformMode = cropToFillEnabled ? 1 : 0;
+   int editingCropSettings = playbackServiceEditing && playbackServiceDisplayToSetting(playbackServiceSelected) != 0;
+   int transformMode = (cropToFillEnabled || editingCropSettings) ? 1 : 0;
    setGfxServiceTransform(getServiceAdjustment(transformMode, 0),
                           getServiceAdjustment(transformMode, 1),
                           getServiceAdjustment(transformMode, 2),
@@ -6826,8 +6896,8 @@ static void drawPlay(void)
                     state.liveFirstSq, (unsigned long long)state.liveFirstPtsNs);
          }
          int dx, dy, dw, dh;
-         if (cropToFillEnabled) getCropToFillRect(w, h, &dx, &dy, &dw, &dh);
-         else                   getGfxLetterboxRect(w, h, &dx, &dy, &dw, &dh);
+         if (cropToFillEnabled || editingCropSettings) getCropToFillRect(w, h, &dx, &dy, &dw, &dh);
+         else                                        getGfxLetterboxRect(w, h, &dx, &dy, &dw, &dh);
          if (!state.diagFirstYuvDraw)
             logInfo("[video-diag] first drawGfxYuvFrame begin source=%dx%d target=%dx%d\n",
                     w, h, dw, dh);

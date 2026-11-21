@@ -42,10 +42,10 @@ float getGfxSdUiScale(void);
 float getGfxUiScaleFactor(void); // selected factor at every output resolution
 void  setGfxSdUiScale(float scale);
 // Uniform output zoom applied by the display viewport after all drawing and video crop calculations.
-// Range: -15..+15 percent; zero leaves the original output unchanged. Offscreen targets are unaffected.
+// Values are fixed-point tenths of a percent (-150..+150); zero leaves the original output unchanged. Offscreen targets are unaffected.
 int   getGfxOverscan(void);
-void  setGfxOverscan(int percent);
-void  setGfxServiceTransform(int verticalAmp, int verticalShift, int horizontalAmp, int horizontalShift);
+void  setGfxOverscan(int tenthsOfPercent);
+void  setGfxServiceTransform(int verticalAmpTenths, int verticalShiftTenths, int horizontalAmpTenths, int horizontalShiftTenths);
 
 // changes how a finished frame reaches the screen, at any time. GFX_VSYNC_ON waits for the display's
 // next refresh (smooth, but holds the frame back by up to one refresh); GFX_VSYNC_OFF shows it at the

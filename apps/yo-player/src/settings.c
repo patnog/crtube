@@ -52,21 +52,21 @@ static const char *DEFAULT_SETTINGS =
    "sponsorblock-filler=keep\n"
    "# Each category accepts skip, ask, or keep.\n"
    "\n"
-   "overscan=0\n"
-   "overscan-crop-to-fill=0\n"
-   "vertical-amp=0\n"
+   "overscan=0.0\n"
+   "overscan-crop-to-fill=0.0\n"
+   "vertical-amp=0.0\n"
    "vertical-shift=0.0\n"
-   "horizontal-amp=0\n"
+   "horizontal-amp=0.0\n"
    "horizontal-shift=0.0\n"
-   "crop-vertical-amp=0\n"
+   "crop-vertical-amp=0.0\n"
    "crop-vertical-shift=0.0\n"
-   "crop-horizontal-amp=0\n"
+   "crop-horizontal-amp=0.0\n"
    "crop-horizontal-shift=0.0\n"
    "screensaver-timeout=30\n"
    "osd-timeout=2\n"
    "# playback OSD inactivity timeout in seconds: 2, 3, 5, 10, 15, 30 or 60\n"
-   "# output zoom in percent (-15 to +15); 0 keeps the original framing\n"
-   "# independent video zoom used only when Crop to Fill is enabled (-15 to +15)\n"
+   "# output zoom in percent (-15.0 to +15.0); 0 keeps the original framing\n"
+   "# independent video zoom used only when Crop to Fill is enabled (-15.0 to +15.0)\n"
    "subtitle-offset=0\n"
    "# subtitle vertical offset in virtual screen pixels (-150 to +150); positive moves up, negative moves down\n"
    "\n"
@@ -551,11 +551,11 @@ void loadSettings(void)
    }
    if (overscan) {
       char *end = NULL;
-      long parsed = strtol(overscan, &end, 10);
+      double parsed = strtod(overscan, &end);
       if (end != overscan && (*end == 0 || *end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) {
-         if (parsed < -15) parsed = -15;
-         if (parsed > 15) parsed = 15;
-         overscanPercent = (int)parsed;
+         if (parsed < -15.0) parsed = -15.0;
+         if (parsed > 15.0) parsed = 15.0;
+         overscanPercent = (int)(parsed * 10.0 + (parsed >= 0 ? 0.5 : -0.5));
       } else {
          logWarn("[settings] invalid overscan value, using 0\n");
          overscanPercent = 0;
@@ -569,11 +569,11 @@ void loadSettings(void)
          logWarn("[settings] could not add default overscan-crop-to-fill key\n");
    } else {
       char *end = NULL;
-      long parsed = strtol(cropOverscan, &end, 10);
+      double parsed = strtod(cropOverscan, &end);
       if (end != cropOverscan && (*end == 0 || *end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) {
-         if (parsed < -15) parsed = -15;
-         if (parsed > 15) parsed = 15;
-         cropToFillOverscanPercent = (int)parsed;
+         if (parsed < -15.0) parsed = -15.0;
+         if (parsed > 15.0) parsed = 15.0;
+         cropToFillOverscanPercent = (int)(parsed * 10.0 + (parsed >= 0 ? 0.5 : -0.5));
       } else {
          logWarn("[settings] invalid overscan-crop-to-fill value, using 0\n");
          cropToFillOverscanPercent = 0;
@@ -592,11 +592,10 @@ void loadSettings(void)
             char *end = NULL;
             double parsed = strtod(raw, &end);
             if (end != raw && (*end == 0 || *end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) {
-               int isShift = (item == 1 || item == 3);
-               /* Shift values are stored in half-percent units. Legacy integer
-                * settings are whole percentages and are converted on load. */
-               int fixedValue = (int)(parsed * (isShift ? 2.0 : 1.0) + (parsed >= 0 ? 0.5 : -0.5));
-               int limit = isShift ? 30 : 15;
+               /* All service adjustments use fixed-point tenths of a percent.
+                * Existing integer and half-percent values remain compatible. */
+               int fixedValue = (int)(parsed * 10.0 + (parsed >= 0 ? 0.5 : -0.5));
+               int limit = 150;
                if (fixedValue < -limit) fixedValue = -limit;
                if (fixedValue > limit) fixedValue = limit;
                serviceAdjustments[mode][item] = fixedValue;
@@ -865,42 +864,40 @@ int setEnable1080p60(int enabled)
 int getOverscanPercent(void) { return overscanPercent; }
 int getCropToFillOverscanPercent(void) { return cropToFillOverscanPercent; }
 
-int setCropToFillOverscanPercent(int percent)
+static int persistServicePercent(const char *key, int value)
 {
-   if (percent < -15) percent = -15;
-   if (percent > 15) percent = 15;
-   if (percent == cropToFillOverscanPercent) return 0;
-
-   char value[8];
-   int length = snprintf(value, sizeof value, "%d", percent);
-   if (length <= 0 || length >= (int)sizeof value ||
-       rewriteSettingKey(SETTINGS_PATH, "overscan-crop-to-fill", value) != 0) {
-      logWarn("[settings] could not persist overscan-crop-to-fill=%d\n", percent);
+   char formatted[16];
+   int magnitude = value < 0 ? -value : value;
+   int length = snprintf(formatted, sizeof formatted, "%s%d.%d", value < 0 ? "-" : "",
+                         magnitude / 10, magnitude % 10);
+   if (length <= 0 || length >= (int)sizeof formatted ||
+       rewriteSettingKey(SETTINGS_PATH, key, formatted) != 0) {
+      logWarn("[settings] could not persist %s=%s\n", key, formatted);
       return -1;
    }
+   return 0;
+}
 
+int setCropToFillOverscanPercent(int percent)
+{
+   if (percent < -150) percent = -150;
+   if (percent > 150) percent = 150;
+   if (percent == cropToFillOverscanPercent) return 0;
+   if (persistServicePercent("overscan-crop-to-fill", percent) != 0) return -1;
    cropToFillOverscanPercent = percent;
-   logInfo("[settings] overscan-crop-to-fill set to %d%%\n", percent);
+   logInfo("[settings] overscan-crop-to-fill set to %d.%d%%\n", percent / 10, percent < 0 ? -(percent % 10) : percent % 10);
    return 0;
 }
 
 int setOverscanPercent(int percent)
 {
-   if (percent < -15) percent = -15;
-   if (percent > 15) percent = 15;
+   if (percent < -150) percent = -150;
+   if (percent > 150) percent = 150;
    if (percent == overscanPercent) return 0;
-
-   char value[8];
-   int length = snprintf(value, sizeof value, "%d", percent);
-   if (length <= 0 || length >= (int)sizeof value ||
-       rewriteSettingKey(SETTINGS_PATH, "overscan", value) != 0) {
-      logWarn("[settings] could not persist overscan=%d\n", percent);
-      return -1;
-   }
-
+   if (persistServicePercent("overscan", percent) != 0) return -1;
    overscanPercent = percent;
    setGfxOverscan(overscanPercent);
-   logInfo("[settings] overscan set to %d%%\n", overscanPercent);
+   logInfo("[settings] overscan set to %d.%d%%\n", percent / 10, percent < 0 ? -(percent % 10) : percent % 10);
    return 0;
 }
 
@@ -913,31 +910,18 @@ int getServiceAdjustment(int cropToFill, int item)
 int setServiceAdjustment(int cropToFill, int item, int percent)
 {
    if (cropToFill < 0 || cropToFill > 1 || item < 0 || item > 3) return -1;
-   int isShift = (item == 1 || item == 3);
-   int limit = isShift ? 30 : 15;
-   if (percent < -limit) percent = -limit;
-   if (percent > limit) percent = limit;
+   if (percent < -150) percent = -150;
+   if (percent > 150) percent = 150;
    if (percent == serviceAdjustments[cropToFill][item]) return 0;
-   char value[8];
-   int magnitude = percent < 0 ? -percent : percent;
-   int length = isShift ? snprintf(value, sizeof value, "%s%d.%d", percent < 0 ? "-" : "",
-                                   magnitude / 2, magnitude % 2 ? 5 : 0)
-                        : snprintf(value, sizeof value, "%d", percent);
    const char *key = SERVICE_ADJUSTMENT_KEYS[cropToFill][item];
-   if (length <= 0 || length >= (int)sizeof value || rewriteSettingKey(SETTINGS_PATH, key, value) != 0) {
-      logWarn("[settings] could not persist %s=%d\n", key, percent);
-      return -1;
-   }
+   if (persistServicePercent(key, percent) != 0) return -1;
    serviceAdjustments[cropToFill][item] = percent;
    if (!cropToFill)
       setGfxServiceTransform(serviceAdjustments[0][0], serviceAdjustments[0][1],
                              serviceAdjustments[0][2], serviceAdjustments[0][3]);
-   if (isShift) {
-      int magnitude = percent < 0 ? -percent : percent;
-      logInfo("[settings] %s set to %s%d.%d%%\n", key, percent < 0 ? "-" : "",
-              magnitude / 2, magnitude % 2 ? 5 : 0);
-   } else
-      logInfo("[settings] %s set to %d%%\n", key, percent);
+   logInfo("[settings] %s set to %s%d.%d%%\n", key, percent < 0 ? "-" : "+",
+           (percent < 0 ? -percent : percent) / 10,
+           (percent < 0 ? -percent : percent) % 10);
    return 0;
 }
 

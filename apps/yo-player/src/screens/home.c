@@ -2299,13 +2299,18 @@ static void updateSettingsPanel(void)
             return;
          }
          static const int displayToSetting[10] = { 0, 2, 3, 4, 5, 1, 6, 7, 8, 9 };
+         if (isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_DOWN))) {
+            home.serviceMenuSelected = (home.serviceMenuSelected + 1) % 10;
+            serviceValueRepeat.timer = sys_time_get_system_time(); serviceValueRepeat.repeats = 0;
+            return;
+         }
+         if (isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_UP))) {
+            home.serviceMenuSelected = (home.serviceMenuSelected + 9) % 10;
+            serviceValueRepeat.timer = sys_time_get_system_time(); serviceValueRepeat.repeats = 0;
+            return;
+         }
          int setting = displayToSetting[home.serviceMenuSelected];
-         /* UP/DOWN are also value controls for the two vertical rows; all rows
-          * continue to accept LEFT/RIGHT while editing. */
-         int verticalAdjustment = (setting == 2 || setting == 3 || setting == 6 || setting == 7);
-         int delta = verticalAdjustment && isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_UP)) ? 1 :
-                     verticalAdjustment && isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_DOWN)) ? -1 :
-                     isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
+         int delta = isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_LEFT)) ? -1 :
                      isServiceValueRepeatDue(&serviceValueRepeat, getPadButtonState(PAD_BTN_RIGHT)) ? 1 : 0;
          if (delta) {
             int rc;
@@ -2863,13 +2868,9 @@ static void drawHomeServiceMenu(void)
       int value = setting == 0 ? getOverscanPercent() :
          setting == 1 ? getCropToFillOverscanPercent() :
          getServiceAdjustment(setting >= 6, setting >= 6 ? setting - 6 : setting - 2);
-      if (setting == 3 || setting == 5 || setting == 7 || setting == 9) {
-         int magnitude = value < 0 ? -value : value;
-         snprintf(values[i], sizeof values[i], "%s%d%s", value < 0 ? "-" : "+",
-                  magnitude / 2, magnitude % 2 ? ".5" : "");
-      } else {
-         snprintf(values[i], sizeof values[i], "%+d", value);
-      }
+      int magnitude = value < 0 ? -value : value;
+      snprintf(values[i], sizeof values[i], "%s%d.%d", value < 0 ? "-" : "+",
+               magnitude / 10, magnitude % 10);
       setLabelIfChanged(&homeServiceLabels[i], names[i]);
       setLabelIfChanged(&homeServiceValues[i], values[i]);
       refreshLabelScale(&homeServiceLabels[i]);
@@ -2962,48 +2963,76 @@ static void drawHomeServiceMenu(void)
 
 static void drawHomeServiceCalibrationOverlay(void)
 {
-   /* This is a navigation-only alignment aid, not part of the playback HUD.
-    * It is intentionally shown only during value editing in the home Service Menu. */
-   /* Calibration guides are drawn only while editing the navigation Service Menu.
-    * Dimensions are proportional to the virtual canvas height, so the guides keep
-    * the same physical proportions in both 4:3 and 16:9 modes. */
+   static const int displayToSetting[10] = { 0, 2, 3, 4, 5, 1, 6, 7, 8, 9 };
+   int setting = displayToSetting[home.serviceMenuSelected];
+   int cropGuide = setting == 1 || setting >= 6;
    int thickness = (home.screenH * 8 + 174) / 348;
    int corner = (home.screenH * 48 + 174) / 348;
    if (thickness < 4) thickness = 4;
    if (corner < thickness * 3) corner = thickness * 3;
    if (corner > home.screenW / 3) corner = home.screenW / 3;
 
-   const uint32_t color = 0xFFFFFFFF;
-   int centerX = (home.screenW - thickness) / 2;
-   int centerY = (home.screenH - thickness) / 2;
+   if (!cropGuide) {
+      const uint32_t color = 0xFFFFFFFF;
+      int centerX = (home.screenW - thickness) / 2;
+      int centerY = (home.screenH - thickness) / 2;
+      fillGfxRectangleFixed(0, centerY, home.screenW, thickness, color);
+      fillGfxRectangleFixed(centerX, 0, thickness, home.screenH, color);
+      fillGfxRectangleFixed(0, 0, corner, thickness, color);
+      fillGfxRectangleFixed(0, 0, thickness, corner, color);
+      fillGfxRectangleFixed(home.screenW - corner, 0, corner, thickness, color);
+      fillGfxRectangleFixed(home.screenW - thickness, 0, thickness, corner, color);
+      fillGfxRectangleFixed(0, home.screenH - thickness, corner, thickness, color);
+      fillGfxRectangleFixed(0, home.screenH - corner, thickness, corner, color);
+      fillGfxRectangleFixed(home.screenW - corner, home.screenH - thickness, corner, thickness, color);
+      fillGfxRectangleFixed(home.screenW - thickness, home.screenH - corner, thickness, corner, color);
+      return;
+   }
 
-   /* Center crosshair: full-width and full-height, with transparent surroundings. */
-   fillGfxRectangleFixed(0, centerY, home.screenW, thickness, color);
-   fillGfxRectangleFixed(centerX, 0, thickness, home.screenH, color);
+   /* Draw Crop-to-Fill guides in an untransformed viewport. The preview uses
+    * the complete Crop-to-Fill configuration for every crop setting, including
+    * Crop Overscan, so the reference frame never jumps when changing rows. */
+   int va = getServiceAdjustment(1, 0);
+   int vs = getServiceAdjustment(1, 1);
+   int ha = getServiceAdjustment(1, 2);
+   int hs = getServiceAdjustment(1, 3);
+   float base = 1.0f + (float)getCropToFillOverscanPercent() * 0.001f;
+   float sx = base * (1.0f + (float)ha * 0.001f);
+   float sy = base * (1.0f + (float)va * 0.001f);
+   float cx = home.screenW * (0.5f + (float)hs * 0.001f);
+   float cy = home.screenH * (0.5f - (float)vs * 0.001f);
+   int left = (int)(cx - home.screenW * sx * 0.5f + 0.5f);
+   int right = (int)(cx + home.screenW * sx * 0.5f + 0.5f);
+   int top = (int)(cy - home.screenH * sy * 0.5f + 0.5f);
+   int bottom = (int)(cy + home.screenH * sy * 0.5f + 0.5f);
+   int midX = (left + right) / 2, midY = (top + bottom) / 2;
 
-   /* Equal-length L markers at all four application-window corners. */
-   fillGfxRectangleFixed(0, 0, corner, thickness, color);
-   fillGfxRectangleFixed(0, 0, thickness, corner, color);
+   /* Temporarily remove the normal-image viewport transform. Otherwise the
+    * crop values are applied once to these coordinates and again by the GPU. */
+   setGfxOverscan(0);
+   setGfxServiceTransform(0, 0, 0, 0);
+   const uint32_t color = 0xFFC0C0C0;
+   fillGfxRectangleFixed(left, midY - thickness / 2, right - left, thickness, color);
+   fillGfxRectangleFixed(midX - thickness / 2, top, thickness, bottom - top, color);
+   fillGfxRectangleFixed(left, top, corner, thickness, color);
+   fillGfxRectangleFixed(left, top, thickness, corner, color);
+   fillGfxRectangleFixed(right - corner, top, corner, thickness, color);
+   fillGfxRectangleFixed(right - thickness, top, thickness, corner, color);
+   fillGfxRectangleFixed(left, bottom - thickness, corner, thickness, color);
+   fillGfxRectangleFixed(left, bottom - corner, thickness, corner, color);
+   fillGfxRectangleFixed(right - corner, bottom - thickness, corner, thickness, color);
+   fillGfxRectangleFixed(right - thickness, bottom - corner, thickness, corner, color);
 
-   fillGfxRectangleFixed(home.screenW - corner, 0, corner, thickness, color);
-   fillGfxRectangleFixed(home.screenW - thickness, 0, thickness, corner, color);
-
-   fillGfxRectangleFixed(0, home.screenH - thickness, corner, thickness, color);
-   fillGfxRectangleFixed(0, home.screenH - corner, thickness, corner, color);
-
-   fillGfxRectangleFixed(home.screenW - corner, home.screenH - thickness, corner, thickness, color);
-   fillGfxRectangleFixed(home.screenW - thickness, home.screenH - corner, thickness, corner, color);
+   /* Restore the normal-image transform used by the home screen. */
+   setGfxOverscan(getOverscanPercent());
+   setGfxServiceTransform(getServiceAdjustment(0, 0), getServiceAdjustment(0, 1),
+                          getServiceAdjustment(0, 2), getServiceAdjustment(0, 3));
 }
 
-static void formatHomeServiceValue(char *out, size_t outSize, int setting, int value)
+static void formatHomeServiceValue(char *out, size_t outSize, int value)
 {
-   if (setting == 3 || setting == 5 || setting == 7 || setting == 9) {
-      int magnitude = value < 0 ? -value : value;
-      snprintf(out, outSize, "%s%d%s", value < 0 ? "-" : "+", magnitude / 2,
-               magnitude % 2 ? ".5" : "");
-   } else {
-      snprintf(out, outSize, "%+d", value);
-   }
+   int magnitude = value < 0 ? -value : value;
+   snprintf(out, outSize, "%s%d.%d", value < 0 ? "-" : "+", magnitude / 10, magnitude % 10);
 }
 
 static void drawHomeServiceEditHud(void)
@@ -3019,7 +3048,7 @@ static void drawHomeServiceEditHud(void)
       getServiceAdjustment(setting >= 6, setting >= 6 ? setting - 6 : setting - 2);
    char text[96];
    char formattedValue[16];
-   formatHomeServiceValue(formattedValue, sizeof formattedValue, setting, value);
+   formatHomeServiceValue(formattedValue, sizeof formattedValue, value);
    snprintf(text, sizeof text, "%s: %s", name, formattedValue);
    setLabelIfChanged(&serviceMenuEditLabel, text);
    refreshLabelScale(&serviceMenuEditLabel);

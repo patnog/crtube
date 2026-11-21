@@ -106,21 +106,21 @@ int getGfxOverscan(void)
 
 void setGfxOverscan(int percent)
 {
-   if (percent < -15) percent = -15;
-   if (percent > 15) percent = 15;
+   if (percent < -150) percent = -150;
+   if (percent > 150) percent = 150;
    gfxOverscanPercent = percent;
 }
 
 void setGfxServiceTransform(int verticalAmp, int verticalShift, int horizontalAmp, int horizontalShift)
 {
-   if (verticalAmp < -15) verticalAmp = -15;
-   if (verticalAmp > 15) verticalAmp = 15;
-   if (verticalShift < -30) verticalShift = -30;
-   if (verticalShift > 30) verticalShift = 30;
-   if (horizontalAmp < -15) horizontalAmp = -15;
-   if (horizontalAmp > 15) horizontalAmp = 15;
-   if (horizontalShift < -30) horizontalShift = -30;
-   if (horizontalShift > 30) horizontalShift = 30;
+   if (verticalAmp < -150) verticalAmp = -150;
+   if (verticalAmp > 150) verticalAmp = 150;
+   if (verticalShift < -150) verticalShift = -150;
+   if (verticalShift > 150) verticalShift = 150;
+   if (horizontalAmp < -150) horizontalAmp = -150;
+   if (horizontalAmp > 150) horizontalAmp = 150;
+   if (horizontalShift < -150) horizontalShift = -150;
+   if (horizontalShift > 150) horizontalShift = 150;
    gfxVerticalAmp = verticalAmp;
    gfxVerticalShift = verticalShift;
    gfxHorizontalAmp = horizontalAmp;
@@ -392,12 +392,12 @@ static void setSurface(uint32_t offset, uint32_t pitch, int w, int h, int logica
    // factor and keep the viewport centre fixed, preserving 4:3 / 16:9 geometry.
    // It is enabled only for the real display surface: offscreen render targets
    // remain untouched and are transformed once when their texture reaches screen.
-   float outputScaleX = displayTarget ? (1.0f + (float)gfxOverscanPercent * 0.01f) *
-                         (1.0f + (float)gfxHorizontalAmp * 0.01f) : 1.0f;
-   float outputScaleY = displayTarget ? (1.0f + (float)gfxOverscanPercent * 0.01f) *
-                         (1.0f + (float)gfxVerticalAmp * 0.01f) : 1.0f;
-   float shiftX = displayTarget ? (float)gfxHorizontalShift * 0.005f : 0.0f;
-   float shiftY = displayTarget ? (float)gfxVerticalShift * 0.005f : 0.0f;
+   float outputScaleX = displayTarget ? (1.0f + (float)gfxOverscanPercent * 0.001f) *
+                         (1.0f + (float)gfxHorizontalAmp * 0.001f) : 1.0f;
+   float outputScaleY = displayTarget ? (1.0f + (float)gfxOverscanPercent * 0.001f) *
+                         (1.0f + (float)gfxVerticalAmp * 0.001f) : 1.0f;
+   float shiftX = displayTarget ? (float)gfxHorizontalShift * 0.001f : 0.0f;
+   float shiftY = displayTarget ? (float)gfxVerticalShift * 0.001f : 0.0f;
    float scale[4]  = { w * 0.5f * outputScaleX, h * -0.5f * outputScaleY, 0.5f, 0.0f };
    float offs[4]   = { w * (0.5f + shiftX), h * (0.5f - shiftY), 0.5f, 0.0f };
    cellGcmSetViewport(CTX, 0, 0, w, h, 0.0f, 1.0f, scale, offs);

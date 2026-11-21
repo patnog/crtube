@@ -1,2 +1,2 @@
 #pragma once
-#define CRTUBE_VERSION "2.4.2"
+#define CRTUBE_VERSION "2.4.3"

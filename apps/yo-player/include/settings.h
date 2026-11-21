@@ -75,13 +75,13 @@ const AutoTranslateLanguage *getAutoTranslateLanguageAt(int index);
 const char *getAutoTranslateLanguageName(const char *languageCode);
 int setAutoTranslateLanguage(const char *languageCode);
 
-// Uniform display overscan in percent (-15..+15). Changes are saved immediately to settings.txt.
-int getOverscanPercent(void);
-int setOverscanPercent(int percent);  // 0 on success, -1 if persistence fails
+// Uniform display overscan in tenths of a percent (-150..+150). Changes are saved immediately to settings.txt.
+int getOverscanPercent(void); // fixed-point tenths of a percent
+int setOverscanPercent(int tenthsOfPercent);  // 0 on success, -1 if persistence fails
 // Independent overscan used only while Crop to Fill is enabled.
-int getCropToFillOverscanPercent(void);
-int setCropToFillOverscanPercent(int percent);
-// Service Menu output adjustments: item 0=vertical amp, 1=vertical shift, 2=horizontal amp, 3=horizontal shift. cropToFill selects the independent Crop to Fill set. Values are -15..+15 percent.
+int getCropToFillOverscanPercent(void); // fixed-point tenths of a percent
+int setCropToFillOverscanPercent(int tenthsOfPercent);
+// Service Menu output adjustments: item 0=vertical amp, 1=vertical shift, 2=horizontal amp, 3=horizontal shift. cropToFill selects the independent Crop to Fill set. Values are fixed-point tenths of a percent (-150..+150).
 int getServiceAdjustment(int cropToFill, int item);
 int setServiceAdjustment(int cropToFill, int item, int percent);
 
