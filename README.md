@@ -10,6 +10,74 @@ This repository is a fork of [vortigauntlet/yo-player-signin](https://github.com
 
 > **Project scope:** The application lives in [`apps/yo-player`](apps/yo-player). The repository also retains the shared PS3 libraries, build infrastructure, and tools from the upstream `ps3-dev` project.
 
+## Screenshots
+
+The screenshots below show CRTube's interface across its 4:3 CRT-oriented and 16:9 widescreen layouts, including navigation, settings and playback.
+
+### Navigation — 4:3
+
+The compact two-column video grid is designed for 4:3 displays.
+
+<p align="center">
+  <img src="screenshots/navigation-4-3.png" alt="CRTube home screen in the 4:3 layout" width="640">
+</p>
+
+### Navigation — 16:9
+
+The widescreen layout uses a three-column video grid.
+
+<p align="center">
+  <img src="screenshots/navigation-16-9.png" alt="CRTube home screen in the 16:9 layout" width="854">
+</p>
+
+### Sidebar
+
+Quick access to search, feeds, libraries, settings and application controls.
+
+<p align="center">
+  <img src="screenshots/sidebar.png" alt="CRTube sidebar navigation menu" width="640">
+</p>
+
+### Home settings
+
+Application-wide configuration, including UI scaling, service menu, content region, language and themes.
+
+<p align="center">
+  <img src="screenshots/settings.png" alt="CRTube home settings menu" width="640">
+</p>
+
+### Playback OSD
+
+On-screen playback display with video information, timeline and controller hints.
+
+<p align="center">
+  <img src="screenshots/playback-osd.png" alt="CRTube playback on-screen display" width="640">
+</p>
+
+### Playback options
+
+Per-video options for quality, audio, subtitles, chapters, crop-to-fill and playback settings.
+
+<p align="center">
+  <img src="screenshots/playback-options.png" alt="CRTube playback options menu" width="640">
+</p>
+
+### Search
+
+Search page with recent searches and sorting controls.
+
+<p align="center">
+  <img src="screenshots/search.png" alt="CRTube search page" width="640">
+</p>
+
+### Themes
+
+Built-in themes and the custom theme editor.
+
+<p align="center">
+  <img src="screenshots/themes.png" alt="CRTube theme selection menu" width="640">
+</p>
+
 ## Highlights
 
 - **Optional YouTube account sign-in:** Sign in using YouTube's device authorization flow. Approve the code on a phone or computer; no browser is required on the PS3.
